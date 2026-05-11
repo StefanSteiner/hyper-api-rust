@@ -1,0 +1,37 @@
+# Rust build artifacts
+/target
+
+# Local profiling / benchmarking scratch dirs
+/target-prof
+/bench_ab
+/logs
+
+# Editor / IDE
+/.vscode
+
+# hyperd binary downloaded via `make download-hyperd`
+/.hyperd
+
+# Test artifacts
+test_results/
+**/test_results/
+*.hyper
+hyperd*.log
+
+# Node.js dependencies and build artifacts
+node_modules/
+*.node
+dist/
+
+# npm platform package binaries (built by CI or `make npm-pack`)
+hyperdb-mcp/npm/*/hyperdb-mcp
+hyperdb-mcp/npm/*/hyperdb-mcp.exe
+hyperdb-mcp/npm/*/hyperd
+hyperdb-mcp/npm/*/hyperd.exe
+hyperdb-mcp/npm/**/*.tgz
+hyperdb-api-node/npm/*/hyperd
+hyperdb-api-node/npm/*/hyperd.exe
+*.tgz
+
+# OS cruft
+.DS_Store

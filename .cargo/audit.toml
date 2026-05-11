@@ -1,0 +1,18 @@
+# cargo-audit configuration.
+#
+# Mirrors the `[advisories].ignore` list in deny.toml. Keep the two in sync;
+# each waiver must have the same rationale documented in both files.
+
+[advisories]
+ignore = [
+    # `paste` is unmaintained; macro-only crate pulled transitively by `parquet`
+    # (hyperapi-mcp). No runtime code path, no runtime risk.
+    "RUSTSEC-2024-0436",
+    # `rustls-pemfile` is unmaintained; migration to `rustls-pki-types` tracked
+    # post-1.0. Used by `tonic` and `hyper-client` for loading PEM certs.
+    "RUSTSEC-2025-0134",
+    # `rsa` Marvin Attack — no constant-time fix yet. Used only for outbound
+    # JWT signing in `hyperapi-salesforce`, where timing sidechannels are not
+    # observable to a remote attacker. Threat model does not apply.
+    "RUSTSEC-2023-0071",
+]

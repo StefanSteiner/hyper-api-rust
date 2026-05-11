@@ -1,0 +1,21 @@
+{
+  "name": "hyperdb-api-node-win32-x64-msvc",
+  "version": "0.1.0-rc.1",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "main": "hyperdb-api-node.win32-x64-msvc.node",
+  "files": [
+    "hyperdb-api-node.win32-x64-msvc.node",
+    "hyperd.exe",
+    "LICENSE-HYPERD"
+  ],
+  "description": "hyperdb-api-node native binding for Windows x64 (MSVC)",
+  "license": "MIT OR Apache-2.0",
+  "engines": {
+    "node": ">= 18"
+  }
+}

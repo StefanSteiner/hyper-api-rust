@@ -1,0 +1,157 @@
+name: release
+
+# Tag-triggered publish to crates.io. Stable tags (v0.1.0) mark the
+# GitHub release as latest; pre-release tags (v0.1.0-rc.1) mark it as
+# prerelease so it doesn't show as "Latest release" on the repo home.
+#
+# Publishing is destructive — version numbers on crates.io are
+# permanent. This workflow re-runs the full test matrix before
+# touching crates.io, and publishes crates strictly in dependency
+# order with a small settle delay between each so the index is
+# consistent for downstream crates.
+
+on:
+  push:
+    tags:
+      - "v*.*.*-rc.*"
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.1.0-rc.1). Must already exist."
+        required: true
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  verify:
+    name: verify
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Ensure cargo is on PATH
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Install protobuf (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-verify
+
+      - name: Cache hyperd binary
+        id: hyperd-cache
+        uses: actions/cache@v4
+        with:
+          path: .hyperd
+          key: hyperd-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hyperdb-bootstrap/hyperd-version.toml') }}
+
+      - name: Download hyperd
+        if: steps.hyperd-cache.outputs.cache-hit != 'true'
+        run: cargo run --release -p hyperdb-bootstrap --bin hyperdb-bootstrap -- download
+
+      - name: Workspace tests
+        env:
+          HYPERD_PATH: ${{ github.workspace }}/.hyperd/current
+        run: |
+          cargo test --workspace \
+            --exclude hyperdb-api-node \
+            --exclude hyperdb-bootstrap
+
+      - name: hyperdb-bootstrap tests
+        run: cargo test -p hyperdb-bootstrap
+
+      - name: Verify pinned hyperd release URLs still resolve
+        run: cargo run --release -p hyperdb-bootstrap --bin hyperdb-bootstrap -- verify
+
+  publish:
+    name: publish to crates.io
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install system libraries
+        run: sudo apt-get update -q && sudo apt-get install -y libfontconfig1-dev mold protobuf-compiler
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-publish
+
+      - name: Resolve tag name
+        id: tag
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          TAG="${INPUT_TAG:-$REF_NAME}"
+          # Defense in depth: tags coming from workflow_dispatch are
+          # user-supplied. Enforce a strict `vX.Y.Z` / `vX.Y.Z-rc.N`
+          # shape before letting the name flow into cargo/git commands.
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-(rc|alpha|beta)\.[0-9]+)?$ ]]; then
+            echo "::error::Invalid tag name: $TAG (expected vX.Y.Z or vX.Y.Z-rc.N)" >&2
+            exit 1
+          fi
+          echo "name=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Confirm tag matches workspace version
+        # All publishable crates are in lockstep. Use hyperdb-api-core as
+        # the bellwether (it's the foundation every other crate depends on).
+        env:
+          EXPECTED: ${{ steps.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          ACTUAL=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name=="hyperdb-api-core") | .version')
+          if [[ "$EXPECTED" != "$ACTUAL" ]]; then
+            echo "::error::Tag version ($EXPECTED) does not match hyperdb-api-core Cargo.toml ($ACTUAL). Bump all workspace Cargo.tomls to match the tag before releasing." >&2
+            exit 1
+          fi
+
+      - name: Publish in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          publish() {
+            local crate="$1"
+            echo "::group::Publishing $crate"
+            cargo publish -p "$crate"
+            echo "::endgroup::"
+            # crates.io index propagation: downstream crates' own
+            # `cargo publish` verification step resolves their deps
+            # against the live index. 45s is the empirically-safe
+            # window for small crates.
+            sleep 45
+          }
+          publish hyperdb-api-core
+          publish hyperdb-api-salesforce
+          publish hyperdb-api
+          publish hyperdb-mcp
+          publish hyperdb-bootstrap
+          publish sea-query-hyperdb
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          prerelease: ${{ contains(steps.tag.outputs.name, '-rc.') || contains(steps.tag.outputs.name, '-alpha.') || contains(steps.tag.outputs.name, '-beta.') }}
+          generate_release_notes: true

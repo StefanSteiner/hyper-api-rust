@@ -1,0 +1,38 @@
+{
+  "name": "hyperdb-mcp",
+  "version": "0.1.0-rc.1",
+  "description": "HyperDB MCP server — instant SQL analytics for LLM workflows",
+  "bin": {
+    "hyperdb-mcp": "bin.js"
+  },
+  "optionalDependencies": {
+    "hyperdb-mcp-darwin-arm64": "0.1.0-rc.1",
+    "hyperdb-mcp-darwin-x64": "0.1.0-rc.1",
+    "hyperdb-mcp-linux-x64-gnu": "0.1.0-rc.1",
+    "hyperdb-mcp-win32-x64-msvc": "0.1.0-rc.1"
+  },
+  "files": [
+    "bin.js"
+  ],
+  "keywords": [
+    "hyper",
+    "database",
+    "mcp",
+    "sql",
+    "analytics",
+    "arrow"
+  ],
+  "homepage": "https://github.com/tableau/hyper-api-rust/tree/main/hyperdb-mcp",
+  "bugs": {
+    "url": "https://github.com/tableau/hyper-api-rust/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tableau/hyper-api-rust.git",
+    "directory": "hyperdb-mcp"
+  },
+  "license": "MIT OR Apache-2.0",
+  "engines": {
+    "node": ">= 18"
+  }
+}

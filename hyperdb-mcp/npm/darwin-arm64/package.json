@@ -1,0 +1,21 @@
+{
+  "name": "hyperdb-mcp-darwin-arm64",
+  "version": "0.1.0-rc.1",
+  "description": "HyperDB MCP server binary for macOS ARM64",
+  "os": ["darwin"],
+  "cpu": ["arm64"],
+  "files": [
+    "hyperdb-mcp",
+    "hyperd",
+    "LICENSE-HYPERD"
+  ],
+  "license": "MIT OR Apache-2.0",
+  "engines": {
+    "node": ">= 18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tableau/hyper-api-rust.git",
+    "directory": "hyperdb-mcp"
+  }
+}

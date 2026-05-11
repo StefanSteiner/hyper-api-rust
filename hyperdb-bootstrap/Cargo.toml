@@ -1,0 +1,48 @@
+[package]
+name = "hyperdb-bootstrap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Download and install the hyperd executable from Tableau's Hyper C++ API release packages"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["hyper", "tableau", "hyperd", "bootstrap", "download"]
+categories = ["command-line-utilities", "development-tools"]
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "hyperdb-bootstrap"
+path = "src/bin/hyperdb-bootstrap.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+cli = ["dep:clap", "dep:anyhow", "dep:tracing-subscriber"]
+
+[dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
+zip = { workspace = true }
+sha2 = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+regex = { workspace = true }
+tempfile = { workspace = true }
+tracing = { workspace = true }
+clap = { workspace = true, optional = true }
+anyhow = { workspace = true, optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+
+[lints]
+workspace = true
+
+[build-dependencies]
+serde = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

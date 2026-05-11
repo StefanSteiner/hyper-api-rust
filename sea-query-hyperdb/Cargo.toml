@@ -1,0 +1,18 @@
+[package]
+name = "sea-query-hyperdb"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "HyperDB SQL dialect backend for sea-query"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["database", "hyper", "sql", "sea-query", "query-builder"]
+categories = ["database"]
+
+[lints]
+workspace = true
+
+[dependencies]
+sea-query = "0.32"

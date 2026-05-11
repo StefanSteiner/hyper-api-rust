@@ -1,0 +1,310 @@
+name: npm-build-publish
+
+# Builds hyperdb-mcp and hyperdb-api-node npm packages with bundled
+# hyperd binaries. Triggered after a successful release workflow creates
+# a GitHub release, or manually via workflow_dispatch.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag or branch to build (e.g. v0.1.0). Leave empty for current default branch."
+        required: false
+        default: ""
+  release:
+    types: [published]
+
+concurrency:
+  group: npm-build-publish
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  HYPERD_VERSION: "0.0.25080"
+  HYPERD_BUILD_ID: "r2bfd835b"
+
+jobs:
+  verify-ci:
+    name: verify CI passed
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Check CI status for commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SHA=$(git rev-parse HEAD)
+          echo "Checking CI status for $SHA"
+          STATE=$(gh api "repos/${{ github.repository }}/commits/$SHA/status" --jq '.state')
+          echo "Combined status: $STATE"
+          if [[ "$STATE" != "success" ]]; then
+            echo "::error::CI has not passed for $SHA (state: $STATE). Aborting publish."
+            exit 1
+          fi
+
+  build-npm:
+    name: build-npm (${{ matrix.platform }})
+    needs: verify-ci
+    if: always() && (needs.verify-ci.result == 'success' || needs.verify-ci.result == 'skipped')
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin-arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+            hyperd-slug: macos-arm64
+            hyperd-sha256: "6cec0a90c7e8ddae2b0a623d551cdab4f085b0c6e4655713d6ce164ec20dabc7"
+          # TODO: re-enable when macos-13 runners are more available
+          # - platform: darwin-x64
+          #   os: macos-13
+          #   target: x86_64-apple-darwin
+          #   hyperd-slug: macos-x86_64
+          #   hyperd-sha256: "d5d3dae60ce071aed45e534fb6a4fc6c7edce47e31d664d131af9f76d9b3a2aa"
+          - platform: linux-x64-gnu
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            hyperd-slug: linux-x86_64
+            hyperd-sha256: "50f015ea2991afb9440fc93df0520c1b3a077dab609b010cbe1ce17685f44e20"
+          - platform: win32-x64-msvc
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            hyperd-slug: windows-x86_64
+            hyperd-sha256: "918709daae78effa67bac804f8f6f45deea11056272577b73591590e11019f17"
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.tag || github.event.release.tag_name || github.ref }}
+
+      - name: Install system libraries (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y libfontconfig1-dev mold protobuf-compiler
+
+      - name: Install protobuf (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+
+      - name: Install protobuf (Windows)
+        if: runner.os == 'Windows'
+        run: choco install protoc -y
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: npm-${{ matrix.target }}
+
+      - name: Build hyperdb-mcp
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo build --release --target "$TARGET" -p hyperdb-mcp
+
+      - name: Build hyperdb-api-node
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo build --release --target "$TARGET" -p hyperdb-api-node
+
+      - name: Download and verify hyperd
+        env:
+          SLUG: ${{ matrix.hyperd-slug }}
+          EXPECTED_SHA256: ${{ matrix.hyperd-sha256 }}
+        run: |
+          set -euo pipefail
+          URL="https://downloads.tableau.com/tssoftware/tableauhyperapi-cxx-${SLUG}-release-main.${HYPERD_VERSION}.${HYPERD_BUILD_ID}.zip"
+          echo "Downloading: $URL"
+          curl --fail --silent --show-error --location --output hyperd-archive.zip "$URL"
+          if command -v sha256sum &>/dev/null; then
+            ACTUAL_SHA256=$(sha256sum hyperd-archive.zip | awk '{print $1}')
+          else
+            ACTUAL_SHA256=$(shasum -a 256 hyperd-archive.zip | awk '{print $1}')
+          fi
+          if [[ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]]; then
+            echo "::error::SHA256 mismatch: expected $EXPECTED_SHA256, got $ACTUAL_SHA256"
+            exit 1
+          fi
+          echo "SHA256 verified: $ACTUAL_SHA256"
+
+      - name: Extract hyperd from archive
+        run: |
+          set -euo pipefail
+          mkdir -p hyperd-extracted
+          unzip -q hyperd-archive.zip -d hyperd-raw
+          # Find the lib/hyper or bin/hyper directory (matches extract.rs logic)
+          HYPER_DIR=$(find hyperd-raw -type d -name "hyper" -path "*/lib/hyper" -o -type d -name "hyper" -path "*/bin/hyper" | head -1)
+          if [[ -z "$HYPER_DIR" ]]; then
+            echo "::error::Could not find lib/hyper or bin/hyper in archive"
+            exit 1
+          fi
+          cp -R "$HYPER_DIR"/* hyperd-extracted/
+          ls -la hyperd-extracted/
+          # Verify hyperd binary exists
+          if [[ -f hyperd-extracted/hyperd ]] || [[ -f hyperd-extracted/hyperd.exe ]]; then
+            echo "hyperd binary found"
+          else
+            echo "::error::hyperd binary not found in extracted archive"
+            exit 1
+          fi
+
+      - name: Extract LICENSE from hyperd archive
+        run: |
+          set -euo pipefail
+          LICENSE_FILE=$(find hyperd-raw -iname "LICENSE*" -o -iname "NOTICE*" | head -1)
+          if [[ -n "$LICENSE_FILE" ]]; then
+            cp "$LICENSE_FILE" LICENSE-HYPERD
+          else
+            cat > LICENSE-HYPERD << 'LICEOF'
+          The hyperd binary is part of the Tableau Hyper API, Copyright Salesforce, Inc.
+          Licensed under the Apache License, Version 2.0.
+          See https://www.apache.org/licenses/LICENSE-2.0
+          LICEOF
+          fi
+
+      - name: Assemble hyperdb-mcp npm platform package
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          DEST="hyperdb-mcp/npm/${PLATFORM}"
+          EXE=""
+          HYPERD_BIN="hyperd"
+          if [[ "$PLATFORM" == "win32-x64-msvc" ]]; then
+            EXE=".exe"
+            HYPERD_BIN="hyperd.exe"
+          fi
+          cp "target/${TARGET}/release/hyperdb-mcp${EXE}" "$DEST/"
+          cp "hyperd-extracted/${HYPERD_BIN}" "$DEST/"
+          # Copy shared libraries that hyperd needs
+          find hyperd-extracted -name "*.so*" -o -name "*.dylib" -o -name "*.dll" | while read f; do
+            cp "$f" "$DEST/"
+          done
+          cp LICENSE-HYPERD "$DEST/"
+          chmod +x "$DEST/hyperdb-mcp${EXE}" "$DEST/${HYPERD_BIN}" 2>/dev/null || true
+          echo "Contents of $DEST:"
+          ls -la "$DEST/"
+
+      - name: Assemble hyperdb-api-node npm platform package
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          DEST="hyperdb-api-node/npm/${PLATFORM}"
+          EXE=""
+          HYPERD_BIN="hyperd"
+          if [[ "$PLATFORM" == "win32-x64-msvc" ]]; then
+            EXE=".exe"
+            HYPERD_BIN="hyperd.exe"
+          fi
+          # Copy the .node native addon
+          node hyperdb-api-node/scripts/ci-copy-artifact.js "$TARGET"
+          # Copy hyperd + shared libraries
+          cp "hyperd-extracted/${HYPERD_BIN}" "$DEST/"
+          find hyperd-extracted -name "*.so*" -o -name "*.dylib" -o -name "*.dll" | while read f; do
+            cp "$f" "$DEST/"
+          done
+          cp LICENSE-HYPERD "$DEST/"
+          chmod +x "$DEST/${HYPERD_BIN}" 2>/dev/null || true
+          echo "Contents of $DEST:"
+          ls -la "$DEST/"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: npm-${{ matrix.platform }}
+          path: |
+            hyperdb-mcp/npm/${{ matrix.platform }}/
+            hyperdb-api-node/npm/${{ matrix.platform }}/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-npm:
+    name: publish to npm
+    needs: build-npm
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.tag || github.event.release.tag_name || github.ref }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: npm-*
+          merge-multiple: true
+
+      - name: Determine npm dist-tag
+        id: dist-tag
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./hyperdb-mcp/npm/package.json').version")
+          if [[ "$VERSION" == *-rc.* ]]; then
+            echo "tag=rc" >> "$GITHUB_OUTPUT"
+          elif [[ "$VERSION" == *-alpha.* ]]; then
+            echo "tag=alpha" >> "$GITHUB_OUTPUT"
+          elif [[ "$VERSION" == *-beta.* ]]; then
+            echo "tag=beta" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=latest" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Publishing with dist-tag: $(grep tag "$GITHUB_OUTPUT" | tail -1)"
+
+      - name: Publish hyperdb-mcp platform packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TAG: ${{ steps.dist-tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          for dir in hyperdb-mcp/npm/darwin-arm64 hyperdb-mcp/npm/linux-x64-gnu hyperdb-mcp/npm/win32-x64-msvc; do
+            echo "::group::Publishing $(basename $dir)"
+            cd "$dir"
+            npm publish --access public --tag "$NPM_TAG"
+            cd -
+            echo "::endgroup::"
+          done
+
+      - name: Publish hyperdb-mcp main package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TAG: ${{ steps.dist-tag.outputs.tag }}
+        run: |
+          cd hyperdb-mcp/npm
+          npm publish --access public --tag "$NPM_TAG"
+
+      - name: Publish hyperdb-api-node platform packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TAG: ${{ steps.dist-tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          for dir in hyperdb-api-node/npm/darwin-arm64 hyperdb-api-node/npm/linux-x64-gnu hyperdb-api-node/npm/win32-x64-msvc; do
+            echo "::group::Publishing $(basename $dir)"
+            cd "$dir"
+            npm publish --access public --tag "$NPM_TAG"
+            cd -
+            echo "::endgroup::"
+          done
+
+      - name: Publish hyperdb-api-node main package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TAG: ${{ steps.dist-tag.outputs.tag }}
+        run: |
+          cd hyperdb-api-node
+          npm publish --access public --tag "$NPM_TAG"

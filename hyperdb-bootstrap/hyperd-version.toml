@@ -1,0 +1,15 @@
+# Pinned Hyper C++ API release used by hyperd-bootstrap.
+#
+# Bump these values (and sha256s) when upgrading. Contributors without
+# an override get this exact release, so reproducibility depends on it.
+version  = "0.0.25080"
+build_id = "r2bfd835b"
+
+# sha256 of each platform's .zip. Omit a platform to skip verification
+# for that platform (not recommended). Compute with:
+#   shasum -a 256 tableauhyperapi-cxx-<platform>-release-main.<version>.<build_id>.zip
+[sha256]
+"macos-arm64"    = "6cec0a90c7e8ddae2b0a623d551cdab4f085b0c6e4655713d6ce164ec20dabc7"
+"macos-x86_64"   = "d5d3dae60ce071aed45e534fb6a4fc6c7edce47e31d664d131af9f76d9b3a2aa"
+"linux-x86_64"   = "50f015ea2991afb9440fc93df0520c1b3a077dab609b010cbe1ce17685f44e20"
+"windows-x86_64" = "918709daae78effa67bac804f8f6f45deea11056272577b73591590e11019f17"

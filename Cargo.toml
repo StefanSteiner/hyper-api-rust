@@ -1,0 +1,131 @@
+[workspace]
+resolver = "2"
+members = [
+    "hyperdb-api-core",
+    "hyperdb-api",
+    "hyperdb-api-node",
+    "hyperdb-api-salesforce",
+    "hyperdb-mcp",
+    "hyperdb-bootstrap",
+    "sea-query-hyperdb",
+]
+
+[workspace.package]
+version = "0.1.0-rc.1"
+edition = "2021"
+rust-version = "1.81"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tableau/hyper-api-rust"
+homepage = "https://github.com/tableau/hyper-api-rust"
+
+[workspace.dependencies]
+base64 = "0.22"
+byteorder = "1.5"
+bytes = "1.5"
+geo-types = "0.7"
+hmac = "0.12"
+memchr = "2.7"
+pbkdf2 = "0.12"
+prost = "0.14"
+prost-types = "0.14"
+rand = "0.10"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2.0"
+sha2 = "0.10"
+socket2 = "0.6"
+sysinfo = "0.38"
+tempfile = "3.10"
+thiserror = "2.0"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros"] }
+tonic = { version = "0.14", features = ["tls-ring", "tls-webpki-roots"] }
+tonic-build = "0.14"
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"
+tracing = "0.1"
+webpki-roots = "1.0"
+zeroize = "1.8"
+# Salesforce OAuth dependencies
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "form"] }
+jsonwebtoken = { version = "10", default-features = false, features = ["use_pem", "rust_crypto"] }
+rsa = { version = "0.9", features = ["pem"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+url = "2.5"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+# hyperd-bootstrap dependencies
+zip = { version = "8", default-features = false, features = ["deflate"] }
+toml = "1.1"
+clap = { version = "4", features = ["derive"] }
+regex = "1"
+anyhow = "1"
+
+# Lint configuration, applied to every workspace crate via `[lints] workspace = true`.
+# Aligned with the Microsoft Pragmatic Rust Guidelines
+# (https://microsoft.github.io/rust-guidelines). See docs/RUST_GUIDELINES.md for the
+# full mapping between individual lints and upstream guideline IDs.
+[workspace.lints.rust]
+unexpected_cfgs               = { level = "warn", check-cfg = ['cfg(kani)'] }
+unsafe_op_in_unsafe_fn        = "deny"
+missing_docs                  = "warn"
+missing_debug_implementations = "warn"
+ambiguous_negative_literals   = "warn"
+redundant_imports             = "warn"
+redundant_lifetimes           = "warn"
+trivial_numeric_casts         = "warn"
+unused_lifetimes              = "warn"
+unreachable_pub               = "warn"
+
+[workspace.lints.clippy]
+correctness = { level = "deny", priority = -1 }
+suspicious  = { level = "deny", priority = -1 }
+perf        = { level = "warn", priority = -1 }
+style       = { level = "warn", priority = -1 }
+complexity  = { level = "warn", priority = -1 }
+pedantic    = { level = "warn", priority = -1 }
+cargo       = { level = "warn", priority = -1 }
+
+# Integer-cast discipline — matches the AGENTS.md rule.
+cast_possible_truncation = "deny"
+cast_sign_loss           = "deny"
+cast_possible_wrap       = "deny"
+cast_lossless            = "warn"
+cast_precision_loss      = "warn"
+as_underscore            = "warn"
+
+# Safety discipline.
+undocumented_unsafe_blocks = "deny"
+unnecessary_safety_comment = "warn"
+unnecessary_safety_doc     = "warn"
+
+# Lint-suppression discipline.
+allow_attributes_without_reason = "warn"
+
+# Shared-ownership idioms.
+clone_on_ref_ptr = "warn"
+
+# Known-noisy pedantic lints we intentionally relax. Revisit post-1.0.
+#
+# Microsoft's Pragmatic Rust Guidelines explicitly permit per-lint opt-outs
+# when a pedantic lint proves noisy in practice: "Undesired lints (e.g.,
+# numeric casts) can be opted back out of on a case-by-case basis."
+# We keep documentation-quality lints (`missing_errors_doc`,
+# `missing_panics_doc`, `missing_debug_implementations`) at `warn` to align
+# with M-CANONICAL-DOCS; they block release at `-D warnings` time, and the
+# remaining work is tracked for a post-1.0 docs pass.
+module_name_repetitions   = "allow"
+too_many_lines            = "allow"
+doc_markdown              = "allow"  # cosmetic: backticking every type name in rustdoc is churn
+must_use_candidate        = "allow"  # API-judgment call, not mechanical
+unreadable_literal        = "allow"  # cosmetic: digit separators on wire-format constants
+items_after_statements    = "allow"  # stylistic: benchmarks and tests use local helpers
+match_same_arms           = "allow"  # match readability; consolidating can hide semantic grouping
+match_wildcard_for_single_variants = "allow"  # cfg-conditional enum variants make wildcards cross-platform correct
+missing_errors_doc        = "warn"
+missing_panics_doc        = "warn"
+
+# Transitive dependency collisions from the workspace resolver (rand 0.8/0.9,
+# thiserror 1/2, windows_* 0.48/0.52/0.53, etc.) are surfaced per-crate by
+# `clippy::cargo`. They are not code-fixable without a dep-graph audit.
+# Tracked post-1.0; Microsoft guidelines explicitly permit opt-outs on the
+# `cargo` group.
+multiple_crate_versions   = { level = "allow", priority = 1 }

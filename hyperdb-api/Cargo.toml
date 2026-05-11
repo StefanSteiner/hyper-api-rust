@@ -1,0 +1,96 @@
+[package]
+name = "hyperdb-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Pure Rust API for Hyper database"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["database", "hyper", "postgres", "arrow"]
+categories = ["database"]
+autobenches = false
+
+[dependencies]
+hyperdb-api-core = { path = "../hyperdb-api-core", version = "=0.1.0-rc.1" }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+# Arrow for result parsing (used by both TCP and gRPC transports)
+arrow = { version = "58", default-features = false, features = ["ipc"] }
+# SmallVec for memory-efficient collections that are typically small
+smallvec = "1.13"
+# Deadpool - async connection pool
+deadpool = { version = "0.13" }
+# tokio sync primitives — already present transitively via hyperdb-api-core's
+# async TCP client; declared here for the pool's first-connection mutex.
+tokio = { workspace = true, features = ["sync"] }
+# Serde JSON - for query stats log parsing
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = { workspace = true }
+libc = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1", features = ["full"] }
+rand = { workspace = true }
+serde = { workspace = true }
+sysinfo = { workspace = true }
+
+# Stress test integration test
+[[test]]
+name = "stress_test"
+path = "tests/stress_test_main.rs"
+harness = true
+
+# Additional examples (in additional_examples/ subdirectory)
+
+[[example]]
+name = "async_usage"
+path = "examples/additional_examples/async_usage.rs"
+
+[[example]]
+name = "threaded_inserter"
+path = "examples/additional_examples/threaded_inserter.rs"
+
+[[example]]
+name = "arrow"
+path = "examples/additional_examples/arrow.rs"
+
+[[example]]
+name = "grpc_query"
+path = "examples/additional_examples/grpc_query.rs"
+
+[[example]]
+name = "connection_pool"
+path = "examples/additional_examples/connection_pool.rs"
+
+[[example]]
+name = "transactions"
+path = "examples/additional_examples/transactions.rs"
+
+# Benchmarks (in benches/ subdirectory - registered as examples for easy `cargo run`)
+[[example]]
+name = "benchmark"
+path = "benches/benchmark.rs"
+
+[[example]]
+name = "arrow_batching_benchmark"
+path = "benches/arrow_batching_benchmark.rs"
+
+[[example]]
+name = "grpc_benchmark_tests"
+path = "benches/grpc_benchmark_tests.rs"
+
+[[example]]
+name = "async_parallel_benchmark"
+path = "benches/async_parallel_benchmark.rs"
+
+[[example]]
+name = "benchmark_suite"
+path = "benches/benchmark_suite.rs"

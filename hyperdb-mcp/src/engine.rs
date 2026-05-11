@@ -1,0 +1,1112 @@
+// Copyright (c) 2026, Salesforce, Inc. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! Core database engine that owns the `HyperProcess` and its connection.
+//!
+//! The [`Engine`] is the single point of contact with the Hyper database. It
+//! manages process startup, connection lifecycle, table DDL, query execution,
+//! and workspace metadata. All higher-level modules (ingest, export, server)
+//! operate through an `&Engine` reference.
+//!
+//! # Lazy Initialization and Connection Recovery
+//!
+//! The engine is lazily initialized by [`crate::server::HyperMcpServer`] on the
+//! first tool call (not during MCP handshake). This keeps the `initialize`
+//! response fast and avoids starting `hyperd` if the client never calls a tool.
+//!
+//! If the connection to `hyperd` is lost (crash, broken pipe, wire-protocol
+//! desync), the server's `crate::server::HyperMcpServer::with_engine` wrapper
+//! detects the [`crate::error::ErrorCode::ConnectionLost`] error, drops the
+//! engine, and transparently re-creates it on the next call. This auto-reconnect
+//! path covers both transport-level failures and the `"desynchronized"` state
+//! surfaced by the `hyper-client` layer's bounded drain.
+//!
+//! # Workspace Modes
+//!
+//! - **Persistent** — caller supplies a path via `--workspace`; the `.hyper`
+//!   file survives across sessions. Tables can be built up incrementally and
+//!   exported to Tableau Desktop.
+//! - **Ephemeral** — a temp directory is created per process; everything is
+//!   discarded when the server exits. No configuration needed.
+//!
+//! # Sync Calls in an Async Server
+//!
+//! All `Engine` methods are synchronous (blocking). The MCP server runs on a
+//! tokio runtime, but `hyperd` communication goes through the `hyperdb-api` crate's
+//! blocking `Connection` API. The `rmcp` framework spawns tool handlers on its
+//! own task pool, so blocking calls do not starve the async event loop. A future
+//! optimization could use `spawn_blocking` or an async connection API, but the
+//! current approach is correct and simple.
+
+use crate::error::{ErrorCode, McpError};
+use crate::schema::ColumnSchema;
+use hyperdb_api::{Catalog, Connection, CreateMode, HyperProcess, Parameters, SqlType};
+use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
+
+/// Owns a running `HyperProcess` and the single `Connection` to its workspace
+/// `.hyper` file. All SQL execution flows through this struct.
+///
+/// Two workspace modes are supported:
+/// - **Persistent** — caller supplies a path; the `.hyper` file survives across
+///   sessions so tables can be built up incrementally.
+/// - **Ephemeral** — a temp directory is created per process; everything is
+///   discarded when the server exits.
+#[derive(Debug)]
+pub struct Engine {
+    hyper: HyperProcess,
+    connection: Connection,
+    workspace_path: PathBuf,
+    log_dir: PathBuf,
+    is_persistent: bool,
+}
+
+impl Engine {
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "call-site ergonomics: function consumes logically-owned parameters, refactoring signatures is not worth per-site churn"
+    )]
+    /// Create a new Engine. If `workspace_path` is Some, use that path (persistent mode).
+    /// If None, use a temp file (ephemeral mode).
+    ///
+    /// Logs from `hyperd` are written to the directory returned by
+    /// [`resolve_log_dir`]. The same directory should be used by the MCP
+    /// binary for its own client-side log so operators can find everything
+    /// in one place when debugging.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`ErrorCode::PermissionDenied`] if the workspace parent
+    ///   directory or the log directory cannot be created.
+    /// - Returns [`ErrorCode::InternalError`] if the ephemeral temp
+    ///   directory cannot be created, if the `public` schema bootstrap
+    ///   fails, or if the initial connection to `hyperd` fails.
+    /// - Returns [`ErrorCode::HyperdNotFound`] when [`HyperProcess::new`]
+    ///   reports the `hyperd` executable is missing or unreachable via
+    ///   `HYPERD_PATH`.
+    pub fn new(workspace_path: Option<String>) -> Result<Self, McpError> {
+        let (path, is_persistent) = if let Some(ref p) = workspace_path {
+            let path = PathBuf::from(shellexpand_tilde(p));
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    McpError::new(
+                        ErrorCode::PermissionDenied,
+                        format!("Cannot create workspace directory: {e}"),
+                    )
+                })?;
+            }
+            (path, true)
+        } else {
+            let dir = std::env::temp_dir().join(format!("hyperdb-mcp-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).map_err(|e| {
+                McpError::new(
+                    ErrorCode::InternalError,
+                    format!("Cannot create temp directory: {e}"),
+                )
+            })?;
+            (dir.join("workspace.hyper"), false)
+        };
+
+        let log_dir = resolve_log_dir(workspace_path.as_deref());
+        std::fs::create_dir_all(&log_dir).map_err(|e| {
+            McpError::new(
+                ErrorCode::PermissionDenied,
+                format!("Cannot create log directory {}: {e}", log_dir.display()),
+            )
+        })?;
+
+        let mut params = Parameters::new();
+        params.set("log_file_max_count", "2");
+        params.set("log_file_size_limit", "100M");
+        params.set("log_dir", log_dir.to_string_lossy().as_ref());
+
+        let hyper = HyperProcess::new(None, Some(&params)).map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("hyperd") || msg.contains("HYPERD_PATH") || msg.contains("No such file")
+            {
+                McpError::new(ErrorCode::HyperdNotFound, msg)
+            } else {
+                McpError::new(ErrorCode::InternalError, msg)
+            }
+        })?;
+
+        let connection =
+            Connection::new(&hyper, &path, CreateMode::CreateIfNotExists).map_err(|e| {
+                McpError::new(ErrorCode::InternalError, format!("Failed to connect: {e}"))
+            })?;
+
+        // Ensure the `public` schema exists in the workspace database so that
+        // `load_file`, `load_data`, and unqualified `CREATE TABLE` statements
+        // resolve without a "could not resolve the schema (3F000)" error.
+        connection
+            .execute_command("CREATE SCHEMA IF NOT EXISTS public")
+            .map_err(|e| {
+                McpError::new(
+                    ErrorCode::InternalError,
+                    format!("Failed to bootstrap public schema: {e}"),
+                )
+            })?;
+
+        Ok(Self {
+            hyper,
+            connection,
+            workspace_path: path,
+            log_dir,
+            is_persistent,
+        })
+    }
+
+    /// Whether the `hyperd` child process is still alive.
+    pub fn is_running(&self) -> bool {
+        self.hyper.is_running()
+    }
+
+    /// `host:port` endpoint of the hyperd child process. Used by the
+    /// watcher to build additional async connections via `hyperdb_api::pool`
+    /// without touching the primary sync connection this engine holds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorCode::InternalError`] if the underlying
+    /// [`HyperProcess::require_endpoint`] call fails — typically when
+    /// `hyperd` has exited or never successfully reported an endpoint.
+    pub fn hyperd_endpoint(&self) -> Result<String, McpError> {
+        self.hyper
+            .require_endpoint()
+            .map(std::string::ToString::to_string)
+            .map_err(|e| McpError::new(ErrorCode::InternalError, e.to_string()))
+    }
+
+    /// Absolute path to the `.hyper` workspace file on disk.
+    pub fn workspace_path(&self) -> &Path {
+        &self.workspace_path
+    }
+
+    /// Unqualified database name Hyper uses for the primary workspace —
+    /// the stem of [`Self::workspace_path`]. Matches what
+    /// [`hyperdb_api::Connection::new`] registers when it issues its implicit
+    /// `ATTACH DATABASE`, so fully-qualified SQL built with this value
+    /// resolves to the primary workspace.
+    ///
+    /// Also the correct value for `SET schema_search_path = '…'` while
+    /// additional databases are attached: Hyper's default search path
+    /// (`"$single"`) only covers the implicit primary when no other
+    /// databases are attached, and starts resolving unqualified names to
+    /// nothing the moment an `ATTACH DATABASE` runs.
+    pub fn primary_db_name(&self) -> String {
+        self.workspace_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("workspace")
+            .to_string()
+    }
+
+    /// Directory where `hyperd` writes its log files. The MCP binary should
+    /// also drop its own client-side log here so debugging starts in one
+    /// place.
+    pub fn log_dir(&self) -> &Path {
+        &self.log_dir
+    }
+
+    /// Best-guess path to the most recent `hyperd` log file, useful when
+    /// something in the engine misbehaves and we want to surface the server
+    /// log to the caller. Picks the newest `hyperd*.log` file in [`log_dir`].
+    /// Returns `None` if no matching file exists yet.
+    ///
+    /// [`log_dir`]: Self::log_dir
+    pub fn hyperd_log_path(&self) -> Option<PathBuf> {
+        let entries = std::fs::read_dir(&self.log_dir).ok()?;
+        let mut candidates: Vec<(std::time::SystemTime, PathBuf)> = entries
+            .filter_map(std::result::Result::ok)
+            .filter_map(|e| {
+                let path = e.path();
+                let name = path.file_name()?.to_str()?;
+                if name.starts_with("hyperd")
+                    && std::path::Path::new(name)
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("log"))
+                {
+                    let mtime = e.metadata().ok().and_then(|m| m.modified().ok())?;
+                    Some((mtime, path))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        candidates.sort_by_key(|b| std::cmp::Reverse(b.0));
+        candidates.into_iter().next().map(|(_, p)| p)
+    }
+
+    /// `true` if the workspace was created from a user-supplied path
+    /// (data survives across sessions).
+    pub fn is_persistent(&self) -> bool {
+        self.is_persistent
+    }
+
+    /// Direct access to the underlying connection for operations not
+    /// wrapped by `Engine` (e.g. `export_csv`, `execute_query_to_arrow`).
+    pub fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
+    /// Execute a DDL/DML command. Returns affected row count.
+    ///
+    /// # Errors
+    ///
+    /// Converts any [`hyperdb_api::Error`] from the underlying connection
+    /// into an [`McpError`] — typical causes are SQL syntax errors,
+    /// constraint violations, permission failures, or
+    /// [`ErrorCode::ConnectionLost`] when the link to `hyperd` has
+    /// dropped.
+    pub fn execute_command(&self, sql: &str) -> Result<u64, McpError> {
+        self.connection.execute_command(sql).map_err(McpError::from)
+    }
+
+    /// Run the given closure inside a database transaction.
+    ///
+    /// Issues `BEGIN TRANSACTION` before calling `f`. If `f` returns `Ok`,
+    /// commits the transaction; if it returns `Err`, rolls back and returns
+    /// the original error. A failed rollback is logged via `tracing::warn!`
+    /// and the original error is still surfaced (rollback failure usually
+    /// means the transaction was already aborted by the server, which is
+    /// functionally equivalent to a successful rollback).
+    ///
+    /// This is the correctness primitive for ingest operations: it lets
+    /// per-row `INSERT` loops (Parquet, Arrow, JSON) leave zero partial data
+    /// on failure. The CSV `COPY FROM` path is already atomic at the
+    /// statement level, but wrapping it in a transaction costs nothing and
+    /// makes per-row INSERT loops atomic across the whole batch.
+    ///
+    /// # DDL is auto-committed
+    ///
+    /// Hyper treats `DROP TABLE` and `CREATE TABLE` as auto-committed even
+    /// when issued inside a transaction. This means `replace`-mode ingest
+    /// cannot roll back the original table once DDL has run. The guarantee
+    /// is weaker than it looks: on failure, the new (empty) table stays
+    /// in place rather than being replaced by partial data. Append-mode
+    /// ingest is fully atomic because it doesn't issue DDL on existing
+    /// tables.
+    ///
+    /// # Known wire protocol quirk
+    ///
+    /// After a mid-transaction Hyper-level error (e.g. a NOT NULL violation
+    /// on INSERT), the first SELECT after rollback may return an empty
+    /// result set due to residual bytes on the connection. Retrying the
+    /// query once restores normal behavior. The rollback itself is always
+    /// correct — this is a read-side symptom only. See the `query_resilient`
+    /// helper in `tests/transaction_tests.rs` for a robust pattern.
+    ///
+    /// # Errors
+    ///
+    /// - Returns any [`McpError`] raised by `BEGIN TRANSACTION` or by
+    ///   `COMMIT` (typical causes: connection loss, serialization
+    ///   conflict, DDL auto-commit contention).
+    /// - Returns whatever error `f` produces (rollback is performed
+    ///   first; a rollback failure is only logged, never surfaced).
+    ///
+    /// # Panics
+    ///
+    /// Does not introduce new panic sites. If `f` panics, the transaction
+    /// is rolled back (best-effort) and the original panic is re-raised
+    /// via [`std::panic::resume_unwind`], preserving the panic payload.
+    pub fn execute_in_transaction<F, T>(&self, f: F) -> Result<T, McpError>
+    where
+        F: FnOnce(&Engine) -> Result<T, McpError>,
+    {
+        self.connection
+            .begin_transaction()
+            .map_err(McpError::from)?;
+        tracing::debug!("tx: BEGIN issued");
+        // `catch_unwind` wraps the closure so a panic (unwrap on None,
+        // indexing OOB, arithmetic overflow, …) doesn't leave an open
+        // transaction on the connection. Without this, the next tool
+        // call would hit "transaction already in progress" and the
+        // server's ConnectionLost auto-reconnect would *not* recover
+        // because the connection is live; the engine would stay wedged
+        // until restart. `AssertUnwindSafe` is correct here: we hold
+        // the transaction open for the closure's duration, and we
+        // always issue a rollback before resuming the panic, so no
+        // logical invariant survives into the panicking stack.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
+        match result {
+            Ok(Ok(val)) => {
+                tracing::debug!("tx: closure returned Ok, issuing COMMIT");
+                self.connection.commit().map_err(McpError::from)?;
+                Ok(val)
+            }
+            Ok(Err(e)) => {
+                tracing::debug!(err = %e, "tx: closure returned Err, issuing ROLLBACK");
+                if let Err(rb_err) = self.connection.rollback() {
+                    // Rollback itself failed — log it but keep the original
+                    // error as the primary cause. A failed rollback usually
+                    // means the transaction was already aborted by the server,
+                    // which is fine (nothing to unwind).
+                    tracing::warn!(
+                        "rollback after error failed (original error preserved): {}",
+                        rb_err
+                    );
+                } else {
+                    tracing::debug!("tx: ROLLBACK succeeded");
+                }
+                Err(e)
+            }
+            Err(panic_payload) => {
+                tracing::error!("tx: closure panicked, issuing ROLLBACK before resuming unwind");
+                // Best-effort rollback. If it fails, the connection is
+                // unusable — but we're about to panic anyway, and
+                // `HyperMcpServer::with_engine` will drop the engine
+                // when the panic surfaces as a poisoned tokio task.
+                let _ = self.connection.rollback();
+                std::panic::resume_unwind(panic_payload)
+            }
+        }
+    }
+
+    /// Execute a SELECT query and materialize all result rows as a JSON array
+    /// of `{column_name: value}` objects.
+    ///
+    /// Results are consumed chunk-by-chunk to avoid holding the entire result
+    /// set in protocol buffers, though the final `Vec<Value>` does accumulate
+    /// in memory. For truly huge results, prefer `export` to a file instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns any [`McpError`] produced by [`Connection::execute_query`]
+    /// or subsequent `next_chunk` calls — SQL errors, connection loss,
+    /// and decoding failures all surface through this path.
+    pub fn execute_query_to_json(&self, sql: &str) -> Result<Vec<Value>, McpError> {
+        let mut result = self.connection.execute_query(sql).map_err(McpError::from)?;
+
+        let mut rows_json = Vec::new();
+        let mut schema_opt = None;
+        while let Some(chunk) = result.next_chunk().map_err(McpError::from)? {
+            // Capture schema from first chunk
+            if schema_opt.is_none() {
+                schema_opt = result.schema();
+            }
+            if let Some(ref schema) = schema_opt {
+                let columns = schema.columns();
+                for row in &chunk {
+                    let mut obj = serde_json::Map::new();
+                    for col in columns {
+                        let val = row_value_to_json(row, col.index(), &col.sql_type());
+                        obj.insert(col.name().to_string(), val);
+                    }
+                    rows_json.push(Value::Object(obj));
+                }
+            }
+        }
+        Ok(rows_json)
+    }
+
+    /// Create a table from a schema definition.
+    ///
+    /// - `replace = true`: drops the existing table (if any) and recreates it.
+    ///   Old rows are lost. Schema is defined by `columns`.
+    /// - `replace = false` (append mode): creates the table only if it doesn't
+    ///   already exist. If it does exist, the schema defined here is ignored
+    ///   and subsequent inserts must match the existing schema.
+    ///
+    /// Uses `CREATE TABLE IF NOT EXISTS` / `DROP TABLE IF EXISTS` so the
+    /// operation is idempotent without needing a separate `has_table` probe.
+    /// This is important for the watcher path, where a racy `has_table` check
+    /// (false negative due to protocol desync) would otherwise attempt a bare
+    /// `CREATE TABLE` that fails with "42P07 table already exists" and leaves
+    /// the connection in an aborted state.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`ErrorCode::EmptyData`] if `columns` is empty.
+    /// - Returns [`ErrorCode::SchemaMismatch`] if any column's
+    ///   `hyper_type` cannot be resolved by [`crate::schema::map_hyper_type`].
+    /// - Propagates any Hyper error from `DROP TABLE` (when `replace`
+    ///   is true) or `CREATE TABLE IF NOT EXISTS`.
+    pub fn create_table(
+        &self,
+        table_name: &str,
+        columns: &[ColumnSchema],
+        replace: bool,
+    ) -> Result<(), McpError> {
+        if columns.is_empty() {
+            return Err(McpError::new(
+                ErrorCode::EmptyData,
+                "No columns to create table from",
+            ));
+        }
+        // Validate every column's type name is known before issuing any DDL.
+        // This catches typos in schema overrides before we start mutating the
+        // database.
+        for col in columns {
+            if crate::schema::map_hyper_type(&col.hyper_type).is_none() {
+                return Err(McpError::new(
+                    ErrorCode::SchemaMismatch,
+                    format!(
+                        "Unknown type '{}' for column '{}'",
+                        col.hyper_type, col.name
+                    ),
+                ));
+            }
+        }
+
+        let quoted_table = format!("\"{}\"", table_name.replace('"', "\"\""));
+        if replace {
+            self.connection
+                .execute_command(&format!("DROP TABLE IF EXISTS {quoted_table}"))
+                .map_err(McpError::from)?;
+        }
+
+        let col_defs: Vec<String> = columns
+            .iter()
+            .map(|c| {
+                let nullable = if c.nullable { "" } else { " NOT NULL" };
+                format!(
+                    "\"{}\" {}{}",
+                    c.name.replace('"', "\"\""),
+                    c.hyper_type,
+                    nullable
+                )
+            })
+            .collect();
+
+        let create_sql = format!(
+            "CREATE TABLE IF NOT EXISTS {} ({})",
+            quoted_table,
+            col_defs.join(", ")
+        );
+        self.connection
+            .execute_command(&create_sql)
+            .map_err(McpError::from)?;
+        Ok(())
+    }
+
+    /// Returns `(name, hyper_type, nullable)` for every column of `table`,
+    /// in declaration order, by reading the catalog (the same path
+    /// `describe_table` uses). Used by the `merge` ingest path to
+    /// compare incoming-file schema against the existing table.
+    ///
+    /// # Errors
+    ///
+    /// - Propagates [`Catalog::get_table_definition`] errors. Callers
+    ///   that need a "table missing" sentinel should pre-check via
+    ///   `Catalog::get_table_names("public")` (see `describe_table` for
+    ///   the precedent) — `get_table_definition` errors with a
+    ///   variable wording across Hyper versions.
+    pub fn column_metadata(&self, table: &str) -> Result<Vec<ColumnSchema>, McpError> {
+        let catalog = Catalog::new(&self.connection);
+        let def = catalog
+            .get_table_definition(table)
+            .map_err(McpError::from)?;
+        Ok(def
+            .columns()
+            .iter()
+            .map(|c| ColumnSchema {
+                name: c.name.clone(),
+                hyper_type: c.type_name().to_string(),
+                nullable: c.nullable,
+            })
+            .collect())
+    }
+
+    /// Returns true if `table` exists in the `public` schema. Avoids
+    /// the per-version error-string ambiguity of
+    /// [`Catalog::get_table_definition`] by listing names instead.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from [`Catalog::get_table_names`] (typically
+    /// connection loss).
+    pub fn table_exists(&self, table: &str) -> Result<bool, McpError> {
+        let catalog = Catalog::new(&self.connection);
+        let names = catalog.get_table_names("public").map_err(McpError::from)?;
+        Ok(names.iter().any(|n| n.as_str() == table))
+    }
+
+    /// Issue a single `ALTER TABLE "<table>" ADD COLUMN "<n1>" <t1>,
+    /// ADD COLUMN "<n2>" <t2>, …` statement that adds all columns
+    /// atomically. Hyper supports the multi-column form (verified
+    /// 2026-05-07 against the pinned hyperd release), so partial-add
+    /// failures don't leave the schema half-widened.
+    ///
+    /// New columns are always added nullable — existing rows have no
+    /// value to satisfy NOT NULL. `nullable` on the input is ignored
+    /// for that reason.
+    ///
+    /// `cols` must be non-empty; an empty input is a no-op (returns
+    /// `Ok(())` without issuing SQL) so callers can pass the
+    /// "columns missing from target" set directly without a length
+    /// pre-check.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`ErrorCode::SchemaMismatch`] if any element's
+    ///   `hyper_type` is not a known Hyper type (same validation as
+    ///   `create_table`).
+    /// - Propagates the underlying SQL error from the single ALTER
+    ///   statement. Because Hyper executes a multi-column ADD
+    ///   atomically, a failure leaves the table schema unchanged —
+    ///   no partial widening.
+    pub fn alter_table_add_columns(
+        &self,
+        table: &str,
+        cols: &[ColumnSchema],
+    ) -> Result<(), McpError> {
+        if cols.is_empty() {
+            return Ok(());
+        }
+        for col in cols {
+            if crate::schema::map_hyper_type(&col.hyper_type).is_none() {
+                return Err(McpError::new(
+                    ErrorCode::SchemaMismatch,
+                    format!(
+                        "Unknown type '{}' for column '{}'",
+                        col.hyper_type, col.name
+                    ),
+                ));
+            }
+        }
+        let quoted_table = format!("\"{}\"", table.replace('"', "\"\""));
+        let add_clauses = cols
+            .iter()
+            .map(|c| {
+                format!(
+                    "ADD COLUMN \"{}\" {}",
+                    c.name.replace('"', "\"\""),
+                    c.hyper_type
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!("ALTER TABLE {quoted_table} {add_clauses}");
+        self.connection
+            .execute_command(&sql)
+            .map_err(McpError::from)?;
+        Ok(())
+    }
+
+    /// List all tables in the `public` schema with their column definitions
+    /// and row counts. Returned as a JSON-serializable `Vec` for direct use
+    /// in MCP tool responses.
+    ///
+    /// # Errors
+    ///
+    /// - Propagates any error from [`Catalog::get_table_names`] (typically
+    ///   connection loss or SQL errors from the underlying catalog
+    ///   probe).
+    /// - Propagates any error from `describe_table_with_catalog` for
+    ///   individual tables — a single failing describe aborts the whole
+    ///   listing.
+    pub fn describe_tables(&self) -> Result<Vec<Value>, McpError> {
+        let catalog = Catalog::new(&self.connection);
+        let table_names = catalog.get_table_names("public").map_err(McpError::from)?;
+        let mut tables = Vec::new();
+        for name in &table_names {
+            // Skip infrastructure tables (`_hyperdb_*`) so the public
+            // catalog only surfaces user-visible data. See
+            // [`is_internal_table`] for the convention and rationale.
+            if is_internal_table(name.as_str()) {
+                continue;
+            }
+            tables.push(describe_table_with_catalog(&catalog, name.as_str())?);
+        }
+        Ok(tables)
+    }
+
+    /// Describe a single table by name. Returns the same JSON shape as an
+    /// element of [`Self::describe_tables`] (`name`, `columns`, `row_count`).
+    ///
+    /// Errors with [`ErrorCode::TableNotFound`] when the table doesn't exist
+    /// or is an internal `_hyperdb_*` bookkeeping table (callers should not
+    /// be able to probe infrastructure via this path; it stays consistent
+    /// with the full-list variant that hides them).
+    ///
+    /// Uses `get_table_names("public")` as the authoritative existence check
+    /// rather than pattern-matching the error string from
+    /// `get_table_definition`, because the latter's wording varies across
+    /// Hyper versions and can slip past `translate_table_missing`.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`ErrorCode::TableNotFound`] if `table_name` is an
+    ///   internal `_hyperdb_*` table or does not appear in `public`.
+    /// - Propagates any error from [`Catalog::get_table_names`] or from
+    ///   `describe_table_with_catalog` (connection loss, catalog probe
+    ///   failures).
+    pub fn describe_table(&self, table_name: &str) -> Result<Value, McpError> {
+        if is_internal_table(table_name) {
+            return Err(McpError::new(
+                ErrorCode::TableNotFound,
+                format!("Table '{table_name}' does not exist"),
+            ));
+        }
+        let catalog = Catalog::new(&self.connection);
+        let exists = catalog
+            .get_table_names("public")
+            .map_err(McpError::from)?
+            .iter()
+            .any(|n| n.as_str() == table_name);
+        if !exists {
+            return Err(McpError::new(
+                ErrorCode::TableNotFound,
+                format!("Table '{table_name}' does not exist"),
+            ));
+        }
+        describe_table_with_catalog(&catalog, table_name)
+    }
+
+    /// Sample rows from a table along with its schema and total row count.
+    ///
+    /// Returns a single JSON object with `table`, `row_count`, `sample_size`,
+    /// `schema`, and `rows`. `n` is clamped to the range `1..=100`.
+    /// Returns [`ErrorCode::TableNotFound`] if the table doesn't exist.
+    ///
+    /// Avoids the `Catalog::has_table` probe entirely — we just run the sample
+    /// SELECT first and translate a Hyper "table does not exist" error into
+    /// our own [`ErrorCode::TableNotFound`]. This sidesteps the old pattern
+    /// where a racy `has_table` silently returning `Err` would be rewritten
+    /// to `false` and surface as a spurious `TableNotFound` for tables that
+    /// actually exist.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`ErrorCode::TableNotFound`] (via `translate_table_missing`)
+    ///   if the sample `SELECT` surfaces a Hyper "table does not exist" error.
+    /// - Propagates any other [`McpError`] from the sample query — SQL
+    ///   errors, permission failures, or connection loss.
+    /// - The subsequent `COUNT(*)` and `get_table_definition` calls are
+    ///   best-effort: their errors are swallowed so the sample payload
+    ///   is still returned when available.
+    pub fn sample_table(&self, table_name: &str, n: u64) -> Result<Value, McpError> {
+        let n = n.clamp(1, 100);
+        let quoted = table_name.replace('"', "\"\"");
+
+        let select_sql = format!("SELECT * FROM \"{quoted}\" LIMIT {n}");
+        let rows = match self.execute_query_to_json(&select_sql) {
+            Ok(r) => r,
+            Err(e) => return Err(translate_table_missing(e, table_name)),
+        };
+
+        let count_sql = format!("SELECT COUNT(*) AS cnt FROM \"{quoted}\"");
+        let row_count = self
+            .execute_query_to_json(&count_sql)
+            .ok()
+            .and_then(|rs| {
+                rs.first()
+                    .and_then(|r| r.get("cnt").and_then(serde_json::Value::as_i64))
+            })
+            .unwrap_or(0);
+
+        let catalog = Catalog::new(&self.connection);
+        let columns: Vec<Value> = match catalog.get_table_definition(table_name) {
+            Ok(def) => def
+                .columns()
+                .iter()
+                .map(|col| {
+                    json!({
+                        "name": col.name,
+                        "type": col.type_name(),
+                        "nullable": col.nullable,
+                    })
+                })
+                .collect(),
+            Err(_) => {
+                // Catalog read may fail transiently during wire desync. We
+                // already have the sample rows; return what we have without
+                // the column metadata rather than failing the whole call.
+                Vec::new()
+            }
+        };
+
+        Ok(json!({
+            "table": table_name,
+            "row_count": row_count,
+            "sample_size": rows.len(),
+            "schema": columns,
+            "rows": rows,
+        }))
+    }
+
+    /// Collect workspace health and size metrics for the `status` MCP tool.
+    ///
+    /// Includes `logs` with paths to the `hyperd` log file (if one exists yet)
+    /// and the MCP client log. These are the first files to check when
+    /// something misbehaves.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any error from [`Catalog::get_table_names`]. Per-table
+    /// row counts and disk usage fall back to `0` on read failure, so
+    /// these do not bubble up.
+    pub fn status(&self) -> Result<Value, McpError> {
+        let catalog = Catalog::new(&self.connection);
+        let all_names = catalog.get_table_names("public").map_err(McpError::from)?;
+        // Same filter as `describe_tables`: the saved-queries meta-table
+        // and any other `_hyperdb_*` internal tables shouldn't bump the
+        // user-visible `table_count` / `total_rows`.
+        let table_names: Vec<_> = all_names
+            .iter()
+            .filter(|n| !is_internal_table(n.as_str()))
+            .collect();
+        let table_count = table_names.len();
+
+        let total_rows: i64 = table_names
+            .iter()
+            .map(|name| catalog.get_row_count(name.as_str()).unwrap_or(0))
+            .sum();
+
+        let disk_bytes = std::fs::metadata(&self.workspace_path).map_or(0, |m| m.len());
+
+        let hyperd_log = self.hyperd_log_path().map_or(Value::Null, |p| {
+            Value::String(p.to_string_lossy().into_owned())
+        });
+        let client_log_path = self.log_dir.join(CLIENT_LOG_FILE_NAME);
+        let client_log = if client_log_path.exists() {
+            Value::String(client_log_path.to_string_lossy().into_owned())
+        } else {
+            Value::Null
+        };
+
+        Ok(json!({
+            "hyperd_running": self.hyper.is_running(),
+            "workspace_path": self.workspace_path.to_string_lossy(),
+            "workspace_mode": if self.is_persistent { "persistent" } else { "ephemeral" },
+            "table_count": table_count,
+            "total_rows": total_rows,
+            "disk_usage_bytes": disk_bytes,
+            // The MCP server and the `hyperdb-api` crate it's built on live in
+            // the same Cargo workspace and ship from the same commit, so a
+            // single version string identifies both. Label it by the
+            // underlying library since that's the more fundamental
+            // identifier — the MCP server is a thin layer over the Hyper
+            // Rust API.
+            "hyper_rust_api_version": crate::version::hyper_api_version_string(),
+            "logs": {
+                "log_dir": self.log_dir.to_string_lossy(),
+                "hyperd_log": hyperd_log,
+                "client_log": client_log,
+            },
+        }))
+    }
+}
+
+/// Convert a single cell from a Hyper result row into a JSON `Value`.
+///
+/// Dispatches on the column's SQL OID so each type is decoded through the
+/// right [`hyperdb_api::Row::get`] instantiation. When a type isn't explicitly
+/// handled, falls back to string decoding — safe for textual types but
+/// produces garbage for binary types, so every type we might actually see
+/// should have its own branch.
+///
+/// # Type mapping
+///
+/// | Hyper OID | JSON shape |
+/// |-----------|------------|
+/// | `BOOL` | `true`/`false` |
+/// | `SMALL_INT` / `INT` / `BIG_INT` | number |
+/// | `DOUBLE` / `FLOAT` | number |
+/// | `NUMERIC` | number when losslessly representable as `f64`, else string |
+/// | `DATE` | ISO 8601 date string (`YYYY-MM-DD`) |
+/// | `TIMESTAMP` / `TIMESTAMP_TZ` | ISO 8601 timestamp string |
+/// | `TEXT` / `VARCHAR` | string |
+/// | anything else | string (fallback; may be garbage for binary types) |
+fn row_value_to_json(row: &hyperdb_api::Row, idx: usize, sql_type: &SqlType) -> Value {
+    use hyperdb_api::oids;
+    use hyperdb_api::{Date, Numeric, OffsetTimestamp, Timestamp};
+
+    if row.is_null(idx) {
+        return Value::Null;
+    }
+    let oid_val = sql_type.internal_oid();
+    if oid_val == oids::BOOL.0 {
+        return row.get::<bool>(idx).map_or(Value::Null, Value::Bool);
+    }
+    if oid_val == oids::SMALL_INT.0 {
+        return row
+            .get::<i16>(idx)
+            .map_or(Value::Null, |v| Value::Number(v.into()));
+    }
+    if oid_val == oids::INT.0 {
+        return row
+            .get::<i32>(idx)
+            .map_or(Value::Null, |v| Value::Number(v.into()));
+    }
+    if oid_val == oids::BIG_INT.0 {
+        return row
+            .get::<i64>(idx)
+            .map_or(Value::Null, |v| Value::Number(v.into()));
+    }
+    if oid_val == oids::DOUBLE.0 || oid_val == oids::FLOAT.0 {
+        return row
+            .get::<f64>(idx)
+            .and_then(|v| serde_json::Number::from_f64(v).map(Value::Number))
+            .unwrap_or(Value::Null);
+    }
+    if oid_val == oids::NUMERIC.0 {
+        // `Row` is schema-aware as of the upstream NUMERIC fix — it
+        // carries an `Arc<ResultSchema>` and `row.get::<Numeric>()`
+        // reads the scale from the column's
+        // `SqlType::Numeric { precision, scale }` descriptor before
+        // dispatching on the buffer length. That covers all three
+        // NUMERIC wire shapes the server can send on a query result:
+        //
+        //   * 8-byte  `Numeric`     (precision ≤ 18, e.g. `AVG(INT)`)
+        //   * 16-byte `BigNumeric`  (precision > 18)
+        //   * Arrow `Decimal128`/`Decimal256` (gRPC transport)
+        //
+        // Prior to the upstream fix, `type_modifier` was being dropped
+        // during `RowDescription` parsing so the scale presented here
+        // was always `0`, the 8-byte form wasn't decodable at all, and
+        // `AVG` results fell through to `Null`. All of that is now
+        // handled inside `hyperdb-api`; this function only needs to pick
+        // the JSON shape.
+        //
+        // `Numeric::to_string()` uses the decoded scale, so round-trip
+        // through `f64` is only used for JSON compactness — if the
+        // value doesn't fit in `f64` losslessly (`serde_json::Number::
+        // from_f64` returns `None` for NaN/Infinity, and we can't
+        // always represent large i128 exactly as `f64`), fall back to
+        // the string form so the caller sees the exact value.
+        return row.get::<Numeric>(idx).map_or(Value::Null, |n| {
+            let s = n.to_string();
+            s.parse::<f64>()
+                .ok()
+                .and_then(serde_json::Number::from_f64)
+                .map(Value::Number)
+                .unwrap_or(Value::String(s))
+        });
+    }
+    if oid_val == oids::DATE.0 {
+        // `Date`'s `Display` impl already formats as ISO 8601 `YYYY-MM-DD`.
+        return row
+            .get::<Date>(idx)
+            .map_or(Value::Null, |d| Value::String(d.to_string()));
+    }
+    if oid_val == oids::TIMESTAMP.0 {
+        return row
+            .get::<Timestamp>(idx)
+            .map_or(Value::Null, |t| Value::String(t.to_string()));
+    }
+    if oid_val == oids::TIMESTAMP_TZ.0 {
+        return row
+            .get::<OffsetTimestamp>(idx)
+            .map_or(Value::Null, |t| Value::String(t.to_string()));
+    }
+    if oid_val == oids::TEXT.0 || oid_val == oids::VARCHAR.0 {
+        return row.get::<String>(idx).map_or(Value::Null, Value::String);
+    }
+    // Fallback: try as string. Safe for textual types we didn't list;
+    // produces garbage bytes for binary types (BYTEA, GEOGRAPHY, …)
+    // — add explicit branches above when those start appearing in
+    // real queries.
+    row.get::<String>(idx).map_or(Value::Null, Value::String)
+}
+
+/// Name of the client-side log file written in [`resolve_log_dir`].
+/// The MCP binary's `main` opens this file and sets it as a `tracing`
+/// subscriber target so both startup errors and runtime events land here.
+pub const CLIENT_LOG_FILE_NAME: &str = "hyperdb-mcp.log";
+
+/// Name-prefix convention for tables that belong to the `HyperDB` MCP's
+/// own infrastructure (currently the `_hyperdb_saved_queries` meta-table
+/// used by `WorkspaceStore`). Hidden from [`Engine::describe_tables`]
+/// and from [`Engine::status`]'s `table_count` / `total_rows`, so users
+/// never see `HyperDB`'s own bookkeeping in the public catalog.
+///
+/// Any future internal table (watcher state, audit log, etc.) just
+/// needs to follow this prefix and it disappears from the public view
+/// automatically — no per-table filter list to keep in sync.
+pub const HYPERDB_INTERNAL_PREFIX: &str = "_hyperdb_";
+
+/// Returns true when `name` is one of `HyperDB`'s own internal tables
+/// (matches [`HYPERDB_INTERNAL_PREFIX`]). Factored into a helper so
+/// every filter site calls the same predicate and a future move to a
+/// more nuanced scheme (e.g. per-table allowlist) is a single edit.
+#[must_use]
+pub fn is_internal_table(name: &str) -> bool {
+    name.starts_with(HYPERDB_INTERNAL_PREFIX)
+}
+
+/// Compute the log directory for both `hyperd` output and the client-side
+/// tracing log. Shared by [`Engine::new`] and `main` so both land in the
+/// same place.
+///
+/// - Persistent mode: same directory as the workspace file (with `~`
+///   expansion applied). This way a project workspace like
+///   `~/projects/foo.hyper` gets logs in `~/projects/`.
+/// - Ephemeral mode: same temp directory the Engine creates for the
+///   workspace (`$TMPDIR/hyperdb-mcp-<pid>/`).
+#[must_use]
+pub fn resolve_log_dir(workspace_path: Option<&str>) -> PathBuf {
+    match workspace_path {
+        Some(p) => {
+            let expanded = PathBuf::from(shellexpand_tilde(p));
+            expanded
+                .parent()
+                .map_or_else(|| PathBuf::from("."), std::path::Path::to_path_buf)
+        }
+        None => std::env::temp_dir().join(format!("hyperdb-mcp-{}", std::process::id())),
+    }
+}
+
+/// Build the `{name, columns, row_count}` JSON for a single table, shared
+/// between [`Engine::describe_tables`] (bulk) and [`Engine::describe_table`]
+/// (single) so both paths emit byte-identical shapes. A missing table
+/// surfaces as the underlying Hyper "relation does not exist" error; single-
+/// table callers should run it through `translate_table_missing`.
+fn describe_table_with_catalog(catalog: &Catalog<'_>, name: &str) -> Result<Value, McpError> {
+    let def = catalog.get_table_definition(name).map_err(McpError::from)?;
+    let row_count = catalog.get_row_count(name).unwrap_or(0);
+    let columns: Vec<Value> = def
+        .columns()
+        .iter()
+        .map(|col| {
+            json!({
+                "name": col.name,
+                "type": col.type_name(),
+                "nullable": col.nullable,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "name": name,
+        "columns": columns,
+        "row_count": row_count,
+    }))
+}
+
+/// Translate an "undefined table / relation does not exist" error from Hyper
+/// into our own [`ErrorCode::TableNotFound`] with a consistent message.
+/// Any other error is passed through unchanged.
+fn translate_table_missing(err: McpError, table_name: &str) -> McpError {
+    let m = err.message.to_lowercase();
+    let looks_like_missing = m.contains("does not exist")
+        || m.contains("relation")
+        || m.contains("undefined table")
+        || err.message.contains("42P01");
+    if looks_like_missing {
+        McpError::new(
+            ErrorCode::TableNotFound,
+            format!("Table '{table_name}' does not exist"),
+        )
+    } else {
+        err
+    }
+}
+
+/// Returns `true` if a SQL statement is read-only: `SELECT`, `WITH`, `EXPLAIN`,
+/// `SHOW`, or `VALUES`. Anything else (`CREATE`, `INSERT`, `UPDATE`, `DELETE`,
+/// `DROP`, `ALTER`, `COPY`, ...) is considered mutating.
+///
+/// The check is a simple prefix match after trimming and upper-casing the first
+/// Checks whether the first SQL keyword indicates a read-only statement.
+///
+/// Strips leading whitespace and SQL comments (line `--` and block `/* */`)
+/// before inspecting the first alphabetic token. This prevents comment-based
+/// bypass of the read-only guard (e.g. `/* harmless */ DROP TABLE ...`).
+///
+/// Note: data-modifying CTEs (`WITH x AS (DELETE ...) SELECT ...`) still slip
+/// past this check. Hyper itself rejects such CTEs, so this is defense-in-depth
+/// rather than the sole security boundary.
+#[must_use]
+pub fn is_read_only_sql(sql: &str) -> bool {
+    let stripped = strip_leading_sql_comments(sql);
+    let first_token: String = stripped
+        .chars()
+        .take_while(|c| c.is_alphabetic())
+        .flat_map(char::to_uppercase)
+        .collect();
+    matches!(
+        first_token.as_str(),
+        "SELECT" | "WITH" | "EXPLAIN" | "SHOW" | "VALUES"
+    )
+}
+
+/// Strips leading whitespace, line comments (`--`), and block comments (`/* */`)
+/// from SQL text. Handles nested block comments.
+fn strip_leading_sql_comments(sql: &str) -> &str {
+    let mut s = sql;
+    loop {
+        s = s.trim_start();
+        if s.starts_with("--") {
+            // Line comment — skip to end of line (handles LF, CRLF, and CR)
+            match s.find(&['\n', '\r'][..]) {
+                Some(pos) => {
+                    let mut next = pos + 1;
+                    // Handle CRLF: skip both characters
+                    if s.as_bytes().get(pos) == Some(&b'\r')
+                        && s.as_bytes().get(pos + 1) == Some(&b'\n')
+                    {
+                        next = pos + 2;
+                    }
+                    s = &s[next..];
+                }
+                None => return "",
+            }
+        } else if s.starts_with("/*") {
+            // Block comment — find matching close, handling nesting
+            let mut depth = 0u32;
+            let mut chars = s.char_indices().peekable();
+            let mut end = None;
+            while let Some((i, c)) = chars.next() {
+                if c == '/' && chars.peek().map(|(_, c2)| *c2) == Some('*') {
+                    chars.next();
+                    depth += 1;
+                } else if c == '*' && chars.peek().map(|(_, c2)| *c2) == Some('/') {
+                    chars.next();
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(i + 2);
+                        break;
+                    }
+                }
+            }
+            match end {
+                Some(pos) => s = &s[pos..],
+                None => return "", // Unclosed comment — no valid SQL
+            }
+        } else {
+            break;
+        }
+    }
+    s
+}
+
+/// Minimal `~/` (and `~\` on Windows) expansion. Resolves the home
+/// directory via `$HOME` on Unix and `%USERPROFILE%` (falling back to
+/// `%HOMEDRIVE%%HOMEPATH%`) on Windows. `~username/` is not supported —
+/// callers who need that should expand their paths themselves.
+fn shellexpand_tilde(path: &str) -> String {
+    let rest = if let Some(r) = path.strip_prefix("~/") {
+        Some(r)
+    } else if cfg!(windows) {
+        path.strip_prefix("~\\")
+    } else {
+        None
+    };
+    let Some(rest) = rest else {
+        return path.to_string();
+    };
+    let Some(home) = home_dir() else {
+        return path.to_string();
+    };
+    let sep = std::path::MAIN_SEPARATOR;
+    format!("{}{sep}{rest}", home.to_string_lossy())
+}
+
+/// Resolve the user's home directory across platforms. Unix uses `$HOME`;
+/// Windows prefers `%USERPROFILE%` and falls back to `%HOMEDRIVE%%HOMEPATH%`.
+fn home_dir() -> Option<PathBuf> {
+    if cfg!(windows) {
+        if let Some(profile) = std::env::var_os("USERPROFILE") {
+            if !profile.is_empty() {
+                return Some(PathBuf::from(profile));
+            }
+        }
+        let drive = std::env::var_os("HOMEDRIVE")?;
+        let rel = std::env::var_os("HOMEPATH")?;
+        let mut combined = PathBuf::from(drive);
+        combined.push(PathBuf::from(rel));
+        Some(combined)
+    } else {
+        std::env::var_os("HOME").map(PathBuf::from)
+    }
+}

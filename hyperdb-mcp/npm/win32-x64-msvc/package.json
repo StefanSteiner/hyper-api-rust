@@ -1,0 +1,21 @@
+{
+  "name": "hyperdb-mcp-win32-x64-msvc",
+  "version": "0.1.0-rc.1",
+  "description": "HyperDB MCP server binary for Windows x64",
+  "os": ["win32"],
+  "cpu": ["x64"],
+  "files": [
+    "hyperdb-mcp.exe",
+    "hyperd.exe",
+    "LICENSE-HYPERD"
+  ],
+  "license": "MIT OR Apache-2.0",
+  "engines": {
+    "node": ">= 18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tableau/hyper-api-rust.git",
+    "directory": "hyperdb-mcp"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "hyperdb-mcp": "file:hyperdb-mcp/npm/hyperdb-mcp-0.1.0.tgz",
+    "hyperdb-mcp-darwin-arm64": "file:hyperdb-mcp/npm/darwin-arm64/hyperdb-mcp-darwin-arm64-0.1.0.tgz"
+  }
+}

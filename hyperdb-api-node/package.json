@@ -1,0 +1,76 @@
+{
+  "name": "hyperdb-api-node",
+  "version": "0.1.0-rc.1",
+  "description": "Node.js bindings for the Hyper database API, powered by napi-rs",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "napi": {
+    "binaryName": "hyperdb-api-node",
+    "targets": [
+      "aarch64-apple-darwin",
+      "x86_64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "x86_64-unknown-linux-musl",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-pc-windows-msvc"
+    ]
+  },
+  "scripts": {
+    "build": "cargo build -p hyperdb-api-node --release && node scripts/copy-node.js release",
+    "build:debug": "cargo build -p hyperdb-api-node && node scripts/copy-node.js debug",
+    "artifacts": "napi artifacts",
+    "prepublishOnly": "napi prepublish -t npm",
+    "version": "napi version",
+    "test": "node __test__/smoke.mjs",
+    "benchmark": "node __test__/benchmark.mjs",
+    "example:ts": "npx tsx examples/typed-analytics.mts"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3",
+    "apache-arrow": "^21.1.0",
+    "tsx": "^4.21.0"
+  },
+  "optionalDependencies": {
+    "hyperdb-api-node-darwin-arm64": "0.1.0-rc.1",
+    "hyperdb-api-node-darwin-x64": "0.1.0-rc.1",
+    "hyperdb-api-node-linux-arm64-gnu": "0.1.0-rc.1",
+    "hyperdb-api-node-linux-x64-gnu": "0.1.0-rc.1",
+    "hyperdb-api-node-linux-x64-musl": "0.1.0-rc.1",
+    "hyperdb-api-node-win32-x64-msvc": "0.1.0-rc.1"
+  },
+  "keywords": [
+    "hyper",
+    "database",
+    "sql",
+    "arrow",
+    "analytics",
+    "napi"
+  ],
+  "homepage": "https://github.com/tableau/hyper-api-rust/tree/main/hyperdb-api-node",
+  "bugs": {
+    "url": "https://github.com/tableau/hyper-api-rust/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tableau/hyper-api-rust.git",
+    "directory": "hyperdb-api-node"
+  },
+  "engines": {
+    "node": ">= 18"
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "arrow.mjs",
+    "pool.mjs"
+  ],
+  "peerDependencies": {
+    "apache-arrow": ">=14.0.0"
+  },
+  "peerDependenciesMeta": {
+    "apache-arrow": {
+      "optional": true
+    }
+  },
+  "license": "MIT OR Apache-2.0"
+}

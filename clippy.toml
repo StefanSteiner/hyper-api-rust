@@ -1,0 +1,10 @@
+# Clippy configuration for hyper-api-rust.
+#
+# Lint *selection* (what is warn/deny/allow) lives in `[workspace.lints]` in the
+# workspace Cargo.toml. This file holds lint *parameters* — thresholds, paths,
+# and other tuning knobs that clippy reads separately.
+
+msrv = "1.81"
+too-many-arguments-threshold = 10
+type-complexity-threshold = 300
+trivial-copy-size-limit = 8

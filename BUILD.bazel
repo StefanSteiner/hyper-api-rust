@@ -1,0 +1,25 @@
+# Rust API for Hyper (Pure Rust Implementation)
+#
+# This directory uses Cargo for building. The pure-Rust implementation
+# has no C library dependencies.
+#
+# To build with Cargo:
+#   cargo build
+#
+# Prerequisites:
+#   - hyperd must be built for running tests/examples
+#   - Set HYPERD_PATH to point to the hyperd executable
+#
+# For Bazel integration, consider using:
+#   - rules_rust: https://github.com/bazelbuild/rules_rust
+#   - crate_universe for dependency management
+
+# Placeholder filegroup for tracking Rust sources
+filegroup(
+    name = "rust_sources",
+    srcs = glob([
+        "**/*.rs",
+        "**/Cargo.toml",
+    ]),
+    visibility = ["//visibility:public"],
+)

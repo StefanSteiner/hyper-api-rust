@@ -1,0 +1,180 @@
+name: ci
+
+# Core CI: formatting, linting, workspace tests, and a publish dry-run
+# of hyperdb-bootstrap. Separate from verify-hyperd-pin.yml, which only
+# HEADs the pinned release's URLs.
+
+on:
+  push:
+    branches: [main]
+  pull_request: {}
+  workflow_dispatch: {}
+
+# Cancel a PR's in-progress CI runs when a new push lands on the PR.
+# Pushes to main always run to completion.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    # Clippy lints are platform-independent, so a single runner is enough.
+    # If a lint ever diverges by target (rare), broaden the matrix.
+    name: clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install system libraries (fontconfig for plotters, mold for fast linking, protobuf)
+        run: sudo apt-get update -q && sudo apt-get install -y libfontconfig1-dev mold protobuf-compiler
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: clippy
+      - name: Clippy (workspace, all targets)
+        # Every crate in the workspace is linted under the Microsoft Rust
+        # Guidelines config in `[workspace.lints]` (see Cargo.toml and
+        # docs/RUST_GUIDELINES.md). Warnings are treated as errors.
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Free disk space (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+      - name: Install system libraries (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y libfontconfig1-dev mold protobuf-compiler
+      - name: Install protobuf (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+      - name: Install protobuf (Windows)
+        if: runner.os == 'Windows'
+        run: choco install protoc -y
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Ensure cargo is on PATH
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Keep this cache separate from the clippy job's; the test
+          # profile has different artifacts and mixing them causes
+          # unnecessary rebuilds.
+          key: test-${{ matrix.os }}
+
+      - name: Cache hyperd binary
+        # Keyed on the pinned release file, so bumping the pin
+        # (hyperdb-bootstrap/hyperd-version.toml) invalidates the cache
+        # automatically and the next run re-downloads.
+        id: hyperd-cache
+        uses: actions/cache@v4
+        with:
+          path: .hyperd
+          key: hyperd-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hyperdb-bootstrap/hyperd-version.toml') }}
+
+      - name: Download hyperd
+        if: steps.hyperd-cache.outputs.cache-hit != 'true'
+        run: cargo run --release -p hyperdb-bootstrap --bin hyperdb-bootstrap -- download
+
+      - name: Workspace tests
+        shell: bash
+        env:
+          # .hyperd/current accepts either a file or directory per the
+          # hyperdb-api process loader; passing the directory keeps the
+          # command identical across OSes (hyperd vs hyperd.exe).
+          HYPERD_PATH: ${{ github.workspace }}/.hyperd/current
+        run: |
+          cargo test --workspace \
+            --exclude hyperdb-api-node \
+            --exclude hyperdb-bootstrap
+        # hyperdb-api-node needs napi-rs + a Node.js toolchain; it gets
+        # its own workflow when wired up. hyperdb-bootstrap has its own
+        # coverage (next step) and doesn't need hyperd running.
+
+      - name: hyperdb-bootstrap tests
+        run: cargo test -p hyperdb-bootstrap
+
+  publish-dry-run:
+    # Catches Cargo.toml metadata regressions (missing license, bad
+    # include paths, etc.) on the subset of crates that have no
+    # workspace deps — those are the only ones `cargo publish --dry-run`
+    # can check before anything's on crates.io. The other 4 crates
+    # (hyperdb-api-core, hyperdb-api-salesforce, hyperdb-api, hyperdb-mcp)
+    # resolve their path+version deps against the live index, which can't
+    # succeed until those deps are themselves published. (Note:
+    # hyperdb-api-core has an optional workspace dep on
+    # hyperdb-api-salesforce via its `salesforce-auth` feature, which
+    # triggers the same path-resolution failure even though the dep is
+    # optional.) They're exercised end-to-end by release.yml at tag
+    # time, when the whole wave ships together.
+    name: publish dry-run
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install mold linker
+        run: sudo apt-get update -q && sudo apt-get install -y mold
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: publish-dry-run
+      - run: |
+          cargo publish -p hyperdb-bootstrap   --dry-run
+          cargo publish -p sea-query-hyperdb   --dry-run
+
+  deny:
+    # Enforces license allowlist, advisory ignore list, and banned-source
+    # rules from deny.toml. Pairs with the `audit` job — `cargo-deny` and
+    # `cargo-audit` have separate ignore mechanisms; both must agree.
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features --workspace
+
+  audit:
+    # Enforces the RustSec advisory ignore list in .cargo/audit.toml.
+    # Fails on any unfixed advisory for a crate in the lockfile.
+    name: cargo-audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: audit
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit --deny warnings

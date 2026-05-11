@@ -1,0 +1,37 @@
+name: verify-hyperd-pin
+
+# HEAD every platform URL for the pinned Hyper release. Catches
+# Tableau yanking / renaming an archive, and catches typos in
+# hyperd-version.toml on PRs that touch the pin.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "hyperdb-bootstrap/hyperd-version.toml"
+      - "hyperdb-bootstrap/src/**"
+      - ".github/workflows/verify-hyperd-pin.yml"
+  pull_request:
+    paths:
+      - "hyperdb-bootstrap/hyperd-version.toml"
+      - "hyperdb-bootstrap/src/**"
+      - ".github/workflows/verify-hyperd-pin.yml"
+  schedule:
+    # Weekly sanity check — independent of PR traffic.
+    - cron: "0 12 * * 1"
+  workflow_dispatch: {}
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mold linker
+        run: sudo apt-get update -q && sudo apt-get install -y mold
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+      - name: Verify pinned release URLs are reachable
+        run: cargo run --release -p hyperdb-bootstrap --bin hyperdb-bootstrap -- verify

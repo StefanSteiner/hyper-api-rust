@@ -1,0 +1,23 @@
+[package]
+name = "hyperdb-api-node"
+version.workspace = true
+edition.workspace = true
+description = "Node.js bindings for the Hyper database API via napi-rs"
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+hyperdb-api = { path = "../hyperdb-api" }
+napi = { version = "3", features = ["async", "napi6", "tokio_rt", "serde-json"] }
+napi-derive = "3"
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "sync"] }
+
+[lints]
+workspace = true
+
+[build-dependencies]
+napi-build = "2"

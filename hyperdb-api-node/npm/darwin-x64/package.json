@@ -1,0 +1,21 @@
+{
+  "name": "hyperdb-api-node-darwin-x64",
+  "version": "0.1.0-rc.1",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "main": "hyperdb-api-node.darwin-x64.node",
+  "files": [
+    "hyperdb-api-node.darwin-x64.node",
+    "hyperd",
+    "LICENSE-HYPERD"
+  ],
+  "description": "hyperdb-api-node native binding for macOS x64 (Intel)",
+  "license": "MIT OR Apache-2.0",
+  "engines": {
+    "node": ">= 18"
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "packages": {
+    "hyperdb-api-core": {
+      "release-type": "rust",
+      "component": "hyperdb-api-core",
+      "changelog-path": "CHANGELOG.md"
+    },
+    "hyperdb-api": {
+      "release-type": "rust",
+      "component": "hyperdb-api",
+      "changelog-path": "CHANGELOG.md"
+    },
+    "hyperdb-api-salesforce": {
+      "release-type": "rust",
+      "component": "hyperdb-api-salesforce",
+      "changelog-path": "CHANGELOG.md"
+    },
+    "hyperdb-mcp": {
+      "release-type": "rust",
+      "component": "hyperdb-mcp",
+      "changelog-path": "CHANGELOG.md"
+    },
+    "hyperdb-bootstrap": {
+      "release-type": "rust",
+      "component": "hyperdb-bootstrap",
+      "changelog-path": "CHANGELOG.md"
+    },
+    "sea-query-hyperdb": {
+      "release-type": "rust",
+      "component": "sea-query-hyperdb",
+      "changelog-path": "CHANGELOG.md"
+    },
+    "hyperdb-api-node": {
+      "release-type": "node",
+      "component": "hyperdb-api-node",
+      "changelog-path": "CHANGELOG.md"
+    }
+  }
+}
