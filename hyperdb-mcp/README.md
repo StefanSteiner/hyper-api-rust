@@ -63,7 +63,7 @@ Each AI tool reads MCP server config from a different file but uses the same JSO
     "HyperDB": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "hyperdb-mcp@rc"]
+      "args": ["-y", "hyperdb-mcp"]
     }
   }
 }
