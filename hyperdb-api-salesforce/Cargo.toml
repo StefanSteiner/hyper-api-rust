@@ -29,7 +29,7 @@ workspace = true
 
 [dev-dependencies]
 rand = { workspace = true }
-hyperdb-api-core = { path = "../hyperdb-api-core", version = "=0.1.0-rc.1", features = ["salesforce-auth"] }
+hyperdb-api-core = { path = "../hyperdb-api-core", features = ["salesforce-auth"] }
 arrow = { version = "58.0", default-features = false, features = ["ipc"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1", features = ["full"] }

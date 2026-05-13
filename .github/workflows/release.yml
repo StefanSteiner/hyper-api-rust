@@ -32,21 +32,17 @@ env:
 jobs:
   verify:
     name: verify
-    runs-on: macos-14
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
+      - name: Install system libraries
+        run: sudo apt-get update -q && sudo apt-get install -y libfontconfig1-dev mold protobuf-compiler
+
       - uses: dtolnay/rust-toolchain@stable
-      - name: Ensure cargo is on PATH
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-
-      - name: Install protobuf (macOS)
-        if: runner.os == 'macOS'
-        run: brew install protobuf
-
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-verify
@@ -142,8 +138,8 @@ jobs:
             # window for small crates.
             sleep 45
           }
-          publish hyperdb-api-core
           publish hyperdb-api-salesforce
+          publish hyperdb-api-core
           publish hyperdb-api
           publish hyperdb-mcp
           publish hyperdb-bootstrap
