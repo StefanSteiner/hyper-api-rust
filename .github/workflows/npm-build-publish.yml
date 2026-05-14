@@ -98,9 +98,24 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install protoc -y
 
+      - name: Remove pre-installed Homebrew rust (macOS)
+        # See ci.yml for context — macos-14 runners ship Homebrew's
+        # `rust` package which symlinks `cargo` to `rustup-init` and
+        # shadows the real toolchain.
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew list rust >/dev/null 2>&1 && brew uninstall --ignore-dependencies rust || true
+          rm -f /usr/local/bin/cargo /usr/local/bin/rustc /usr/local/bin/rustup-init || true
+          rm -f /opt/homebrew/bin/cargo /opt/homebrew/bin/rustc /opt/homebrew/bin/rustup-init || true
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - name: Ensure cargo is on PATH
+        shell: bash
+        run: |
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: Swatinem/rust-cache@v2
         with:
           key: npm-${{ matrix.target }}
