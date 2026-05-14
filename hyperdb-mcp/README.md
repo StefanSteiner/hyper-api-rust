@@ -82,7 +82,24 @@ cd hyper-api-rust
 cargo build --release -p hyperdb-mcp
 ```
 
-The binary is at `target/release/hyperdb-mcp`. When building from source, the `hyperd` executable must be available separately — set the `HYPERD_PATH` environment variable or ensure it's on your `PATH`.
+The binary is at `target/release/hyperdb-mcp`.
+
+When building from source the `hyperd` executable is **not** bundled, so
+you'll need to provide one. The easiest path is the companion
+[`hyperdb-bootstrap`](../hyperdb-bootstrap/) CLI, which downloads a
+matching pinned `hyperd` for your platform:
+
+```bash
+cargo install hyperdb-bootstrap
+hyperdb-bootstrap download                # installs into ./.hyperd/current/
+export HYPERD_PATH="$PWD/.hyperd/current" # or pass via your MCP config
+```
+
+`hyperdb-bootstrap` also has a library API if you'd rather wire the
+download into your own build script — see its
+[README](../hyperdb-bootstrap/README.md). If you already have `hyperd`
+elsewhere (Tableau Hyper API for C++/Python/Java ships one), point
+`HYPERD_PATH` at it or add it to your `PATH`.
 
 ### MCP Client Configuration
 
