@@ -109,20 +109,6 @@ jobs:
       - name: Install protobuf (Windows)
         if: runner.os == 'Windows'
         run: choco install protoc -y
-      - name: Remove pre-installed Homebrew rust (macOS)
-        # Recent macos-14 runner images ship Homebrew's `rust` package,
-        # which symlinks `cargo` to `rustup-init`. With no toolchain
-        # installed, `cargo test` then invokes rustup-init's CLI parser
-        # and fails with "unexpected argument 'test' found". Removing
-        # brew's rust before installing the real toolchain avoids the
-        # symlink shadowing.
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          brew list rust >/dev/null 2>&1 && brew uninstall --ignore-dependencies rust || true
-          rm -f /usr/local/bin/cargo /usr/local/bin/rustc /usr/local/bin/rustup-init || true
-          rm -f /opt/homebrew/bin/cargo /opt/homebrew/bin/rustc /opt/homebrew/bin/rustup-init || true
-
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
