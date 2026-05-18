@@ -270,7 +270,7 @@ The Rust Hyper API is built entirely with pure-Rust dependencies:
 
 | Crate | Status | Notes |
 |-------|--------|-------|
-| `rustls`, `rustls-pemfile` | Pure Rust | TLS implementation (always-on) |
+| `rustls` | Pure Rust | TLS implementation (always-on); PEM parsing via re-exported `pki_types::pem` |
 | `webpki-roots` | Pure Rust | Mozilla CA root certificates (bundled) |
 | `aws-lc-sys` | C/ASM | Crypto provider for `rustls` (compiled from source) |
 
@@ -853,7 +853,7 @@ Key dependency categories:
 - **Logging**: `tracing`
 - **Cryptography**: `md-5`, `sha2`, `hmac`, `pbkdf2`, `base64` (RustCrypto)
 - **Security**: `rand`, `zeroize`
-- **TLS**: `rustls`, `rustls-pemfile`, `webpki-roots` (pure Rust, always-on)
+- **TLS**: `rustls`, `webpki-roots` (pure Rust, always-on)
 - **Geography**: `geo-types`, `wkt`, `geozero` (always-on)
 
 For a complete list: `cargo tree -p hyperdb-api`

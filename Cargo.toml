@@ -30,7 +30,6 @@ prost = "0.14"
 prost-types = "0.14"
 rand = "0.10"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-rustls-pemfile = "2.0"
 sha2 = "0.11"
 socket2 = "0.6"
 sysinfo = "0.38"

@@ -44,8 +44,11 @@ rand = { workspace = true }
 zeroize = { workspace = true }
 
 # TLS support (rustls)
+# `rustls` re-exports `rustls-pki-types` as `rustls::pki_types`, which provides
+# both the cert/key types we hand to `ClientConfig::with_*` and the PEM-parsing
+# trait `pki_types::pem::PemObject` that replaced the now-archived
+# `rustls-pemfile` crate.
 rustls = { workspace = true }
-rustls-pemfile = { workspace = true }
 webpki-roots = { workspace = true }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 
