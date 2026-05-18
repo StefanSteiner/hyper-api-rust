@@ -26,7 +26,7 @@ env:
 jobs:
   verify-ci:
     name: verify CI passed
-    if: github.event_name == 'release'
+    if: github.repository == 'tableau/hyper-api-rust' && github.event_name == 'release'
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
