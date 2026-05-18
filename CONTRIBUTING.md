@@ -154,7 +154,11 @@ This project uses [Conventional Commits](https://www.conventionalcommits.org/) t
 | `feat:` | Minor (0.1.0 → 0.2.0) | `feat: add connection pooling` |
 | `fix:` | Patch (0.1.0 → 0.1.1) | `fix: resolve memory leak in query execution` |
 | `feat!:` | Major (0.1.0 → 1.0.0) | `feat!: remove deprecated API` |
-| `docs:`, `chore:`, `style:`, `refactor:`, `test:` | No release | `chore: update dependencies` |
+| `docs:`, `chore:`, `ci:`, `style:`, `refactor:`, `test:` | No release | `chore: update dependencies` |
+
+> **Tip:** Use `ci:` for workflow/infrastructure fixes — not `fix:`. Reserve
+> `fix:` for changes that end-users of the crate or npm package would notice.
+> A `fix(ci):` commit will trigger an unintended patch release.
 
 ## Examples
 
@@ -164,6 +168,8 @@ feat: add support for batch query execution
 fix(hyperdb-api-core): resolve type mismatch
 
 feat!: remove deprecated ResultSet methods
+
+ci: fix chmod step in npm-build-publish workflow
 
 chore: update arrow dependency to 56
 ```
@@ -198,10 +204,13 @@ Summary:
    updates.
 3. Review and **merge** that PR when ready to ship. release-please tags the
    merge commit and creates the GitHub Release.
-4. The tag triggers [`release.yml`](.github/workflows/release.yml)
-   (crates.io publish) and the GitHub Release triggers
-   [`npm-build-publish.yml`](.github/workflows/npm-build-publish.yml) (npm publish).
-   No further maintainer action is required.
+4. Wait for CI to pass, then **manually trigger** the publish workflows:
+   ```bash
+   gh workflow run release.yml -f tag=vX.Y.Z
+   gh workflow run npm-build-publish.yml -f tag=vX.Y.Z
+   ```
+   See [`docs/GITHUB_OPERATIONS.md`](docs/GITHUB_OPERATIONS.md#cutting-a-release)
+   for why this step is manual (GitHub Actions `GITHUB_TOKEN` limitation).
 
 For pre-releases (`-rc.N`, `-alpha.N`, `-beta.N`), include a `Release-As:`
 footer in a commit on `main` — see
