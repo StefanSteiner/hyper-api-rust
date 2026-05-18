@@ -176,9 +176,10 @@ impl TlsMode {
 /// TLS implementation using the `rustls` crate.
 pub mod rustls_impl {
     use super::TlsConfig;
-    use std::io::BufReader;
     use std::sync::Arc;
 
+    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
     use tokio::net::TcpStream;
     use tokio_rustls::rustls::{ClientConfig, RootCertStore};
     use tokio_rustls::TlsConnector;
@@ -212,15 +213,10 @@ pub mod rustls_impl {
 
         // Add custom CA certificate if provided
         if let Some(ref ca_path) = config.ca_cert_path {
-            let ca_file = std::fs::File::open(ca_path).map_err(|e| {
-                Error::new(ErrorKind::Config, format!("failed to open CA cert: {e}"))
-            })?;
-            let mut ca_reader = BufReader::new(ca_file);
-            let certs = rustls_pemfile::certs(&mut ca_reader)
-                .map(|r| {
-                    r.map_err(|e| Error::new(ErrorKind::Config, format!("invalid CA cert: {e}")))
-                })
-                .collect::<Result<Vec<_>>>()?;
+            let certs = CertificateDer::pem_file_iter(ca_path)
+                .map_err(|e| Error::new(ErrorKind::Config, format!("failed to read CA cert: {e}")))?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|e| Error::new(ErrorKind::Config, format!("invalid CA cert: {e}")))?;
             for cert in certs {
                 root_store.add(cert).map_err(|e| {
                     Error::new(ErrorKind::Config, format!("failed to add CA cert: {e}"))
@@ -239,28 +235,21 @@ pub mod rustls_impl {
             let cert_path = config.client_cert_path.as_ref().unwrap();
             let key_path = config.client_key_path.as_ref().unwrap();
 
-            let cert_file = std::fs::File::open(cert_path).map_err(|e| {
-                Error::new(
-                    ErrorKind::Config,
-                    format!("failed to open client cert: {e}"),
-                )
-            })?;
-            let mut cert_reader = BufReader::new(cert_file);
-            let certs = rustls_pemfile::certs(&mut cert_reader)
-                .map(|r| {
-                    r.map_err(|e| {
-                        Error::new(ErrorKind::Config, format!("invalid client cert: {e}"))
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
+            let certs = CertificateDer::pem_file_iter(cert_path)
+                .map_err(|e| {
+                    Error::new(
+                        ErrorKind::Config,
+                        format!("failed to read client cert: {e}"),
+                    )
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|e| Error::new(ErrorKind::Config, format!("invalid client cert: {e}")))?;
 
-            let key_file = std::fs::File::open(key_path).map_err(|e| {
-                Error::new(ErrorKind::Config, format!("failed to open client key: {e}"))
-            })?;
-            let mut key_reader = BufReader::new(key_file);
-            let key = rustls_pemfile::private_key(&mut key_reader)
-                .map_err(|e| Error::new(ErrorKind::Config, format!("invalid client key: {e}")))?
-                .ok_or_else(|| Error::new(ErrorKind::Config, "no private key found"))?;
+            // `from_pem_file` returns `Error::NoItemsFound` when the file is
+            // syntactically valid PEM but contains no private-key section, so
+            // we don't need a separate "no private key found" branch.
+            let key = PrivateKeyDer::from_pem_file(key_path)
+                .map_err(|e| Error::new(ErrorKind::Config, format!("invalid client key: {e}")))?;
 
             builder
                 .with_client_auth_cert(certs, key)

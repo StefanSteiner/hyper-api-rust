@@ -89,6 +89,8 @@ fn write_pem_file(pem: &str) -> NamedTempFile {
 mod rustls_tests {
     use super::*;
     use hyperdb_api_core::client::tls::rustls_impl;
+    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
@@ -103,18 +105,16 @@ mod rustls_tests {
     ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
 
-        let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
-            rustls_pemfile::certs(&mut server_cert_pem.as_bytes())
+        let certs: Vec<CertificateDer<'static>> =
+            CertificateDer::pem_slice_iter(server_cert_pem.as_bytes())
                 .map(|r| r.unwrap())
                 .collect();
-        let key = rustls_pemfile::private_key(&mut server_key_pem.as_bytes())
-            .unwrap()
-            .unwrap();
+        let key = PrivateKeyDer::from_pem_slice(server_key_pem.as_bytes()).unwrap();
 
         let server_config = if let Some(ca_pem) = require_client_cert_ca_pem {
             let mut root_store = rustls::RootCertStore::empty();
-            let ca_certs: Vec<rustls::pki_types::CertificateDer<'static>> =
-                rustls_pemfile::certs(&mut ca_pem.as_bytes())
+            let ca_certs: Vec<CertificateDer<'static>> =
+                CertificateDer::pem_slice_iter(ca_pem.as_bytes())
                     .map(|r| r.unwrap())
                     .collect();
             for cert in ca_certs {

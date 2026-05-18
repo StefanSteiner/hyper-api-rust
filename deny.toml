@@ -56,10 +56,6 @@ ignore = [
     # `paste` is unmaintained, pulled transitively by `parquet` (hyperapi-mcp).
     # Macro-only crate — no runtime risk. Drops out when parquet migrates.
     { id = "RUSTSEC-2024-0436", reason = "paste is macro-only, no runtime risk; pulled by parquet only" },
-    # `rustls-pemfile` is unmaintained, pulled by `hyper-client` for cert loading.
-    # Upstream (rustls) now reads PEMs directly via `rustls-pki-types`; migrate
-    # in a follow-up PR tracked post-1.0.
-    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile unmaintained; migration to rustls-pki-types tracked post-1.0" },
     # `rsa` Marvin Attack: no patch available. The `rsa` crate is used by
     # `jsonwebtoken` inside `hyperapi-salesforce` for signing client JWTs for
     # Salesforce OAuth — this is *outbound* signing where timing sidechannels
