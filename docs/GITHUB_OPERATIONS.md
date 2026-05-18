@@ -212,12 +212,19 @@ steps are automated based on [Conventional Commits](https://www.conventionalcomm
 4. **Merge the release PR.** release-please then:
    - Creates a `vX.Y.Z` git tag on the merge commit.
    - Creates a GitHub Release with the auto-generated changelog.
-5. The tag push fires [release.yml](../.github/workflows/release.yml),
-   which publishes the 6 Rust crates to crates.io.
-6. The GitHub Release publication fires
-   [npm-build-publish.yml](../.github/workflows/npm-build-publish.yml),
-   which builds and publishes `hyperdb-mcp` and `hyperdb-api-node` (plus
-   their per-platform packages) to npm.
+5. **Wait for CI to pass** on the merge commit (the `ci.yml` workflow
+   runs on push to `main`).
+6. **Manually trigger the publish workflows.** Because release-please
+   uses `GITHUB_TOKEN`, the tag push and Release events it creates do
+   *not* fire other workflows (a GitHub Actions limitation). Once CI is
+   green, run:
+   ```bash
+   gh workflow run release.yml -f tag=vX.Y.Z
+   gh workflow run npm-build-publish.yml -f tag=vX.Y.Z
+   ```
+   `release.yml` publishes the 6 Rust crates to crates.io.
+   `npm-build-publish.yml` builds and publishes `hyperdb-mcp` and
+   `hyperdb-api-node` (plus their per-platform packages) to npm.
 
 ### How commits drive version bumps
 

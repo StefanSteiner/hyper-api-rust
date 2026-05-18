@@ -204,10 +204,13 @@ Summary:
    updates.
 3. Review and **merge** that PR when ready to ship. release-please tags the
    merge commit and creates the GitHub Release.
-4. The tag triggers [`release.yml`](.github/workflows/release.yml)
-   (crates.io publish) and the GitHub Release triggers
-   [`npm-build-publish.yml`](.github/workflows/npm-build-publish.yml) (npm publish).
-   No further maintainer action is required.
+4. Wait for CI to pass, then **manually trigger** the publish workflows:
+   ```bash
+   gh workflow run release.yml -f tag=vX.Y.Z
+   gh workflow run npm-build-publish.yml -f tag=vX.Y.Z
+   ```
+   See [`docs/GITHUB_OPERATIONS.md`](docs/GITHUB_OPERATIONS.md#cutting-a-release)
+   for why this step is manual (GitHub Actions `GITHUB_TOKEN` limitation).
 
 For pre-releases (`-rc.N`, `-alpha.N`, `-beta.N`), include a `Release-As:`
 footer in a commit on `main` — see
