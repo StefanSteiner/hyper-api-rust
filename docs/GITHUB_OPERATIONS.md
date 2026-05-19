@@ -202,8 +202,9 @@ steps are automated based on [Conventional Commits](https://www.conventionalcomm
    **release PR** titled `chore(main): release X.Y.Z`. That PR contains:
    - All 7 workspace crates' versions bumped (Cargo.toml + package.json).
    - The `optionalDependencies` and inter-crate version pins updated.
-   - A new dated section in each crate's `CHANGELOG.md` summarizing the
-     conventional commits that landed since the last release.
+   - A new dated section in the root `CHANGELOG.md` and
+     `hyperdb-api-node/CHANGELOG.md` summarizing the conventional commits
+     that landed since the last release.
    - An updated `.release-please-manifest.json`.
 3. A maintainer reviews the release PR. Adjust the version manually if a
    different bump is needed (e.g., promote a `0.x.0` patch to a minor) by

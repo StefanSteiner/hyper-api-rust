@@ -22,3 +22,7 @@
 * **ci:** restructure release-please config for workspace version inheritance ([#13](https://github.com/tableau/hyper-api-rust/issues/13)) ([fd18a8b](https://github.com/tableau/hyper-api-rust/commit/fd18a8bde3843e0162c57d361b8b1e2b19d61d6e))
 * **ci:** use simple release-type to avoid Cargo workspace member walking ([3884162](https://github.com/tableau/hyper-api-rust/commit/3884162aec551894de0b697816b34f87034ad781))
 * **ci:** use simple release-type to avoid Cargo workspace member walking ([#14](https://github.com/tableau/hyper-api-rust/issues/14)) ([42f0524](https://github.com/tableau/hyper-api-rust/commit/42f0524bccf9ceaede166742c04aacc5f426f4d6))
+
+## [0.1.1] - 2026-05-13
+
+Initial public release of all workspace crates.
