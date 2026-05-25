@@ -306,13 +306,14 @@ pub struct LoadFilesParams {
     /// hyperd's side; more connections don't help past a certain point
     /// and can starve the primary connection.
     pub concurrency: Option<u32>,
-    /// Target database alias. **Currently only the primary (ephemeral)
-    /// database is supported for parallel ingest.** Passing `"persistent"`
-    /// or another alias returns an error — use `load_file` with
-    /// `persist: true` instead for single-file persistent ingest.
+    /// Target database alias. Omit (or pass `"local"`) to write to the
+    /// ephemeral primary. Pass `"persistent"` to write to the durable
+    /// database. Other values target a user-attached writable database.
+    /// Applies to every entry in the batch — multi-target batches are
+    /// not supported.
     pub database: Option<String>,
-    /// Shorthand for `database: "persistent"`. Same limitation as
-    /// `database` applies — not yet supported for parallel ingest.
+    /// Shorthand for `database: "persistent"`. If both `database` and
+    /// `persist` are set, `database` wins.
     pub persist: Option<bool>,
 }
 
@@ -497,14 +498,17 @@ pub struct WatchDirectoryParams {
     /// Each in-flight ingest holds one connection to hyperd plus a transaction.
     #[serde(default)]
     pub max_concurrent: Option<u32>,
-    /// Target database alias. **Currently only the primary (ephemeral)
-    /// database is supported by the watcher** — the connection pool is
-    /// bound to the primary file. Passing `"persistent"` returns an
-    /// error. Use `load_file` with `persist: true` for one-off persistent
-    /// ingests.
+    /// Target database alias. Omit (or pass `"local"`) for the ephemeral
+    /// primary. Pass `"persistent"` for the durable database, or any
+    /// user-attached writable alias. The watcher's connection pool is
+    /// built against the resolved target, so subsequent ingests land
+    /// in the right database without per-file routing.
+    ///
+    /// Detaching the alias while a watcher is active is rejected — call
+    /// `unwatch_directory` first.
     pub database: Option<String>,
-    /// Shorthand for `database: "persistent"`. Same limitation applies —
-    /// not yet supported by the watcher.
+    /// Shorthand for `database: "persistent"`. If both `database` and
+    /// `persist` are set, `database` wins.
     pub persist: Option<bool>,
 }
 
@@ -1122,7 +1126,25 @@ impl HyperMcpServer {
         load_tool: &'static str,
         load_params: Option<&str>,
         row_count: Option<i64>,
+        target_db: Option<&str>,
     ) {
+        // The catalog currently lives in the persistent attachment only
+        // (per-DB catalogs ship in a follow-up iter). For ingests into
+        // user-attached writable databases we deliberately skip the
+        // upsert: writing a stub for a table that doesn't live in
+        // persistent would be misleading. The skip is logged at debug
+        // so it shows up under -v but doesn't spam normal logs.
+        if let Some(alias) = target_db {
+            if !alias.eq_ignore_ascii_case(Engine::PERSISTENT_ALIAS) {
+                tracing::debug!(
+                    table = %table_name,
+                    target_db = %alias,
+                    "skipping _table_catalog update: catalog is persistent-only; \
+                     per-DB catalog is a follow-up"
+                );
+                return;
+            }
+        }
         if let Err(e) = crate::table_catalog::upsert_stub(
             engine,
             table_name,
@@ -1463,9 +1485,10 @@ impl HyperMcpServer {
                 })
                 .collect();
 
-            // Catalog bookkeeping: only for primary or persistent targets.
-            // User-attached databases are not tracked in the catalog.
-            if target_db.is_none() || target_db.as_deref() == Some(Engine::PERSISTENT_ALIAS) {
+            // Catalog bookkeeping: the helper itself short-circuits for
+            // user-attached writable databases (per-DB catalog ships in
+            // a follow-up iter).
+            {
                 let load_params = serde_json::to_string(&json!({
                     "mode": mode,
                     "format": fmt,
@@ -1478,6 +1501,7 @@ impl HyperMcpServer {
                     "load_data",
                     load_params.as_deref(),
                     i64::try_from(ingest_result.rows).ok(),
+                    target_db.as_deref(),
                 );
             }
 
@@ -1582,8 +1606,8 @@ impl HyperMcpServer {
                 })
                 .collect();
 
-            // Catalog: only for primary or persistent targets.
-            if target_db.is_none() || target_db.as_deref() == Some(Engine::PERSISTENT_ALIAS) {
+            // Catalog: helper short-circuits for non-persistent targets.
+            {
                 let load_params = serde_json::to_string(&json!({
                     "source_path": params.path,
                     "mode": mode,
@@ -1599,6 +1623,7 @@ impl HyperMcpServer {
                     "load_file",
                     load_params.as_deref(),
                     i64::try_from(ingest_result.rows).ok(),
+                    target_db.as_deref(),
                 );
             }
 
@@ -1654,18 +1679,6 @@ impl HyperMcpServer {
             ));
         }
 
-        // Parallel ingest uses a connection pool that only sees the ephemeral
-        // primary — non-primary targets are not yet supported.
-        if params.database.is_some() || params.persist == Some(true) {
-            return Self::err_content(McpError::new(
-                ErrorCode::InvalidArgument,
-                "load_files does not yet support the `database` or `persist` parameter \
-                 because parallel ingest uses a connection pool bound to the primary database. \
-                 Use `load_file` with `persist: true` for single-file persistent ingest."
-                    .to_string(),
-            ));
-        }
-
         // Reject `mode = "merge"` (or stray `merge_key`) up front, before
         // we spin up the connection pool and dispatch the parallel batch.
         // The async ingest paths driven from this batch loader don't
@@ -1690,16 +1703,39 @@ impl HyperMcpServer {
             }
         }
 
-        // Resolve hyperd endpoint + workspace once, under the engine lock.
-        // After this the pool operates independently of the engine's sync
-        // connection.
-        let (endpoint, workspace) = match self.with_engine(|engine| {
+        // Resolve hyperd endpoint + the workspace path matching the
+        // resolved target database. The pool opens that .hyper file
+        // directly (under the same alias the engine uses) so qualified
+        // SQL routes correctly. Read-only attachments are rejected by
+        // resolve_db.
+        let (endpoint, workspace, target_db) = match self.with_engine(|engine| {
+            let target_db =
+                self.resolve_db(engine, params.database.as_deref(), params.persist, true)?;
             let endpoint = engine.hyperd_endpoint()?;
-            // The pool connects to the engine's primary database (ephemeral).
-            // Tools that target the persistent attachment use qualified SQL
-            // through the same connection.
-            let workspace = engine.ephemeral_path().to_string_lossy().to_string();
-            Ok((endpoint, workspace))
+            let workspace = match target_db.as_deref() {
+                None => engine.ephemeral_path().to_string_lossy().to_string(),
+                Some(alias) if alias.eq_ignore_ascii_case(Engine::PERSISTENT_ALIAS) => engine
+                    .persistent_path()
+                    .ok_or_else(|| {
+                        McpError::new(
+                            ErrorCode::InvalidArgument,
+                            "target 'persistent' but the server is in --ephemeral-only mode",
+                        )
+                    })?
+                    .to_string_lossy()
+                    .to_string(),
+                Some(alias) => {
+                    let entry = self.attachments.get(alias).ok_or_else(|| {
+                        McpError::new(
+                            ErrorCode::InvalidArgument,
+                            format!("database '{alias}' is not attached"),
+                        )
+                    })?;
+                    let crate::attach::AttachSource::LocalFile { path } = &entry.source;
+                    path.to_string_lossy().to_string()
+                }
+            };
+            Ok((endpoint, workspace, target_db))
         }) {
             Ok(v) => v,
             Err(e) => return Self::err_content(e),
@@ -1752,6 +1788,7 @@ impl HyperMcpServer {
                 let mut set = tokio::task::JoinSet::new();
                 for (idx, entry) in params.files.into_iter().enumerate() {
                     let pool = Arc::clone(&pool);
+                    let entry_target_db = target_db.clone();
                     set.spawn(async move {
                         let mode = entry.mode.clone().unwrap_or_else(|| "replace".into());
                         let replace_mode = mode == "replace";
@@ -1773,6 +1810,15 @@ impl HyperMcpServer {
                                     return (idx, out);
                                 }
                             };
+                        // The pool was built against the resolved target's
+                        // .hyper file as its workspace, so from these
+                        // connections' perspective the target IS the primary
+                        // database. Keep target_db unqualified (None) so SQL
+                        // routes into the pool's primary instead of trying
+                        // to qualify against an alias that doesn't exist on
+                        // these connections. The `entry_target_db` is still
+                        // used downstream for the catalog gate.
+                        let _ = &entry_target_db;
                         let opts = IngestOptions {
                             table: entry.table.clone(),
                             mode: mode.clone(),
@@ -1933,7 +1979,9 @@ impl HyperMcpServer {
             .collect();
 
         // Update the per-table catalog stubs for every success. Requires
-        // the engine, so we run this inside `with_engine`.
+        // the engine, so we run this inside `with_engine`. The helper
+        // short-circuits non-persistent targets (per-DB catalog ships
+        // in a follow-up iter).
         if let Err(e) = self.with_engine(|engine| {
             for o in &outcomes {
                 if let Some((rows, _, _)) = &o.ok {
@@ -1943,6 +1991,7 @@ impl HyperMcpServer {
                         "load_file",
                         None,
                         i64::try_from(*rows).ok(),
+                        target_db.as_deref(),
                     );
                 }
             }
@@ -2025,6 +2074,7 @@ impl HyperMcpServer {
                 "load_iceberg",
                 load_params.as_deref(),
                 i64::try_from(ingest_result.rows).ok(),
+                None,
             );
 
             Ok(json!({
@@ -2348,17 +2398,6 @@ impl HyperMcpServer {
         if let Err(e) = self.check_writable("watch_directory") {
             return Self::err_content(e);
         }
-        // Watcher uses a connection pool bound to the primary database;
-        // non-primary targets are not yet supported.
-        if params.database.is_some() || params.persist == Some(true) {
-            return Self::err_content(McpError::new(
-                ErrorCode::InvalidArgument,
-                "watch_directory does not yet support `database` or `persist`. \
-                 The watcher's connection pool is bound to the primary database. \
-                 Use `load_file` with `persist: true` for one-off persistent ingests."
-                    .to_string(),
-            ));
-        }
         let canonical = match crate::attach::validate_input_path(&params.path, "watch directory") {
             Ok(p) => p,
             Err(e) => return Self::err_content(e),
@@ -2370,18 +2409,31 @@ impl HyperMcpServer {
             Err(e) => return Self::err_content(e),
         }
 
+        // Resolve the target database once, under the engine lock. Read-only
+        // attachments are rejected here (require_writable=true) so the
+        // watcher can't be pointed at a destination it can't write to.
+        let target_db = match self.with_engine(|engine| {
+            self.resolve_db(engine, params.database.as_deref(), params.persist, true)
+        }) {
+            Ok(v) => v,
+            Err(e) => return Self::err_content(e),
+        };
+
         let path = canonical;
         let engine_handle = self.engine_handle();
+        let attachments = self.attachments_handle();
         let registry = self.watchers_handle();
         let options = crate::watcher::WatchOptions {
             max_concurrent: params.max_concurrent.unwrap_or(0) as usize,
         };
         let result = crate::watcher::start_watching(
             engine_handle,
+            attachments,
             registry,
             Some(self.subscriptions_handle()),
             path.clone(),
             params.table.clone(),
+            target_db,
             options,
         );
         match result {
@@ -2822,6 +2874,29 @@ impl HyperMcpServer {
         Parameters(params): Parameters<DetachDatabaseParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let alias = params.alias.clone();
+        // Reject if any active watcher targets this alias. Otherwise the
+        // watcher's pool would keep ingesting into the now-detached
+        // workspace path; or, if the user re-attached the same alias to
+        // a different file, into the wrong database. Fixed by stopping
+        // the watcher first via `unwatch_directory`.
+        if let Ok(watchers) = self.watchers.watchers.lock() {
+            let conflict = watchers.values().find(|h| {
+                h.target_db
+                    .as_deref()
+                    .is_some_and(|a| a.eq_ignore_ascii_case(&alias))
+            });
+            if let Some(h) = conflict {
+                return Self::err_content(McpError::new(
+                    ErrorCode::InvalidArgument,
+                    format!(
+                        "cannot detach '{alias}': an active watcher on directory '{}' targets it. \
+                         Call unwatch_directory(\"{}\") first.",
+                        h.directory.display(),
+                        h.directory.display()
+                    ),
+                ));
+            }
+        }
         let registry = self.attachments_handle();
         let result = self.with_engine(|engine| registry.detach(engine, &alias));
         match result {
@@ -3000,6 +3075,7 @@ impl HyperMcpServer {
                     "copy_query",
                     load_params.as_deref(),
                     row_count,
+                    target_db,
                 );
             }
 

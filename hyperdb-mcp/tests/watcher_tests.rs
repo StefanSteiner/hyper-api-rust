@@ -17,6 +17,7 @@
 mod common;
 
 use common::TestEngine;
+use hyperdb_mcp::attach::AttachRegistry;
 use hyperdb_mcp::engine::Engine;
 use hyperdb_mcp::watcher::{self, WatchOptions, WatcherRegistry};
 use std::fmt::Write as _;
@@ -64,10 +65,12 @@ async fn watcher_ingests_csv_and_cleans_up() {
 
     watcher::start_watching(
         Arc::clone(&engine),
+        Arc::new(AttachRegistry::new()),
         Arc::clone(&registry),
         None,
         watch_dir.path().to_path_buf(),
         "events".into(),
+        None,
         WatchOptions::default(),
     )
     .unwrap();
@@ -116,10 +119,12 @@ async fn watcher_moves_bad_files_to_failed() {
 
     watcher::start_watching(
         Arc::clone(&engine),
+        Arc::new(AttachRegistry::new()),
         Arc::clone(&registry),
         None,
         watch_dir.path().to_path_buf(),
         "evts".into(),
+        None,
         WatchOptions::default(),
     )
     .unwrap();
@@ -158,10 +163,12 @@ async fn watcher_sweep_picks_up_preexisting_files() {
 
     let initial = watcher::start_watching(
         Arc::clone(&engine),
+        Arc::new(AttachRegistry::new()),
         Arc::clone(&registry),
         None,
         watch_dir.path().to_path_buf(),
         "t".into(),
+        None,
         WatchOptions::default(),
     )
     .unwrap();
@@ -189,10 +196,12 @@ async fn unwatch_removes_from_registry() {
 
     watcher::start_watching(
         Arc::clone(&engine),
+        Arc::new(AttachRegistry::new()),
         Arc::clone(&registry),
         None,
         watch_dir.path().to_path_buf(),
         "logs".into(),
+        None,
         WatchOptions::default(),
     )
     .unwrap();
@@ -214,20 +223,24 @@ async fn watch_same_directory_twice_fails() {
 
     watcher::start_watching(
         Arc::clone(&engine),
+        Arc::new(AttachRegistry::new()),
         Arc::clone(&registry),
         None,
         watch_dir.path().to_path_buf(),
         "t1".into(),
+        None,
         WatchOptions::default(),
     )
     .unwrap();
 
     let err = watcher::start_watching(
         Arc::clone(&engine),
+        Arc::new(AttachRegistry::new()),
         Arc::clone(&registry),
         None,
         watch_dir.path().to_path_buf(),
         "t2".into(),
+        None,
         WatchOptions::default(),
     )
     .unwrap_err();
@@ -273,10 +286,12 @@ async fn watcher_ingests_many_files_concurrently() {
 
     let initial = watcher::start_watching(
         Arc::clone(&engine),
+        Arc::new(AttachRegistry::new()),
         Arc::clone(&registry),
         None,
         watch_dir.path().to_path_buf(),
         "batches".into(),
+        None,
         WatchOptions { max_concurrent: 4 },
     )
     .unwrap();
@@ -331,4 +346,68 @@ async fn watcher_ingests_many_files_concurrently() {
         .unwrap()
         .unwrap();
     assert_eq!(total, (FILES * ROWS_PER_FILE) as i64);
+}
+
+/// Iter 3: a watcher with `target_db = Some("persistent")` opens the
+/// persistent file as its pool workspace and ingests rows there
+/// instead of into primary. Verifies the pool resolution path picks
+/// the right .hyper file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn watcher_ingests_into_persistent_target() {
+    let (engine, _td) = engine_handle(TestEngine::new_ephemeral());
+
+    // Pre-create the target table in persistent so the watcher's
+    // append mode has somewhere to land. The current watcher contract
+    // is "append into an existing table" — auto-create is not part of
+    // this iteration's scope.
+    {
+        let guard = engine.lock().unwrap();
+        guard
+            .as_ref()
+            .unwrap()
+            .execute_command(
+                "CREATE TABLE \"persistent\".\"public\".\"events\" (id INT, name TEXT)",
+            )
+            .unwrap();
+    }
+
+    let watch_dir = tempfile::TempDir::new().unwrap();
+    let registry = Arc::new(WatcherRegistry::new());
+
+    watcher::start_watching(
+        Arc::clone(&engine),
+        Arc::new(AttachRegistry::new()),
+        Arc::clone(&registry),
+        None,
+        watch_dir.path().to_path_buf(),
+        "events".into(),
+        Some("persistent".into()),
+        WatchOptions::default(),
+    )
+    .unwrap();
+
+    drop_ready_pair(watch_dir.path(), "p.csv", b"id,name\n1,Alice\n2,Bob\n");
+
+    let canon = watch_dir.path().canonicalize().unwrap();
+    let ready = canon.join("p.csv.ready");
+    let data = canon.join("p.csv");
+    assert!(
+        wait_until(
+            || !ready.exists() && !data.exists(),
+            Duration::from_secs(10)
+        ),
+        "watcher did not finish ingesting persistent target within 10s"
+    );
+
+    // Rows must be visible in the persistent attachment, not primary.
+    let count: i64 = engine
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .connection()
+        .execute_scalar_query("SELECT COUNT(*) FROM \"persistent\".\"public\".\"events\"")
+        .unwrap()
+        .unwrap();
+    assert_eq!(count, 2);
 }
