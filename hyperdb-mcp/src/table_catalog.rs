@@ -19,20 +19,48 @@
 //! | `license`          | User / LLM |
 //! | `notes`            | User / LLM |
 //!
-//! The backing table is `_table_catalog`. After the ephemeral-primary
-//! migration, the catalog tracks tables in the **persistent** database
-//! only — ephemeral scratch tables aren't worth cataloguing because the
-//! database is replaced every session. All operations therefore target
-//! the persistent attachment via fully-qualified SQL
-//! (`"persistent"."public"."_table_catalog"`); when the engine has no
-//! persistent attachment (`--ephemeral-only`), catalog operations are
-//! no-ops.
+//! The backing table is `_table_catalog`. Each writable database that
+//! receives an ingest gets its own catalog, lazily seeded on first
+//! ingest (or first `set_table_metadata`):
+//!
+//! - **Ephemeral primary writes** stub into the persistent catalog
+//!   (so a long-running session's bookkeeping survives the
+//!   ephemeral file's per-session deletion). Reconciliation cleans
+//!   up rows whose tables no longer exist on engine bootstrap.
+//! - **`database = "persistent"`** writes to the persistent catalog
+//!   directly (same destination as the ephemeral case).
+//! - **`database = "<user-attached-writable>"`** writes to that DB's
+//!   own `_table_catalog`. Read-only attachments never get a catalog.
+//! - **`--ephemeral-only` mode (no persistent attached)** is a
+//!   degraded mode where catalog operations are no-ops because there
+//!   is nowhere durable to put bookkeeping.
+//!
+//! Per-DB catalog routing is exposed via the `*_in` variants
+//! ([`ensure_exists_in`], [`upsert_stub_in`], [`set_metadata_in`],
+//! [`get_in`], [`list_in`], [`delete_for_in`], [`reconcile_in`]). The
+//! original names ([`ensure_exists`], [`upsert_stub`], …) become
+//! 1-line wrappers passing `target_db = None` (which resolves to the
+//! persistent catalog).
 //!
 //! `_table_catalog` is hidden from the user-visible
 //! [`Engine::describe_tables`] output (see
 //! [`crate::engine::is_internal_table`]) so the LLM doesn't see it
 //! alongside its data tables; users who want to inspect it directly
-//! can run `SELECT * FROM "persistent"."public"."_table_catalog"`.
+//! can run `SELECT * FROM "<db>"."public"."_table_catalog"`.
+//!
+//! # Concurrency
+//!
+//! Catalog upserts use DELETE + INSERT inside a single transaction.
+//! Hyper rejects PRIMARY KEY ("Index support is disabled") and
+//! `INSERT … ON CONFLICT` ("syntax error: got ON"), so atomic upsert
+//! at the SQL layer isn't viable. Within one MCP server engine the
+//! lack of a PK is not a race risk: every catalog write runs inside
+//! [`crate::server::HyperMcpServer::with_engine`], which holds the
+//! engine mutex for the duration — so concurrent ingests serialize
+//! at the catalog write boundary even though the data-write path is
+//! parallel through the watcher pool's separate connections.
+//! Cross-process concurrency on the same `.hyper` file is out of
+//! scope.
 //!
 //! [`HyperMcpServer`]: crate::server::HyperMcpServer
 
@@ -48,21 +76,39 @@ use serde_json::Value;
 /// run a fully-qualified SELECT.
 pub const TABLE_CATALOG_TABLE: &str = "_table_catalog";
 
-/// Returns the fully-qualified SQL reference for `_table_catalog` in the
-/// engine's persistent attachment, or `None` when the engine has no
-/// persistent attachment (the `--ephemeral-only` case). All catalog
-/// read/write helpers consult this; `None` means catalog operations are
-/// no-ops because there's nowhere durable to put bookkeeping.
-fn qualified_catalog(engine: &Engine) -> Option<String> {
-    if engine.has_persistent() {
-        Some(format!(
-            "\"{}\".\"public\".\"{}\"",
-            Engine::PERSISTENT_ALIAS,
-            TABLE_CATALOG_TABLE
-        ))
-    } else {
-        None
-    }
+/// Returns the fully-qualified SQL reference for `_table_catalog` in
+/// `target_db`, or `None` when no durable destination exists.
+///
+/// Routing:
+/// - `None` → persistent catalog if attached, else `None` (the
+///   `--ephemeral-only` case, where catalog operations are no-ops).
+/// - `Some("persistent")` (case-insensitive) → persistent catalog.
+/// - `Some(alias)` → `"<alias>"."public"."_table_catalog"`. The
+///   caller is responsible for ensuring the catalog table exists in
+///   that DB (typically by calling [`ensure_exists_in`] first); this
+///   function does not validate existence or writability.
+fn qualified_catalog_in(engine: &Engine, target_db: Option<&str>) -> Option<String> {
+    let alias = match target_db {
+        None | Some("") => {
+            if engine.has_persistent() {
+                Engine::PERSISTENT_ALIAS.to_string()
+            } else {
+                return None;
+            }
+        }
+        Some(a) if a.eq_ignore_ascii_case(Engine::PERSISTENT_ALIAS) => {
+            // Persistent is only valid when the engine actually has it.
+            if !engine.has_persistent() {
+                return None;
+            }
+            Engine::PERSISTENT_ALIAS.to_string()
+        }
+        Some(a) => a.to_string(),
+    };
+    let alias_esc = alias.replace('"', "\"\"");
+    Some(format!(
+        "\"{alias_esc}\".\"public\".\"{TABLE_CATALOG_TABLE}\""
+    ))
 }
 
 /// One row in [`TABLE_CATALOG_TABLE`].
@@ -151,80 +197,81 @@ const CATALOG_COLUMNS: &str = "(\
      notes              TEXT\
  )";
 
-/// Idempotently create the backing table in the primary workspace. Safe
-/// to call on every engine init — if the table already exists this is
-/// a no-op. The schema here is the only one the code targets; all
-/// prose columns are nullable, so a plain `NULL` insert is always
-/// well-formed.
+/// Idempotently create the backing table in `target_db`. Safe to call
+/// on every engine init or every catalog write — if the table
+/// already exists this is a no-op. The schema is the only one the
+/// code targets; all prose columns are nullable, so a plain `NULL`
+/// insert is always well-formed.
 ///
-/// The DDL uses the unqualified name, which — thanks to the
-/// `schema_search_path` pin installed by [`crate::attach::AttachRegistry`]
-/// — always resolves to the primary workspace even while additional
-/// databases are attached.
+/// Routing follows [`qualified_catalog_in`]: `None` resolves to the
+/// persistent catalog (or no-op in `--ephemeral-only` mode);
+/// `Some("persistent")` is the same; `Some(alias)` targets the
+/// attached database directly.
 ///
 /// # Errors
 ///
 /// Propagates any error from [`Engine::execute_command`] on the
 /// `CREATE TABLE IF NOT EXISTS` statement — typically connection loss
-/// or permission failures.
-pub fn ensure_exists(engine: &Engine) -> Result<(), McpError> {
-    let Some(qualified) = qualified_catalog(engine) else {
-        // No persistent attachment — there's nowhere durable to put the
-        // catalog. Treat as success so callers don't have to special-case
-        // the ephemeral-only mode.
+/// or permission failures (the latter for read-only attachments;
+/// callers should pre-check writability).
+pub fn ensure_exists_in(engine: &Engine, target_db: Option<&str>) -> Result<(), McpError> {
+    let Some(qualified) = qualified_catalog_in(engine, target_db) else {
+        // Nowhere durable to put the catalog (--ephemeral-only).
         return Ok(());
     };
     let ddl = format!("CREATE TABLE IF NOT EXISTS {qualified} {CATALOG_COLUMNS}");
     engine.execute_command(&ddl)?;
     // After CREATE TABLE IF NOT EXISTS the catalog is guaranteed
-    // present — short-circuit subsequent existence probes.
-    engine.mark_catalog_present();
+    // present in this DB — short-circuit subsequent existence probes.
+    if let Some(alias) = resolve_catalog_alias(engine, target_db) {
+        engine.mark_catalog_present_for(&alias);
+    }
     Ok(())
 }
 
-/// Idempotently create `_table_catalog` inside an *attached* database
-/// (fully qualified as `"{db_alias}"."public"."_table_catalog"`), with
-/// the same schema as the primary's catalog.
+/// Backward-compatible wrapper: ensure the catalog exists in the
+/// persistent attachment (or no-op in `--ephemeral-only` mode).
 ///
-/// Used by `attach_database` when the MCP just created a fresh
-/// `.hyper` file via `on_missing: create`: seeding the empty file with
-/// the catalog table makes the new workspace immediately usable as a
-/// primary the next time someone opens it on its own, without paying
-/// a backfill sweep. Only called when the server is not in bare mode;
-/// attaching an *existing* database never touches its `_table_catalog`.
+/// New code should prefer [`ensure_exists_in`] with an explicit
+/// `target_db`.
 ///
 /// # Errors
 ///
-/// Propagates any error from the qualified `CREATE TABLE IF NOT EXISTS`
-/// against the attached database — typically a wire error or a
-/// malformed alias that slipped past validation.
+/// Same as [`ensure_exists_in`].
+pub fn ensure_exists(engine: &Engine) -> Result<(), McpError> {
+    ensure_exists_in(engine, None)
+}
+
+/// Backward-compatible wrapper for the old `ensure_exists_in_database`
+/// name. Delegates to [`ensure_exists_in`].
+///
+/// # Errors
+///
+/// Same as [`ensure_exists_in`].
+#[deprecated(since = "0.2.0", note = "use ensure_exists_in(engine, Some(db_alias))")]
 pub fn ensure_exists_in_database(engine: &Engine, db_alias: &str) -> Result<(), McpError> {
-    let alias_esc = db_alias.replace('"', "\"\"");
-    let ddl = format!(
-        "CREATE TABLE IF NOT EXISTS \"{alias_esc}\".\"public\".\"{TABLE_CATALOG_TABLE}\" \
-         {CATALOG_COLUMNS}"
-    );
-    engine.execute_command(&ddl)?;
-    Ok(())
+    ensure_exists_in(engine, Some(db_alias))
 }
 
 // --- Reads ------------------------------------------------------------------
 
-/// Fetch every catalog row in name-sorted order. Returns an empty `Vec` if
-/// the catalog table doesn't exist (callers shouldn't need to pre-check).
+/// Fetch every catalog row from `target_db` in name-sorted order.
+/// Returns an empty `Vec` when no catalog exists in the target.
+///
+/// Routing follows [`qualified_catalog_in`].
 ///
 /// # Errors
 ///
-/// - Propagates any error from `table_present` (connection failure
+/// - Propagates any error from `table_present_in` (connection failure
 ///   during the existence probe).
 /// - Propagates any error from [`Engine::execute_query_to_json`].
 /// - Propagates [`ErrorCode::SchemaMismatch`] from `row_to_entry` if
 ///   a persisted row cannot be decoded into a [`CatalogEntry`].
-pub fn list(engine: &Engine) -> Result<Vec<CatalogEntry>, McpError> {
-    let Some(qualified) = qualified_catalog(engine) else {
+pub fn list_in(engine: &Engine, target_db: Option<&str>) -> Result<Vec<CatalogEntry>, McpError> {
+    let Some(qualified) = qualified_catalog_in(engine, target_db) else {
         return Ok(Vec::new());
     };
-    if !table_present(engine)? {
+    if !table_present_in(engine, target_db)? {
         return Ok(Vec::new());
     }
     let sql = format!(
@@ -237,17 +284,30 @@ pub fn list(engine: &Engine) -> Result<Vec<CatalogEntry>, McpError> {
     rows.iter().map(row_to_entry).collect()
 }
 
-/// Fetch a single row by `table_name`, or `Ok(None)` if absent.
+/// Backward-compatible wrapper: list rows from the persistent catalog.
 ///
 /// # Errors
 ///
-/// Same as [`list`]: propagates errors from `table_present`, the
-/// Hyper `SELECT`, or row decoding.
-pub fn get(engine: &Engine, table_name: &str) -> Result<Option<CatalogEntry>, McpError> {
-    let Some(qualified) = qualified_catalog(engine) else {
+/// Same as [`list_in`].
+pub fn list(engine: &Engine) -> Result<Vec<CatalogEntry>, McpError> {
+    list_in(engine, None)
+}
+
+/// Fetch a single row from `target_db` by `table_name`, or `Ok(None)`
+/// if absent.
+///
+/// # Errors
+///
+/// Same as [`list_in`].
+pub fn get_in(
+    engine: &Engine,
+    table_name: &str,
+    target_db: Option<&str>,
+) -> Result<Option<CatalogEntry>, McpError> {
+    let Some(qualified) = qualified_catalog_in(engine, target_db) else {
         return Ok(None);
     };
-    if !table_present(engine)? {
+    if !table_present_in(engine, target_db)? {
         return Ok(None);
     }
     let sql = format!(
@@ -264,10 +324,22 @@ pub fn get(engine: &Engine, table_name: &str) -> Result<Option<CatalogEntry>, Mc
     }
 }
 
+/// Backward-compatible wrapper: read from the persistent catalog.
+///
+/// # Errors
+///
+/// Same as [`get_in`].
+pub fn get(engine: &Engine, table_name: &str) -> Result<Option<CatalogEntry>, McpError> {
+    get_in(engine, table_name, None)
+}
+
 // --- Writes -----------------------------------------------------------------
 
-/// Upsert a catalog row for `table_name`, carrying forward prose fields
-/// from any existing row and refreshing mechanical fields.
+/// Upsert a catalog row for `table_name` in `target_db`, carrying
+/// forward prose fields from any existing row and refreshing
+/// mechanical fields.
+///
+/// Routing follows [`qualified_catalog_in`].
 ///
 /// * `load_tool` / `load_params` — overwrite the existing values.
 /// * `row_count` — overwrite.
@@ -278,31 +350,34 @@ pub fn get(engine: &Engine, table_name: &str) -> Result<Option<CatalogEntry>, Mc
 /// * Prose fields (`source_url`, `source_description`, `purpose`,
 ///   `license`, `notes`) — preserved unchanged from the existing row.
 ///
-/// Implementation is DELETE + INSERT (Hyper lacks `UPSERT`), run inside a
-/// transaction for atomicity.
+/// Implementation is DELETE + INSERT inside a transaction. Hyper
+/// rejects PRIMARY KEY and `INSERT … ON CONFLICT`, so this is the
+/// only available shape. Within one MCP server engine, concurrent
+/// upserts of the same row are serialized by the engine mutex (see
+/// the module-level concurrency note).
 ///
 /// # Errors
 ///
-/// - Propagates errors from [`ensure_exists`] and [`get`] (catalog
-///   probe and read failures).
+/// - Propagates errors from [`ensure_exists_in`] and [`get_in`].
 /// - Propagates any transaction error from the enclosing
 ///   [`Engine::execute_in_transaction`] — typically DELETE, INSERT,
 ///   commit, or connection-loss failures.
-pub fn upsert_stub(
+pub fn upsert_stub_in(
     engine: &Engine,
     table_name: &str,
     load_tool: &str,
     load_params: Option<&str>,
     row_count: Option<i64>,
     bump_refresh: bool,
+    target_db: Option<&str>,
 ) -> Result<(), McpError> {
-    ensure_exists(engine)?;
-    let Some(qualified) = qualified_catalog(engine) else {
-        // No persistent attachment; nothing to write to.
+    ensure_exists_in(engine, target_db)?;
+    let Some(qualified) = qualified_catalog_in(engine, target_db) else {
+        // No durable destination; nothing to write to.
         return Ok(());
     };
 
-    let existing = get(engine, table_name)?;
+    let existing = get_in(engine, table_name, target_db)?;
     let now = Utc::now();
     let loaded_at = existing.as_ref().map_or(now, |e| e.loaded_at);
     let last_refreshed_at = if bump_refresh {
@@ -355,26 +430,57 @@ pub fn upsert_stub(
     Ok(())
 }
 
-/// Partial UPDATE of prose fields for one table. Errors with
-/// [`ErrorCode::TableNotFound`] if there is no catalog row for
-/// `table_name` (callers can decide whether to first stub via
-/// [`upsert_stub`] or surface the error).
+/// Backward-compatible wrapper: upsert into the persistent catalog.
+///
+/// # Errors
+///
+/// Same as [`upsert_stub_in`].
+pub fn upsert_stub(
+    engine: &Engine,
+    table_name: &str,
+    load_tool: &str,
+    load_params: Option<&str>,
+    row_count: Option<i64>,
+    bump_refresh: bool,
+) -> Result<(), McpError> {
+    upsert_stub_in(
+        engine,
+        table_name,
+        load_tool,
+        load_params,
+        row_count,
+        bump_refresh,
+        None,
+    )
+}
+
+/// Partial UPDATE of prose fields for one table in `target_db`. Errors
+/// with [`ErrorCode::TableNotFound`] if there is no catalog row for
+/// `table_name` in that DB.
+///
+/// Routing follows [`qualified_catalog_in`]. The catalog is lazily
+/// seeded in `target_db` if absent (matches today's behavior for
+/// the persistent target).
 ///
 /// # Errors
 ///
 /// - Returns [`ErrorCode::EmptyData`] if `fields` contains no values
 ///   to update.
 /// - Returns [`ErrorCode::TableNotFound`] if no catalog row exists for
-///   `table_name`.
-/// - Propagates any error from [`ensure_exists`], [`get`], or the
+///   `table_name` in `target_db`.
+/// - Returns [`ErrorCode::ReadOnlyViolation`] when there is no durable
+///   catalog destination (`--ephemeral-only` with `target_db = None`).
+/// - Propagates any error from [`ensure_exists_in`], [`get_in`], or the
 ///   `UPDATE` statement.
-pub fn set_metadata(
+pub fn set_metadata_in(
     engine: &Engine,
     table_name: &str,
     fields: &MetadataFields,
+    target_db: Option<&str>,
 ) -> Result<CatalogEntry, McpError> {
-    ensure_exists(engine)?;
-
+    // Validate caller intent BEFORE seeding the catalog. Both the
+    // empty-fields and missing-row paths return an error; we don't
+    // want them to mutate the target DB's schema as a side effect.
     if fields.is_empty() {
         return Err(McpError::new(
             ErrorCode::EmptyData,
@@ -386,14 +492,24 @@ pub fn set_metadata(
     // Require an existing row so we don't accidentally create catalog
     // entries for tables that don't exist. The server wires the catalog
     // up to ingest + execute so any real table should already have a
-    // stub row.
-    let existing = get(engine, table_name)?.ok_or_else(|| {
+    // stub row. `get_in` returns None when the catalog table itself
+    // doesn't exist yet; treat that as "no row" without seeding the
+    // catalog (the user gets a clean TableNotFound and the .hyper file
+    // is left untouched).
+    let existing = get_in(engine, table_name, target_db)?.ok_or_else(|| {
+        let where_clause = match target_db {
+            Some(alias) if !alias.eq_ignore_ascii_case(Engine::PERSISTENT_ALIAS) => {
+                format!(" in database '{alias}'")
+            }
+            _ => String::new(),
+        };
         McpError::new(
             ErrorCode::TableNotFound,
             format!(
-                "No catalog entry for table '{table_name}'. Load the table first \
-                 (load_file / load_data / execute CREATE TABLE) or create it and \
-                 re-run; the catalog is refreshed automatically on those paths."
+                "No catalog entry for table '{table_name}'{where_clause}. Load the \
+                 table first (load_file / load_data / execute CREATE TABLE) or \
+                 create it and re-run; the catalog is refreshed automatically on \
+                 those paths."
             ),
         )
     })?;
@@ -418,7 +534,7 @@ pub fn set_metadata(
         assignments.push(format!("notes = {}", sql_literal_or_null_if_empty(v)));
     }
 
-    let qualified = qualified_catalog(engine).ok_or_else(|| {
+    let qualified = qualified_catalog_in(engine, target_db).ok_or_else(|| {
         McpError::new(
             ErrorCode::ReadOnlyViolation,
             "set_table_metadata is unavailable in --ephemeral-only mode \
@@ -436,21 +552,38 @@ pub fn set_metadata(
     // fields). `existing` is our fallback if the re-read somehow returns
     // nothing — that shouldn't happen, but preserves the previous row
     // instead of failing spuriously.
-    get(engine, table_name)?.map_or(Ok(existing), Ok)
+    get_in(engine, table_name, target_db)?.map_or(Ok(existing), Ok)
 }
 
-/// Delete the catalog row (if any) for `table_name`. Called when a table
-/// is dropped. Idempotent — no error if the row doesn't exist.
+/// Backward-compatible wrapper: update prose fields in the persistent
+/// catalog.
 ///
 /// # Errors
 ///
-/// Propagates any error from `table_present` or from the `DELETE`
-/// statement against the catalog table.
-pub fn delete_for(engine: &Engine, table_name: &str) -> Result<bool, McpError> {
-    let Some(qualified) = qualified_catalog(engine) else {
+/// Same as [`set_metadata_in`].
+pub fn set_metadata(
+    engine: &Engine,
+    table_name: &str,
+    fields: &MetadataFields,
+) -> Result<CatalogEntry, McpError> {
+    set_metadata_in(engine, table_name, fields, None)
+}
+
+/// Delete the catalog row (if any) for `table_name` in `target_db`.
+/// Idempotent — no error if the row doesn't exist.
+///
+/// # Errors
+///
+/// Propagates any error from `table_present_in` or from the `DELETE`.
+pub fn delete_for_in(
+    engine: &Engine,
+    table_name: &str,
+    target_db: Option<&str>,
+) -> Result<bool, McpError> {
+    let Some(qualified) = qualified_catalog_in(engine, target_db) else {
         return Ok(false);
     };
-    if !table_present(engine)? {
+    if !table_present_in(engine, target_db)? {
         return Ok(false);
     }
     let sql = format!(
@@ -461,32 +594,40 @@ pub fn delete_for(engine: &Engine, table_name: &str) -> Result<bool, McpError> {
     Ok(affected > 0)
 }
 
-/// Synchronize the catalog against the current set of user tables.
+/// Backward-compatible wrapper: delete from the persistent catalog.
+///
+/// # Errors
+///
+/// Same as [`delete_for_in`].
+pub fn delete_for(engine: &Engine, table_name: &str) -> Result<bool, McpError> {
+    delete_for_in(engine, table_name, None)
+}
+
+/// Synchronize the catalog in `target_db` against the current set of
+/// user tables in that DB.
 ///
 /// * Insert a stub row for every user table missing from the catalog.
 ///   These stubs use `load_tool = "unknown"` so callers can later tell
 ///   the difference between "loaded via a tool and we tracked it" and
 ///   "found during reconciliation".
-/// * Delete catalog rows whose table no longer exists in Hyper.
-/// * Refresh `row_count` on every remaining row so `SELECT * FROM
-///   _table_catalog` always reflects current size (cheap: it's one
-///   `COUNT(*)` per table, and the user set is small).
+/// * Delete catalog rows whose table no longer exists in `target_db`.
+/// * Refresh `row_count` on every remaining row.
 ///
 /// Does *not* bump `last_refreshed_at` — reconciliation is a housekeeping
-/// pass, not a data refresh. Only explicit loads mark a refresh.
+/// pass, not a data refresh.
 ///
 /// # Errors
 ///
-/// - Propagates any error from [`ensure_exists`], `user_tables`,
-///   [`list`], [`delete_for`], `refresh_row_count`, or [`upsert_stub`].
-/// - `row_count_of` failures are swallowed (the row count falls back
-///   to `None`), so per-table count probe failures do not abort the
-///   sweep.
-pub fn reconcile(engine: &Engine) -> Result<(), McpError> {
-    ensure_exists(engine)?;
+/// - Propagates any error from [`ensure_exists_in`], `user_tables_in`,
+///   [`list_in`], [`delete_for_in`], `refresh_row_count_in`, or
+///   [`upsert_stub_in`].
+/// - `row_count_of_in` failures are swallowed (the row count falls
+///   back to `None`).
+pub fn reconcile_in(engine: &Engine, target_db: Option<&str>) -> Result<(), McpError> {
+    ensure_exists_in(engine, target_db)?;
 
-    let tables = user_tables(engine)?;
-    let catalog_entries = list(engine)?;
+    let tables = user_tables_in(engine, target_db)?;
+    let catalog_entries = list_in(engine, target_db)?;
     let catalog_names: std::collections::HashSet<String> = catalog_entries
         .iter()
         .map(|e| e.table_name.clone())
@@ -495,19 +636,28 @@ pub fn reconcile(engine: &Engine) -> Result<(), McpError> {
 
     for entry in &catalog_entries {
         if !live_tables.contains(&entry.table_name) {
-            delete_for(engine, &entry.table_name)?;
+            delete_for_in(engine, &entry.table_name, target_db)?;
         }
     }
 
     for table in &tables {
-        let row_count = row_count_of(engine, table).ok();
+        let row_count = row_count_of_in(engine, table, target_db).ok();
         if catalog_names.contains(table) {
-            refresh_row_count(engine, table, row_count)?;
+            refresh_row_count_in(engine, table, row_count, target_db)?;
         } else {
-            upsert_stub(engine, table, "unknown", None, row_count, false)?;
+            upsert_stub_in(engine, table, "unknown", None, row_count, false, target_db)?;
         }
     }
     Ok(())
+}
+
+/// Backward-compatible wrapper: reconcile the persistent catalog.
+///
+/// # Errors
+///
+/// Same as [`reconcile_in`].
+pub fn reconcile(engine: &Engine) -> Result<(), McpError> {
+    reconcile_in(engine, None)
 }
 
 // --- Internals --------------------------------------------------------------
@@ -518,14 +668,17 @@ pub fn reconcile(engine: &Engine) -> Result<(), McpError> {
 /// `pg_catalog.pg_tables` probe so it sees inside the attachment;
 /// `Catalog::get_table_names` would target the connection's primary
 /// (ephemeral) by default.
-fn user_tables(engine: &Engine) -> Result<Vec<String>, McpError> {
-    if !engine.has_persistent() {
+/// List user-facing tables in `target_db` (excludes `_hyperdb_*`
+/// internals and the catalog itself). Returns an empty Vec when no
+/// catalog destination exists for the target.
+fn user_tables_in(engine: &Engine, target_db: Option<&str>) -> Result<Vec<String>, McpError> {
+    let Some(alias) = resolve_catalog_alias(engine, target_db) else {
         return Ok(Vec::new());
-    }
+    };
+    let alias_esc = alias.replace('"', "\"\"");
     let sql = format!(
-        "SELECT tablename FROM \"{}\".pg_catalog.pg_tables \
-         WHERE schemaname = 'public'",
-        Engine::PERSISTENT_ALIAS
+        "SELECT tablename FROM \"{alias_esc}\".pg_catalog.pg_tables \
+         WHERE schemaname = 'public'"
     );
     let rows = engine.execute_query_to_json(&sql)?;
     Ok(rows
@@ -539,19 +692,23 @@ fn user_tables(engine: &Engine) -> Result<Vec<String>, McpError> {
         .collect())
 }
 
-/// `true` when `_table_catalog` is present inside the persistent
-/// attachment. Returns `false` if there is no persistent attachment.
+/// `true` when `_table_catalog` is present inside `target_db`.
+/// Returns `false` when no catalog destination exists.
 ///
-/// Caches the result on the engine after the first probe — subsequent
-/// reads/writes don't re-run the existence query. Callers that mutate
-/// the catalog (`ensure_exists`) update the cache directly via
-/// [`Engine::mark_catalog_present`].
-fn table_present(engine: &Engine) -> Result<bool, McpError> {
-    engine.catalog_present_in_persistent(|engine| {
+/// Caches the per-DB result on the engine after the first probe so
+/// subsequent reads/writes skip the existence query. Catalog
+/// mutators ([`ensure_exists_in`]) update the cache directly via
+/// [`Engine::mark_catalog_present_for`].
+fn table_present_in(engine: &Engine, target_db: Option<&str>) -> Result<bool, McpError> {
+    let Some(alias) = resolve_catalog_alias(engine, target_db) else {
+        return Ok(false);
+    };
+    let alias_for_probe = alias.clone();
+    engine.catalog_present_in(&alias, move |engine| {
+        let alias_esc = alias_for_probe.replace('"', "\"\"");
         let sql = format!(
-            "SELECT tablename FROM \"{}\".pg_catalog.pg_tables \
+            "SELECT tablename FROM \"{alias_esc}\".pg_catalog.pg_tables \
              WHERE schemaname = 'public' AND tablename = {}",
-            Engine::PERSISTENT_ALIAS,
             sql_literal(TABLE_CATALOG_TABLE)
         );
         let rows = engine.execute_query_to_json(&sql)?;
@@ -559,18 +716,20 @@ fn table_present(engine: &Engine) -> Result<bool, McpError> {
     })
 }
 
-/// Return `COUNT(*)` for a user table inside the persistent attachment.
-/// Quoted to handle mixed-case or keyword-like names. Returns 0 if no
-/// persistent attachment is present.
-fn row_count_of(engine: &Engine, table_name: &str) -> Result<i64, McpError> {
-    if !engine.has_persistent() {
+/// Return `COUNT(*)` for a user table inside `target_db`. Quoted to
+/// handle mixed-case or keyword-like names. Returns 0 if no catalog
+/// destination exists.
+fn row_count_of_in(
+    engine: &Engine,
+    table_name: &str,
+    target_db: Option<&str>,
+) -> Result<i64, McpError> {
+    let Some(alias) = resolve_catalog_alias(engine, target_db) else {
         return Ok(0);
-    }
+    };
+    let alias_esc = alias.replace('"', "\"\"");
     let quoted = table_name.replace('"', "\"\"");
-    let sql = format!(
-        "SELECT COUNT(*) AS cnt FROM \"{}\".\"public\".\"{quoted}\"",
-        Engine::PERSISTENT_ALIAS
-    );
+    let sql = format!("SELECT COUNT(*) AS cnt FROM \"{alias_esc}\".\"public\".\"{quoted}\"");
     let rows = engine.execute_query_to_json(&sql)?;
     Ok(rows
         .first()
@@ -578,15 +737,15 @@ fn row_count_of(engine: &Engine, table_name: &str) -> Result<i64, McpError> {
         .unwrap_or(0))
 }
 
-/// Cheap UPDATE for just the `row_count` column of an existing row.
-/// Used by [`reconcile`] so we don't rewrite the whole row just to
-/// refresh counts.
-fn refresh_row_count(
+/// Cheap UPDATE for just the `row_count` column of an existing row in
+/// `target_db`. Used by [`reconcile_in`].
+fn refresh_row_count_in(
     engine: &Engine,
     table_name: &str,
     row_count: Option<i64>,
+    target_db: Option<&str>,
 ) -> Result<(), McpError> {
-    let Some(qualified) = qualified_catalog(engine) else {
+    let Some(qualified) = qualified_catalog_in(engine, target_db) else {
         return Ok(());
     };
     let sql = format!(
@@ -596,6 +755,30 @@ fn refresh_row_count(
     );
     engine.execute_command(&sql)?;
     Ok(())
+}
+
+/// Resolve `target_db` to the canonical alias whose catalog this
+/// operation should target. Mirrors [`qualified_catalog_in`]'s
+/// routing but returns just the alias (not the qualified table
+/// reference) for callers that need to build their own SQL.
+fn resolve_catalog_alias(engine: &Engine, target_db: Option<&str>) -> Option<String> {
+    match target_db {
+        None | Some("") => {
+            if engine.has_persistent() {
+                Some(Engine::PERSISTENT_ALIAS.to_string())
+            } else {
+                None
+            }
+        }
+        Some(a) if a.eq_ignore_ascii_case(Engine::PERSISTENT_ALIAS) => {
+            if engine.has_persistent() {
+                Some(Engine::PERSISTENT_ALIAS.to_string())
+            } else {
+                None
+            }
+        }
+        Some(a) => Some(a.to_string()),
+    }
 }
 
 /// Hyper emits TIMESTAMP columns as either `YYYY-MM-DDTHH:MM:SS...` (RFC

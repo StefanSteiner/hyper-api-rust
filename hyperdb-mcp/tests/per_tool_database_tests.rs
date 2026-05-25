@@ -395,12 +395,475 @@ fn resolve_target_db_persistent_uppercase_errors_in_ephemeral_only() {
     assert_eq!(err.code, ErrorCode::InvalidArgument);
 }
 
-// Note on coverage: server-handler-level rejection paths (load_file
-// merge+database, load_files+database, watch_directory+database,
-// export format=hyper+database, attach-readonly+writable-required)
-// are not reachable from this integration test layer without going
-// through the rmcp tool router. The compile-time signatures of
-// `create_table_async` / `build_parquet_ingest_sql` exercising the
-// new `target_db` parameter cover the structural contract; the
-// runtime rejection paths are covered by manual smoke tests and
-// will land in a follow-up end-to-end MCP test harness.
+// --- Cross-database merge (Iter 1) -----------------------------------------
+
+/// Merge into persistent when the target table doesn't exist yet:
+/// the temp is renamed into the target slot. Verifies the rename path
+/// works against a non-primary database.
+#[test]
+fn merge_into_persistent_creates_table_when_missing() {
+    let te = TestEngine::new_ephemeral();
+    let opts = IngestOptions {
+        table: "merged_persist".into(),
+        mode: "merge".into(),
+        schema_override: None,
+        merge_key: Some(vec!["id".into()]),
+        target_db: Some("persistent".into()),
+    };
+    let data = r#"[{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]"#;
+    let result = ingest_json(&te.engine, data, &opts).unwrap();
+    assert_eq!(result.rows, 2);
+    assert!(
+        result.stats.schema_changed,
+        "newly-created target should report schema_changed=true"
+    );
+
+    let rows = te
+        .engine
+        .execute_query_to_json(
+            "SELECT id, name FROM \"persistent\".\"public\".\"merged_persist\" ORDER BY id",
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["name"], "Alice");
+}
+
+/// Merge into persistent when the target exists with overlapping keys:
+/// matching rows are replaced, unmatched rows are appended.
+#[test]
+fn merge_into_persistent_replaces_matching_and_appends_new() {
+    let te = TestEngine::new_ephemeral();
+    // Seed target with two rows.
+    let seed_opts = IngestOptions {
+        table: "merge_target".into(),
+        mode: "replace".into(),
+        schema_override: None,
+        merge_key: None,
+        target_db: Some("persistent".into()),
+    };
+    ingest_json(
+        &te.engine,
+        r#"[{"id": 1, "name": "old1"}, {"id": 2, "name": "old2"}]"#,
+        &seed_opts,
+    )
+    .unwrap();
+
+    // Merge: id=1 replaces, id=3 appends, id=2 stays.
+    let merge_opts = IngestOptions {
+        table: "merge_target".into(),
+        mode: "merge".into(),
+        schema_override: None,
+        merge_key: Some(vec!["id".into()]),
+        target_db: Some("persistent".into()),
+    };
+    let result = ingest_json(
+        &te.engine,
+        r#"[{"id": 1, "name": "new1"}, {"id": 3, "name": "new3"}]"#,
+        &merge_opts,
+    )
+    .unwrap();
+    assert_eq!(result.rows, 2, "INSERT row count from merge");
+
+    let rows = te
+        .engine
+        .execute_query_to_json(
+            "SELECT id, name FROM \"persistent\".\"public\".\"merge_target\" ORDER BY id",
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0]["name"], "new1", "id=1 replaced");
+    assert_eq!(rows[1]["name"], "old2", "id=2 untouched");
+    assert_eq!(rows[2]["name"], "new3", "id=3 appended");
+}
+
+/// Merge into persistent that introduces a new column triggers ALTER
+/// TABLE ADD COLUMN against the persistent target, and the new column
+/// shows up in the post-merge schema with NULL for pre-existing rows.
+#[test]
+fn merge_into_persistent_alters_when_incoming_has_new_column() {
+    let te = TestEngine::new_ephemeral();
+    let seed_opts = IngestOptions {
+        table: "widens".into(),
+        mode: "replace".into(),
+        schema_override: None,
+        merge_key: None,
+        target_db: Some("persistent".into()),
+    };
+    ingest_json(&te.engine, r#"[{"id": 1, "name": "Alice"}]"#, &seed_opts).unwrap();
+
+    let merge_opts = IngestOptions {
+        table: "widens".into(),
+        mode: "merge".into(),
+        schema_override: None,
+        merge_key: Some(vec!["id".into()]),
+        target_db: Some("persistent".into()),
+    };
+    let result = ingest_json(
+        &te.engine,
+        r#"[{"id": 2, "name": "Bob", "email": "bob@x.com"}]"#,
+        &merge_opts,
+    )
+    .unwrap();
+    assert!(
+        result.stats.schema_changed,
+        "new column 'email' should signal schema_changed"
+    );
+
+    let rows = te
+        .engine
+        .execute_query_to_json(
+            "SELECT id, name, email FROM \"persistent\".\"public\".\"widens\" ORDER BY id",
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows[0]["email"].is_null(),
+        "pre-existing row gets NULL for new column"
+    );
+    assert_eq!(rows[1]["email"], "bob@x.com");
+}
+
+// --- Per-DB _table_catalog (Iter 4) ----------------------------------------
+
+/// `ensure_exists_in(Some(alias))` creates `_table_catalog` inside the
+/// user-attached database with the same schema as the persistent
+/// catalog. Subsequent ingests can write to it via `upsert_stub_in`.
+#[test]
+fn ensure_exists_in_seeds_catalog_inside_user_attached_db() {
+    use hyperdb_mcp::attach::{AttachRegistry, AttachRequest, AttachSource, OnMissing};
+
+    let dir = TempDir::new().unwrap();
+    let primary = dir.path().join("primary.hyper");
+    let attached = dir.path().join("attached.hyper");
+
+    let engine = Engine::new_no_daemon(Some(primary.to_string_lossy().into())).unwrap();
+    let reg = AttachRegistry::new();
+    reg.attach(
+        &engine,
+        AttachRequest {
+            alias: "user_db".into(),
+            source: AttachSource::LocalFile { path: attached },
+            writable: true,
+            on_missing: OnMissing::Create,
+        },
+    )
+    .unwrap();
+
+    // Catalog doesn't exist yet in user_db (attach-only doesn't seed
+    // for an existing file; this attached file was just created so
+    // attach-with-on_missing=create *does* seed — verify and then
+    // make a separate user-attach test below for the no-seed case).
+    // Here we just confirm explicit ensure_exists_in is idempotent.
+    hyperdb_mcp::table_catalog::ensure_exists_in(&engine, Some("user_db")).unwrap();
+    hyperdb_mcp::table_catalog::ensure_exists_in(&engine, Some("user_db")).unwrap();
+
+    // Probe via qualified pg_tables.
+    let rows = engine
+        .execute_query_to_json(
+            "SELECT tablename FROM \"user_db\".pg_catalog.pg_tables \
+             WHERE schemaname = 'public' AND tablename = '_table_catalog'",
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 1, "_table_catalog must exist in user_db");
+}
+
+/// `upsert_stub_in(target_db=Some("user_db"))` writes the row into the
+/// user-attached database's catalog, NOT into the persistent catalog.
+#[test]
+fn upsert_stub_in_routes_to_user_attached_db() {
+    use hyperdb_mcp::attach::{AttachRegistry, AttachRequest, AttachSource, OnMissing};
+
+    let dir = TempDir::new().unwrap();
+    let primary = dir.path().join("primary.hyper");
+    let attached = dir.path().join("attached.hyper");
+
+    let engine = Engine::new_no_daemon(Some(primary.to_string_lossy().into())).unwrap();
+    let reg = AttachRegistry::new();
+    reg.attach(
+        &engine,
+        AttachRequest {
+            alias: "user_db".into(),
+            source: AttachSource::LocalFile { path: attached },
+            writable: true,
+            on_missing: OnMissing::Create,
+        },
+    )
+    .unwrap();
+
+    // Create a real table in user_db so the catalog row points to
+    // something that exists.
+    engine
+        .execute_command("CREATE TABLE \"user_db\".\"public\".\"my_data\" (id INT)")
+        .unwrap();
+
+    hyperdb_mcp::table_catalog::upsert_stub_in(
+        &engine,
+        "my_data",
+        "load_data",
+        Some("{\"format\":\"json\"}"),
+        Some(42),
+        true,
+        Some("user_db"),
+    )
+    .unwrap();
+
+    // Visible via fully-qualified SELECT into user_db's catalog.
+    let rows = engine
+        .execute_query_to_json(
+            "SELECT table_name, load_tool, row_count \
+             FROM \"user_db\".\"public\".\"_table_catalog\" \
+             WHERE table_name = 'my_data'",
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["load_tool"], "load_data");
+    assert_eq!(rows[0]["row_count"], 42);
+
+    // NOT in the persistent catalog.
+    let persistent_rows = engine
+        .execute_query_to_json(
+            "SELECT table_name FROM \"persistent\".\"public\".\"_table_catalog\" \
+             WHERE table_name = 'my_data'",
+        )
+        .unwrap_or_default();
+    assert!(
+        persistent_rows.is_empty(),
+        "the row must NOT bleed into persistent's catalog"
+    );
+}
+
+/// `get_in(target_db=Some("user_db"))` reads from the user-attached
+/// database's catalog and returns the row written by `upsert_stub_in`.
+#[test]
+fn get_in_reads_from_user_attached_db_catalog() {
+    use hyperdb_mcp::attach::{AttachRegistry, AttachRequest, AttachSource, OnMissing};
+
+    let dir = TempDir::new().unwrap();
+    let primary = dir.path().join("primary.hyper");
+    let attached = dir.path().join("attached.hyper");
+
+    let engine = Engine::new_no_daemon(Some(primary.to_string_lossy().into())).unwrap();
+    let reg = AttachRegistry::new();
+    reg.attach(
+        &engine,
+        AttachRequest {
+            alias: "user_db".into(),
+            source: AttachSource::LocalFile { path: attached },
+            writable: true,
+            on_missing: OnMissing::Create,
+        },
+    )
+    .unwrap();
+
+    engine
+        .execute_command("CREATE TABLE \"user_db\".\"public\".\"events\" (id INT)")
+        .unwrap();
+    hyperdb_mcp::table_catalog::upsert_stub_in(
+        &engine,
+        "events",
+        "load_file",
+        None,
+        Some(7),
+        true,
+        Some("user_db"),
+    )
+    .unwrap();
+
+    let entry = hyperdb_mcp::table_catalog::get_in(&engine, "events", Some("user_db"))
+        .unwrap()
+        .expect("get_in must find the row written via upsert_stub_in");
+    assert_eq!(entry.table_name, "events");
+    assert_eq!(entry.row_count, Some(7));
+    // Reading the persistent catalog for the same table_name returns
+    // None — they are independent catalogs.
+    let persistent_entry = hyperdb_mcp::table_catalog::get_in(&engine, "events", None).unwrap();
+    assert!(persistent_entry.is_none());
+}
+
+/// `reconcile_in(target_db=Some("user_db"))` operates only on the
+/// user-attached database's tables, leaving persistent's catalog
+/// untouched.
+#[test]
+fn reconcile_in_per_db_does_not_touch_persistent_catalog() {
+    use hyperdb_mcp::attach::{AttachRegistry, AttachRequest, AttachSource, OnMissing};
+
+    let dir = TempDir::new().unwrap();
+    let primary = dir.path().join("primary.hyper");
+    let attached = dir.path().join("attached.hyper");
+
+    let engine = Engine::new_no_daemon(Some(primary.to_string_lossy().into())).unwrap();
+    let reg = AttachRegistry::new();
+    reg.attach(
+        &engine,
+        AttachRequest {
+            alias: "user_db".into(),
+            source: AttachSource::LocalFile { path: attached },
+            writable: true,
+            on_missing: OnMissing::Create,
+        },
+    )
+    .unwrap();
+
+    // Two tables in persistent (existing behavior).
+    engine
+        .execute_command("CREATE TABLE \"persistent\".\"public\".\"persist_t\" (n INT)")
+        .unwrap();
+    // One table in user_db.
+    engine
+        .execute_command("CREATE TABLE \"user_db\".\"public\".\"user_t\" (n INT)")
+        .unwrap();
+
+    hyperdb_mcp::table_catalog::reconcile_in(&engine, Some("user_db")).unwrap();
+
+    let user_rows = hyperdb_mcp::table_catalog::list_in(&engine, Some("user_db")).unwrap();
+    let user_names: Vec<String> = user_rows.iter().map(|e| e.table_name.clone()).collect();
+    assert!(
+        user_names.contains(&"user_t".into()),
+        "user_db reconcile must stub user_t; got {user_names:?}"
+    );
+
+    let persistent_rows = hyperdb_mcp::table_catalog::list_in(&engine, None).unwrap();
+    let persistent_names: Vec<String> = persistent_rows
+        .iter()
+        .map(|e| e.table_name.clone())
+        .collect();
+    assert!(
+        !persistent_names.contains(&"user_t".into()),
+        "user_t must not appear in persistent's catalog; got {persistent_names:?}"
+    );
+}
+
+// --- set_table_metadata + database (Iter 5) --------------------------------
+
+/// `set_metadata_in(target_db=Some("user_db"))` updates prose fields
+/// in the user-attached database's catalog after a stub row exists
+/// there (the typical flow: load_data into the user DB seeds the
+/// catalog automatically; set_table_metadata then updates prose).
+#[test]
+fn set_metadata_in_routes_to_user_attached_db() {
+    use hyperdb_mcp::attach::{AttachRegistry, AttachRequest, AttachSource, OnMissing};
+    use hyperdb_mcp::table_catalog::MetadataFields;
+
+    let dir = TempDir::new().unwrap();
+    let primary = dir.path().join("primary.hyper");
+    let attached = dir.path().join("attached.hyper");
+
+    let engine = Engine::new_no_daemon(Some(primary.to_string_lossy().into())).unwrap();
+    let reg = AttachRegistry::new();
+    reg.attach(
+        &engine,
+        AttachRequest {
+            alias: "user_db".into(),
+            source: AttachSource::LocalFile { path: attached },
+            writable: true,
+            on_missing: OnMissing::Create,
+        },
+    )
+    .unwrap();
+
+    // Stub a row first (set_metadata requires an existing entry).
+    engine
+        .execute_command("CREATE TABLE \"user_db\".\"public\".\"events\" (id INT)")
+        .unwrap();
+    hyperdb_mcp::table_catalog::upsert_stub_in(
+        &engine,
+        "events",
+        "load_data",
+        None,
+        Some(0),
+        true,
+        Some("user_db"),
+    )
+    .unwrap();
+
+    // Update prose via set_metadata_in.
+    let fields = MetadataFields {
+        source_url: Some("s3://bucket/events.parquet".into()),
+        source_description: Some("Tracking events".into()),
+        purpose: Some("daily reports".into()),
+        license: None,
+        notes: None,
+    };
+    let entry =
+        hyperdb_mcp::table_catalog::set_metadata_in(&engine, "events", &fields, Some("user_db"))
+            .unwrap();
+    assert_eq!(
+        entry.source_url.as_deref(),
+        Some("s3://bucket/events.parquet")
+    );
+    assert_eq!(entry.purpose.as_deref(), Some("daily reports"));
+
+    // Visible in the user_db catalog.
+    let rows = engine
+        .execute_query_to_json(
+            "SELECT source_url, purpose FROM \"user_db\".\"public\".\"_table_catalog\" \
+             WHERE table_name = 'events'",
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["source_url"], "s3://bucket/events.parquet");
+    assert_eq!(rows[0]["purpose"], "daily reports");
+}
+
+/// `set_metadata_in` errors with TableNotFound + a target-DB-named
+/// message when the row is in a different DB than the caller asked
+/// for. Specifically: row in persistent's catalog, ask user_db.
+#[test]
+fn set_metadata_in_missing_row_names_target_database_in_error() {
+    use hyperdb_mcp::attach::{AttachRegistry, AttachRequest, AttachSource, OnMissing};
+    use hyperdb_mcp::table_catalog::MetadataFields;
+
+    let dir = TempDir::new().unwrap();
+    let primary = dir.path().join("primary.hyper");
+    let attached = dir.path().join("attached.hyper");
+
+    let engine = Engine::new_no_daemon(Some(primary.to_string_lossy().into())).unwrap();
+    let reg = AttachRegistry::new();
+    reg.attach(
+        &engine,
+        AttachRequest {
+            alias: "user_db".into(),
+            source: AttachSource::LocalFile { path: attached },
+            writable: true,
+            on_missing: OnMissing::Create,
+        },
+    )
+    .unwrap();
+
+    // Stub in PERSISTENT, not user_db.
+    engine
+        .execute_command("CREATE TABLE \"persistent\".\"public\".\"per_t\" (id INT)")
+        .unwrap();
+    hyperdb_mcp::table_catalog::upsert_stub_in(
+        &engine,
+        "per_t",
+        "load_data",
+        None,
+        Some(0),
+        true,
+        None,
+    )
+    .unwrap();
+
+    let fields = MetadataFields {
+        source_url: Some("anything".into()),
+        ..Default::default()
+    };
+    let err =
+        hyperdb_mcp::table_catalog::set_metadata_in(&engine, "per_t", &fields, Some("user_db"))
+            .expect_err("must error: row exists in persistent, not user_db");
+    assert_eq!(err.code, ErrorCode::TableNotFound);
+    assert!(
+        err.message.contains("user_db"),
+        "error must name the target db; got: {}",
+        err.message
+    );
+}
+
+// Note on coverage: server-handler-level rejection paths
+// (load_files+database, watch_directory+database, export
+// format=hyper+database, attach-readonly+writable-required,
+// set_table_metadata.database with read-only target) are not
+// reachable from this integration test layer without going through
+// the rmcp tool router. They land in the end-to-end MCP test harness
+// (Iter 6).

@@ -7,6 +7,7 @@
 
 mod common;
 use common::TestEngine;
+use hyperdb_mcp::engine::Engine;
 use hyperdb_mcp::error::ErrorCode;
 use hyperdb_mcp::export::{export_to_file, ExportOptions};
 
@@ -41,6 +42,7 @@ fn export_csv_from_table() {
         format: "csv".into(),
         overwrite: true,
         format_options: None,
+        source_db: None,
     };
     let result = export_to_file(&te.engine, &opts).unwrap();
     assert_eq!(result.rows, 2);
@@ -66,6 +68,7 @@ fn export_csv_from_query() {
         format: "csv".into(),
         overwrite: true,
         format_options: None,
+        source_db: None,
     };
     let result = export_to_file(&te.engine, &opts).unwrap();
     assert_eq!(result.rows, 1);
@@ -87,6 +90,7 @@ fn export_parquet_from_table() {
         format: "parquet".into(),
         overwrite: true,
         format_options: None,
+        source_db: None,
     };
     let result = export_to_file(&te.engine, &opts).unwrap();
     assert_eq!(result.rows, 2);
@@ -109,9 +113,77 @@ fn export_hyper_copies_workspace() {
         format: "hyper".into(),
         overwrite: true,
         format_options: None,
+        source_db: None,
     };
     let _result = export_to_file(&te.engine, &opts).unwrap();
     assert!(std::fs::metadata(path_str).unwrap().len() > 0);
+}
+
+/// `format = "hyper"` with `source_db = Some("persistent")` snapshots
+/// the persistent attachment instead of the primary. Verifies the
+/// rejection lifted in iter 2 produces the right output.
+#[test]
+fn export_hyper_with_source_db_snapshots_persistent() {
+    let te = TestEngine::new_ephemeral();
+
+    // Create a table in primary that should NOT appear in the snapshot,
+    // and a different table in persistent that SHOULD.
+    te.engine
+        .execute_command("CREATE TABLE primary_only (n INT)")
+        .unwrap();
+    te.engine
+        .execute_command("INSERT INTO primary_only VALUES (99)")
+        .unwrap();
+    te.engine
+        .execute_command(
+            "CREATE TABLE \"persistent\".\"public\".\"persisted\" (id INT, label TEXT)",
+        )
+        .unwrap();
+    te.engine
+        .execute_command("INSERT INTO \"persistent\".\"public\".\"persisted\" VALUES (1, 'a')")
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("snapshot.hyper");
+    let path_str = path.to_str().unwrap();
+
+    let opts = ExportOptions {
+        sql: None,
+        table: None,
+        path: path_str.into(),
+        format: "hyper".into(),
+        overwrite: true,
+        format_options: None,
+        source_db: Some("persistent".into()),
+    };
+    export_to_file(&te.engine, &opts).expect("hyper export with source_db must succeed");
+
+    // Verify the snapshot file contains the persistent table and NOT
+    // the primary-only table by opening it as a fresh persistent
+    // workspace and listing tables.
+    let probe_engine = Engine::new_no_daemon(Some(path_str.into())).unwrap();
+    let rows = probe_engine
+        .execute_query_to_json(
+            "SELECT tablename FROM \"persistent\".pg_catalog.pg_tables \
+             WHERE schemaname = 'public' ORDER BY tablename",
+        )
+        .unwrap();
+    let names: Vec<String> = rows
+        .iter()
+        .filter_map(|r| {
+            r.get("tablename")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        })
+        .collect();
+    assert!(
+        names.contains(&"persisted".into()),
+        "snapshot must contain 'persisted' from source_db; got {names:?}"
+    );
+    assert!(
+        !names.contains(&"primary_only".into()),
+        "snapshot must NOT contain 'primary_only' (lives in primary, not persistent); got {names:?}"
+    );
 }
 
 /// `format = "hyper"` is a whole-workspace file copy and must succeed even
@@ -133,6 +205,7 @@ fn export_hyper_requires_no_sql_or_table() {
         format: "hyper".into(),
         overwrite: true,
         format_options: None,
+        source_db: None,
     };
     let result = export_to_file(&te.engine, &opts)
         .expect("hyper format must accept a bare (path, format) call without sql or table");
@@ -159,6 +232,7 @@ fn export_csv_without_sql_or_table_errors() {
         format: "csv".into(),
         overwrite: true,
         format_options: None,
+        source_db: None,
     };
     let Err(err) = export_to_file(&te.engine, &opts) else {
         panic!("csv export must reject calls with no sql and no table")
@@ -194,6 +268,7 @@ fn export_overwrite_false_rejects_existing_file() {
             format: "csv".into(),
             overwrite: false,
             format_options: None,
+            source_db: None,
         },
     ) else {
         panic!("export with overwrite=false must error when target exists")
@@ -224,6 +299,7 @@ fn export_overwrite_false_rejects_existing_file() {
             format: "hyper".into(),
             overwrite: false,
             format_options: None,
+            source_db: None,
         },
     ) else {
         panic!("hyper export with overwrite=false must error when target exists")
@@ -251,6 +327,7 @@ fn export_overwrite_false_allows_new_path() {
         format: "csv".into(),
         overwrite: false,
         format_options: None,
+        source_db: None,
     };
     let result = export_to_file(&te.engine, &opts)
         .expect("overwrite=false must succeed when target doesn't exist yet");
@@ -275,6 +352,7 @@ fn export_overwrite_true_replaces_existing_file() {
         format: "csv".into(),
         overwrite: true,
         format_options: None,
+        source_db: None,
     };
     let result = export_to_file(&te.engine, &opts)
         .expect("overwrite=true must succeed even when target already exists");
@@ -311,6 +389,7 @@ fn iceberg_export_round_trips_through_load_iceberg() {
         format: "iceberg".into(),
         overwrite: true,
         format_options: None,
+        source_db: None,
     };
     let export_result = export_to_file(&te.engine, &export_opts).unwrap();
     assert_eq!(export_result.rows, 2);
@@ -405,6 +484,7 @@ fn iceberg_export_overwrite_replaces_directory() {
         format: "iceberg".into(),
         overwrite: true,
         format_options: None,
+        source_db: None,
     };
     let r1 = export_to_file(&te.engine, &opts_first).unwrap();
     assert_eq!(r1.rows, 2);
@@ -417,6 +497,7 @@ fn iceberg_export_overwrite_replaces_directory() {
         format: "iceberg".into(),
         overwrite: true,
         format_options: None,
+        source_db: None,
     };
     let r2 = export_to_file(&te.engine, &opts_second).unwrap();
     assert_eq!(r2.rows, 1);
@@ -458,6 +539,7 @@ fn iceberg_export_refuses_overwrite_when_disabled() {
         format: "iceberg".into(),
         overwrite: true,
         format_options: None,
+        source_db: None,
     };
     export_to_file(&te.engine, &opts_first).unwrap();
 
@@ -469,6 +551,7 @@ fn iceberg_export_refuses_overwrite_when_disabled() {
         format: "iceberg".into(),
         overwrite: false,
         format_options: None,
+        source_db: None,
     };
     let err = export_to_file(&te.engine, &opts_second).err().unwrap();
     assert_eq!(err.code, ErrorCode::PermissionDenied);
@@ -522,6 +605,7 @@ fn parquet_export_round_trips_through_load_file() {
             format: "parquet".into(),
             overwrite: true,
             format_options: None,
+            source_db: None,
         },
     )
     .unwrap();
@@ -616,6 +700,7 @@ fn arrow_ipc_export_round_trips_through_load_file() {
             format: "arrow_ipc".into(),
             overwrite: true,
             format_options: None,
+            source_db: None,
         },
     )
     .unwrap();
@@ -694,6 +779,7 @@ fn parquet_export_honors_compression_override() {
                 format: "parquet".into(),
                 overwrite: true,
                 format_options: Some(opts),
+                source_db: None,
             },
         )
         .expect("parquet export with compression override should succeed");
@@ -748,6 +834,7 @@ fn csv_export_honors_delimiter_override() {
             format: "csv".into(),
             overwrite: true,
             format_options: Some(opts),
+            source_db: None,
         },
     )
     .unwrap();
@@ -792,6 +879,7 @@ fn format_options_invalid_shapes_reject_cleanly() {
             format: "parquet".into(),
             overwrite: true,
             format_options: Some(null_val),
+            source_db: None,
         },
     )
     .err()
@@ -813,6 +901,7 @@ fn format_options_invalid_shapes_reject_cleanly() {
             format: "parquet".into(),
             overwrite: true,
             format_options: Some(bad_key),
+            source_db: None,
         },
     )
     .err()

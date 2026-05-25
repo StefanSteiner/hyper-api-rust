@@ -203,7 +203,7 @@ describe({ database: "persistent" })
 sample({ table: "customers", database: "persistent" })
 ```
 
-The `database` parameter is available on `query`, `execute`, `load_data`, `load_file`, `describe`, `sample`, `chart`, and `export`. The shorthand `persist: true` (sugar for `database: "persistent"`) is available on `load_data` and `load_file`. Pass any user-attached writable alias (created via `attach_database`) to target a custom database.
+The `database` parameter is available on `query`, `execute`, `load_data`, `load_file`, `load_files`, `watch_directory`, `describe`, `sample`, `chart`, `export`, and `set_table_metadata`. The shorthand `persist: true` (sugar for `database: "persistent"`) is available on `load_data`, `load_file`, `load_files`, and `watch_directory`. Pass any user-attached writable alias (created via `attach_database`) to target a custom database.
 
 (`query_data` and `query_file` are one-shot tools that materialize the inline data into their own temp table and query it — they do not accept a `database` parameter because the data isn't in a persisted database to begin with.)
 
@@ -218,37 +218,9 @@ CREATE TABLE "persistent"."public"."revenue_2026" AS
   SELECT region, SUM(amount) FROM scratch_orders GROUP BY region;
 ```
 
-The `_table_catalog` (which tracks MCP-managed metadata for your tables) lives in the persistent attachment automatically — there's nothing to manage. If you want a pristine `.hyper` file for export with no MCP bookkeeping, run `DROP TABLE "persistent"."public"."_table_catalog"` once and subsequent sessions opening that file will leave it dropped.
+**Per-database `_table_catalog`:** every writable database — persistent and any user-attached writable file — gets its own `_table_catalog` lazily seeded on first ingest. MCP-managed metadata (load tool, params, timestamps, prose fields set via `set_table_metadata`) lives alongside the data file, so opening a `.hyper` file later as a primary workspace finds the catalog ready. If you want a pristine `.hyper` file for export with no MCP bookkeeping, run `DROP TABLE "<alias>"."public"."_table_catalog"` once and subsequent sessions opening that file will leave it dropped.
 
-**v1 limitations:** `load_files` and `watch_directory` use a connection pool bound to the primary database and don't yet accept `database`/`persist` — use `load_file` with `persist: true` for one-off persistent ingests. Merge mode (`load_file` with `mode: "merge"`) only works against the primary database in v1.
-
-### Daemon management
-
-The daemon is normally invisible — it auto-spawns and idle-times-out on its own. For diagnostics:
-
-```bash
-hyperdb-mcp daemon status   # Show running daemon (PID, endpoint, started_at, version)
-hyperdb-mcp daemon stop     # Gracefully shut down the daemon
-hyperdb-mcp daemon          # Run as a daemon explicitly (rarely needed)
-```
-
-State files live at `~/.hyperdb/` by default (override with `HYPERDB_STATE_DIR`).
-
-### Recovery from hyperd crashes
-
-The daemon polls `hyperd` every 5 seconds. If the process has exited (crashed, OOM, killed), the daemon spawns a replacement, atomically updates `~/.hyperdb/daemon.json` with the new endpoint, and continues serving clients. Clients see one failed tool call (the request that was in flight when hyperd died); the next tool call transparently reconnects to the new hyperd via the same recovery path used for normal connection drops.
-
-If a client itself notices hyperd is unreachable before the next polling tick, it sends a fast-path `REPORT_HYPERD_ERROR` signal to the daemon so the restart kicks off without waiting for the timer.
-
-If hyperd repeatedly fails to start (3 attempts within 60 seconds — e.g., misconfigured `HYPERD_PATH`, port exhaustion, broken binary), the daemon shuts itself down and removes the discovery file. The next MCP client to start up will then spawn a fresh daemon, surfacing any persistent failure clearly to the user rather than spinning silently.
-
-**Known limitation:** if hyperd hangs (alive at the OS level but unresponsive to queries), the daemon's polling can't detect it and your tool call may stall indefinitely. The recovery path is `hyperdb-mcp daemon stop` followed by reconnecting from your MCP client.
-
-### Other behavioral flags
-
-| Flag | Behavior |
-|---|---|
-| `--read-only` | Disables `execute`, `load_data`, `load_file`, `watch_directory`, `save_query`, `delete_query`, and Hyper-format export. See [Read-Only Mode](#read-only-mode). |
+**Detach safety:** `detach_database` rejects with `InvalidArgument` if any active watcher targets the alias — call `unwatch_directory` first. This prevents the watcher's pool from silently writing into a now-detached file (or worse, the wrong file if the alias is later re-attached to a different path).
 
 ### Daemon management
 

@@ -178,10 +178,10 @@ fn engine_status_ephemeral_only_reports_no_persistent() {
     assert!(status["persistent_path"].is_null());
 }
 
-/// `catalog_present_in_persistent` caches the probe result so the
-/// underlying SQL only runs once per engine lifetime.
+/// `catalog_present_in` caches per-DB probe results so subsequent
+/// reads/writes against the same alias don't re-run the probe.
 #[test]
-fn catalog_presence_probe_is_cached() {
+fn catalog_presence_probe_is_cached_per_db() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("ws.hyper");
     let engine = Engine::new(Some(path.to_str().unwrap().into())).unwrap();
@@ -193,30 +193,48 @@ fn catalog_presence_probe_is_cached() {
     };
 
     // First call runs the probe.
-    assert!(!engine.catalog_present_in_persistent(probe).unwrap());
+    assert!(!engine.catalog_present_in("persistent", probe).unwrap());
     assert_eq!(probe_count.load(std::sync::atomic::Ordering::SeqCst), 1);
 
     // Second call uses the cache; probe count stays at 1.
-    assert!(!engine.catalog_present_in_persistent(probe).unwrap());
+    assert!(!engine.catalog_present_in("persistent", probe).unwrap());
     assert_eq!(probe_count.load(std::sync::atomic::Ordering::SeqCst), 1);
 
-    // After mark_catalog_present, the cached value flips to true and
-    // the probe stays untouched.
-    engine.mark_catalog_present();
-    assert!(engine.catalog_present_in_persistent(probe).unwrap());
+    // After mark_catalog_present_for, the cached value flips to true
+    // and the probe stays untouched.
+    engine.mark_catalog_present_for("persistent");
+    assert!(engine.catalog_present_in("persistent", probe).unwrap());
     assert_eq!(probe_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    // A different alias has its own cache entry — uncached, so the
+    // probe runs again.
+    assert!(!engine.catalog_present_in("other", probe).unwrap());
+    assert_eq!(probe_count.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
 
-/// In ephemeral-only mode, the cache short-circuits to `false` without
-/// running the probe at all.
+/// `clear_catalog_cache_for` drops the entry so the next read reruns
+/// the probe — used by `detach_database` to guard against re-attach
+/// to a different file.
 #[test]
-fn catalog_presence_short_circuits_in_ephemeral_only() {
-    let engine = Engine::new(None).unwrap();
+fn clear_catalog_cache_for_invalidates_alias_entry() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("ws.hyper");
+    let engine = Engine::new(Some(path.to_str().unwrap().into())).unwrap();
+
     let probe_count = std::sync::atomic::AtomicUsize::new(0);
     let probe = |_e: &Engine| -> Result<bool, hyperdb_mcp::error::McpError> {
         probe_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(true)
     };
-    assert!(!engine.catalog_present_in_persistent(probe).unwrap());
-    assert_eq!(probe_count.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    assert!(engine.catalog_present_in("foo", probe).unwrap());
+    assert_eq!(probe_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    // Cached.
+    assert!(engine.catalog_present_in("foo", probe).unwrap());
+    assert_eq!(probe_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    // Clear, next probe runs again.
+    engine.clear_catalog_cache_for("foo");
+    assert!(engine.catalog_present_in("foo", probe).unwrap());
+    assert_eq!(probe_count.load(std::sync::atomic::Ordering::SeqCst), 2);
 }

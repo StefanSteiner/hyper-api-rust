@@ -80,6 +80,7 @@ fn full_pipeline_csv_ingest_and_export() {
         format: "csv".into(),
         overwrite: true,
         format_options: None,
+        source_db: None,
     };
     let result = export_to_file(&te.engine, &export_opts).unwrap();
     assert_eq!(result.rows, 2);

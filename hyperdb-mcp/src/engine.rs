@@ -195,17 +195,19 @@ pub struct Engine {
     /// to `false` after the server consumes it via
     /// [`Self::take_persistent_was_created`].
     persistent_was_created: bool,
-    /// Cached "_table_catalog exists in persistent" probe. Populated on
-    /// first call to [`Self::catalog_present_in_persistent`] and held
-    /// for the lifetime of the connection. Avoids repeated
-    /// `pg_catalog.pg_tables` round-trips on every catalog read/write.
+    /// Cached "_table_catalog exists in `<alias>`" probes, keyed by
+    /// canonical alias (lowercase). Populated on first call to
+    /// [`Self::catalog_present_in`] for each `(engine, alias)` pair.
+    ///
     /// Lives on the Engine because the catalog is per-engine-lifetime
     /// (a `ConnectionLost` reconnect creates a fresh Engine, so the
-    /// cache resets at the right boundary). `None` means "not yet
-    /// probed"; `Some(false)` is cacheable too — once the catalog is
-    /// confirmed absent on a read-only or `--ephemeral-only` flow it
-    /// stays absent for the whole engine lifetime.
-    catalog_present_cache: std::sync::Mutex<Option<bool>>,
+    /// cache resets at the right boundary). Detaching an alias clears
+    /// its entry via [`Self::clear_catalog_cache_for`] so a re-attach
+    /// to a different file/writability doesn't reuse a stale value.
+    /// `Some(false)` is cacheable too — once the catalog is confirmed
+    /// absent it stays absent for the rest of the engine's lifetime
+    /// unless explicitly cleared.
+    catalog_present_cache: std::sync::Mutex<std::collections::HashMap<String, bool>>,
     log_dir: PathBuf,
 }
 
@@ -339,7 +341,7 @@ impl Engine {
             ephemeral_path,
             persistent_path,
             persistent_was_created,
-            catalog_present_cache: std::sync::Mutex::new(None),
+            catalog_present_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
             log_dir,
         })
     }
@@ -414,7 +416,7 @@ impl Engine {
             ephemeral_path: ephemeral_path.to_path_buf(),
             persistent_path,
             persistent_was_created,
-            catalog_present_cache: std::sync::Mutex::new(None),
+            catalog_present_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
             log_dir: log_dir.to_path_buf(),
         }))
     }
@@ -596,48 +598,56 @@ impl Engine {
         self.persistent_was_created
     }
 
-    /// Returns whether `_table_catalog` exists in the persistent
-    /// attachment, caching the result on first call so subsequent
-    /// catalog read/write paths skip the `pg_catalog.pg_tables` probe.
+    /// Returns whether `_table_catalog` exists in `alias`, caching
+    /// the per-DB result on first call so subsequent catalog read/
+    /// write paths skip the `pg_catalog.pg_tables` probe.
     ///
     /// `prober` is the SQL-side existence check; the cache layer here
     /// is intentionally generic so the catalog module can keep its
-    /// existing probe SQL in one place.
-    ///
-    /// Returns `Ok(false)` immediately when the engine has no
-    /// persistent attachment (no probe needed).
+    /// probe SQL in one place.
     ///
     /// # Errors
     /// Propagates whatever error `prober` returns on the first call.
     /// On subsequent calls, the cached value is returned without
     /// re-running the probe.
-    pub fn catalog_present_in_persistent<F>(&self, prober: F) -> Result<bool, McpError>
+    pub fn catalog_present_in<F>(&self, alias: &str, prober: F) -> Result<bool, McpError>
     where
         F: Fn(&Engine) -> Result<bool, McpError>,
     {
-        if !self.has_persistent() {
-            return Ok(false);
-        }
+        let key = alias.to_ascii_lowercase();
         // Fast path: cache already populated.
         if let Ok(guard) = self.catalog_present_cache.lock() {
-            if let Some(present) = *guard {
+            if let Some(&present) = guard.get(&key) {
                 return Ok(present);
             }
         }
         // Slow path: run the probe and cache its result.
         let present = prober(self)?;
         if let Ok(mut guard) = self.catalog_present_cache.lock() {
-            *guard = Some(present);
+            guard.insert(key, present);
         }
         Ok(present)
     }
 
-    /// Synchronously set the catalog-presence cache to `true` — used by
-    /// `table_catalog::ensure_exists` after a `CREATE TABLE IF NOT
-    /// EXISTS` so subsequent reads/writes skip the existence probe.
-    pub fn mark_catalog_present(&self) {
+    /// Synchronously set the catalog-presence cache to `true` for
+    /// `alias` — used by `table_catalog::ensure_exists_in` after a
+    /// successful `CREATE TABLE IF NOT EXISTS` so subsequent reads/
+    /// writes against that DB skip the existence probe.
+    pub fn mark_catalog_present_for(&self, alias: &str) {
+        let key = alias.to_ascii_lowercase();
         if let Ok(mut guard) = self.catalog_present_cache.lock() {
-            *guard = Some(true);
+            guard.insert(key, true);
+        }
+    }
+
+    /// Drop the cached probe result for `alias`. Called by
+    /// `detach_database` so that re-attaching the same alias to a
+    /// different file (or with different writability) doesn't reuse a
+    /// stale entry.
+    pub fn clear_catalog_cache_for(&self, alias: &str) {
+        let key = alias.to_ascii_lowercase();
+        if let Ok(mut guard) = self.catalog_present_cache.lock() {
+            guard.remove(&key);
         }
     }
 
@@ -926,6 +936,52 @@ impl Engine {
             .collect())
     }
 
+    /// Like [`Self::column_metadata`] but for a table in `target_db`.
+    /// `None` falls back to `column_metadata` (primary). `Some(alias)`
+    /// reads via the qualified `pg_catalog.pg_attribute` join used by
+    /// `describe_columns_via_pg_catalog` — the connection-bound
+    /// `Catalog` API can't see attached databases.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorCode::TableNotFound`] when no rows come back from
+    /// the qualified probe. Propagates connection errors.
+    pub fn column_metadata_in(
+        &self,
+        target_db: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<ColumnSchema>, McpError> {
+        let Some(db) = target_db else {
+            return self.column_metadata(table);
+        };
+        let rows = describe_columns_via_pg_catalog(self, db, table)?;
+        if rows.is_empty() {
+            return Err(McpError::new(
+                ErrorCode::TableNotFound,
+                format!("Table '{table}' does not exist in database '{db}'"),
+            ));
+        }
+        Ok(rows
+            .into_iter()
+            .map(|r| ColumnSchema {
+                name: r
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                hyper_type: r
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                nullable: r
+                    .get("nullable")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(true),
+            })
+            .collect())
+    }
+
     /// Returns true if `table` exists in the `public` schema. Avoids
     /// the per-version error-string ambiguity of
     /// [`Catalog::get_table_definition`] by listing names instead.
@@ -938,6 +994,29 @@ impl Engine {
         let catalog = Catalog::new(&self.connection);
         let names = catalog.get_table_names("public").map_err(McpError::from)?;
         Ok(names.iter().any(|n| n.as_str() == table))
+    }
+
+    /// Like [`Self::table_exists`] but for a table in `target_db`.
+    /// `None` falls back to `table_exists` (primary). `Some(alias)`
+    /// probes the qualified `pg_catalog.pg_tables` of the attached
+    /// database — the connection-bound `Catalog` API can't see
+    /// attached databases.
+    ///
+    /// # Errors
+    ///
+    /// Propagates connection errors from the probe query.
+    pub fn table_exists_in(&self, target_db: Option<&str>, table: &str) -> Result<bool, McpError> {
+        let Some(db) = target_db else {
+            return self.table_exists(table);
+        };
+        let esc_db = db.replace('"', "\"\"");
+        let esc_tbl = table.replace('\'', "''");
+        let sql = format!(
+            "SELECT 1 AS one FROM \"{esc_db}\".pg_catalog.pg_tables \
+             WHERE schemaname = 'public' AND tablename = '{esc_tbl}'"
+        );
+        let rows = self.execute_query_to_json(&sql)?;
+        Ok(!rows.is_empty())
     }
 
     /// Issue a single `ALTER TABLE "<table>" ADD COLUMN "<n1>" <t1>,
@@ -969,6 +1048,23 @@ impl Engine {
         table: &str,
         cols: &[ColumnSchema],
     ) -> Result<(), McpError> {
+        self.alter_table_add_columns_in(None, table, cols)
+    }
+
+    /// Like [`Self::alter_table_add_columns`] but for a table in
+    /// `target_db`. `None` keeps the unqualified identifier; `Some(alias)`
+    /// emits `"db"."public"."table"` so the ALTER lands in the attached
+    /// database.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::alter_table_add_columns`].
+    pub fn alter_table_add_columns_in(
+        &self,
+        target_db: Option<&str>,
+        table: &str,
+        cols: &[ColumnSchema],
+    ) -> Result<(), McpError> {
         if cols.is_empty() {
             return Ok(());
         }
@@ -983,7 +1079,14 @@ impl Engine {
                 ));
             }
         }
-        let quoted_table = format!("\"{}\"", table.replace('"', "\"\""));
+        let quoted_table = match target_db {
+            Some(db) => {
+                let esc_db = db.replace('"', "\"\"");
+                let esc_tbl = table.replace('"', "\"\"");
+                format!("\"{esc_db}\".\"public\".\"{esc_tbl}\"")
+            }
+            None => format!("\"{}\"", table.replace('"', "\"\"")),
+        };
         let add_clauses = cols
             .iter()
             .map(|c| {

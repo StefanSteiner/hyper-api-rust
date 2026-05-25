@@ -197,8 +197,6 @@ pub struct LoadFileParams {
     /// Target database alias. Omit (or pass `"local"`) to write to the
     /// ephemeral primary. Pass `"persistent"` to write to the durable
     /// database. Other values target a user-attached writable database.
-    /// Note: `mode: "merge"` with a non-primary database is not yet
-    /// supported and will return an error.
     pub database: Option<String>,
     /// Shorthand for `database: "persistent"`. If both `database` and
     /// `persist` are set, `database` wins.
@@ -308,13 +306,14 @@ pub struct LoadFilesParams {
     /// hyperd's side; more connections don't help past a certain point
     /// and can starve the primary connection.
     pub concurrency: Option<u32>,
-    /// Target database alias. **Currently only the primary (ephemeral)
-    /// database is supported for parallel ingest.** Passing `"persistent"`
-    /// or another alias returns an error — use `load_file` with
-    /// `persist: true` instead for single-file persistent ingest.
+    /// Target database alias. Omit (or pass `"local"`) to write to the
+    /// ephemeral primary. Pass `"persistent"` to write to the durable
+    /// database. Other values target a user-attached writable database.
+    /// Applies to every entry in the batch — multi-target batches are
+    /// not supported.
     pub database: Option<String>,
-    /// Shorthand for `database: "persistent"`. Same limitation as
-    /// `database` applies — not yet supported for parallel ingest.
+    /// Shorthand for `database: "persistent"`. If both `database` and
+    /// `persist` are set, `database` wins.
     pub persist: Option<bool>,
 }
 
@@ -499,14 +498,17 @@ pub struct WatchDirectoryParams {
     /// Each in-flight ingest holds one connection to hyperd plus a transaction.
     #[serde(default)]
     pub max_concurrent: Option<u32>,
-    /// Target database alias. **Currently only the primary (ephemeral)
-    /// database is supported by the watcher** — the connection pool is
-    /// bound to the primary file. Passing `"persistent"` returns an
-    /// error. Use `load_file` with `persist: true` for one-off persistent
-    /// ingests.
+    /// Target database alias. Omit (or pass `"local"`) for the ephemeral
+    /// primary. Pass `"persistent"` for the durable database, or any
+    /// user-attached writable alias. The watcher's connection pool is
+    /// built against the resolved target, so subsequent ingests land
+    /// in the right database without per-file routing.
+    ///
+    /// Detaching the alias while a watcher is active is rejected — call
+    /// `unwatch_directory` first.
     pub database: Option<String>,
-    /// Shorthand for `database: "persistent"`. Same limitation applies —
-    /// not yet supported by the watcher.
+    /// Shorthand for `database: "persistent"`. If both `database` and
+    /// `persist` are set, `database` wins.
     pub persist: Option<bool>,
 }
 
@@ -747,6 +749,14 @@ pub struct SetTableMetadataParams {
     pub license: Option<String>,
     /// Free-form notes: refresh instructions, known gotchas, caveats.
     pub notes: Option<String>,
+    /// Target database alias for the catalog write. Omit (or pass
+    /// `"local"` / `"persistent"`) to update the persistent catalog —
+    /// matches the default for the ephemeral primary's tables.
+    /// Pass any user-attached writable alias to update that DB's
+    /// per-database `_table_catalog` instead. Read-only attachments
+    /// are rejected with a clear "re-attach with writable:true"
+    /// message.
+    pub database: Option<String>,
 }
 
 // --- Prompt argument structs ---
@@ -1111,11 +1121,17 @@ impl HyperMcpServer {
     /// swallows errors — a bookkeeping failure should never fail an
     /// otherwise-successful load.
     ///
-    /// `&self` is kept for consistency with sibling helpers and because
-    /// upcoming work (per-DB catalog presence cache) will need it.
+    /// Routes the upsert to `target_db`'s `_table_catalog`. The
+    /// catalog is lazily seeded if absent. `target_db = None` and
+    /// `target_db = Some("persistent")` both write to the persistent
+    /// catalog (the single-engine ephemeral primary stubs survive
+    /// there for the session). User-attached writable aliases get
+    /// their own per-DB catalog. Read-only attachments are rejected
+    /// upstream by `resolve_db(require_writable=true)` so this helper
+    /// never sees them.
     #[expect(
         clippy::unused_self,
-        reason = "kept for forthcoming per-DB catalog presence cache"
+        reason = "kept for symmetry with after_execute_catalog_update; both run inside with_engine"
     )]
     fn after_ingest_catalog_update(
         &self,
@@ -1124,17 +1140,20 @@ impl HyperMcpServer {
         load_tool: &'static str,
         load_params: Option<&str>,
         row_count: Option<i64>,
+        target_db: Option<&str>,
     ) {
-        if let Err(e) = crate::table_catalog::upsert_stub(
+        if let Err(e) = crate::table_catalog::upsert_stub_in(
             engine,
             table_name,
             load_tool,
             load_params,
             row_count,
             true,
+            target_db,
         ) {
             tracing::warn!(
                 table = %table_name,
+                target_db = ?target_db,
                 err = %e.message,
                 "failed to update _table_catalog after ingest"
             );
@@ -1145,7 +1164,7 @@ impl HyperMcpServer {
     /// error-swallowing rationale as [`Self::after_ingest_catalog_update`].
     #[expect(
         clippy::unused_self,
-        reason = "kept for forthcoming per-DB catalog presence cache"
+        reason = "kept for symmetry; runs inside with_engine"
     )]
     fn after_execute_catalog_update(&self, engine: &Engine) {
         if let Err(e) = crate::table_catalog::reconcile(engine) {
@@ -1465,9 +1484,12 @@ impl HyperMcpServer {
                 })
                 .collect();
 
-            // Catalog bookkeeping: only for primary or persistent targets.
-            // User-attached databases are not tracked in the catalog.
-            if target_db.is_none() || target_db.as_deref() == Some(Engine::PERSISTENT_ALIAS) {
+            // Catalog bookkeeping: the helper routes the upsert to
+            // target_db's per-DB _table_catalog (lazily seeded on
+            // first ingest). Persistent and ephemeral primary share
+            // persistent's catalog; user-attached writable DBs each
+            // get their own.
+            {
                 let load_params = serde_json::to_string(&json!({
                     "mode": mode,
                     "format": fmt,
@@ -1480,6 +1502,7 @@ impl HyperMcpServer {
                     "load_data",
                     load_params.as_deref(),
                     i64::try_from(ingest_result.rows).ok(),
+                    target_db.as_deref(),
                 );
             }
 
@@ -1532,16 +1555,6 @@ impl HyperMcpServer {
         let result = self.with_engine(|engine| {
             let target_db =
                 self.resolve_db(engine, params.database.as_deref(), params.persist, true)?;
-            // Merge mode + non-primary database is not yet supported
-            // (cross-database DML for temp tables is unverified).
-            if mode == "merge" && target_db.is_some() {
-                return Err(McpError::new(
-                    ErrorCode::InvalidArgument,
-                    "merge mode with a non-primary database is not yet supported. \
-                     Use replace or append mode, or omit the database parameter."
-                        .to_string(),
-                ));
-            }
             crate::attach::validate_input_path(&params.path, "data file")?;
             let schema_override = crate::schema::normalize_schema_param(params.schema.as_ref())?;
             let opts = IngestOptions {
@@ -1594,8 +1607,8 @@ impl HyperMcpServer {
                 })
                 .collect();
 
-            // Catalog: only for primary or persistent targets.
-            if target_db.is_none() || target_db.as_deref() == Some(Engine::PERSISTENT_ALIAS) {
+            // Catalog: helper routes to target_db's per-DB catalog.
+            {
                 let load_params = serde_json::to_string(&json!({
                     "source_path": params.path,
                     "mode": mode,
@@ -1611,6 +1624,7 @@ impl HyperMcpServer {
                     "load_file",
                     load_params.as_deref(),
                     i64::try_from(ingest_result.rows).ok(),
+                    target_db.as_deref(),
                 );
             }
 
@@ -1647,7 +1661,7 @@ impl HyperMcpServer {
     /// Each entry behaves like a standalone `load_file` call; failures are
     /// reported per-file rather than aborting the whole batch.
     #[tool(
-        description = "Ingest multiple files in parallel. Each entry is equivalent to a standalone `load_file` call (same formats and same format-selection guidance: prefer Parquet > CSV > Arrow IPC > JSON for large imports). The batch runs across a pool of async connections sized by `concurrency` (default `min(files.len(), 8)`), so independent files finish roughly in max-time rather than sum-time. Per-file errors are captured in the response and do not abort the rest of the batch; the top-level call still returns Ok. For Apache Iceberg tables, call `load_iceberg` per table instead — this tool only handles single-file formats. **Note: `mode = \"merge\"` is not supported here — use `load_file` once per file when you need merge/upsert semantics.**"
+        description = "Ingest multiple files in parallel. Each entry is equivalent to a standalone `load_file` call (same formats and same format-selection guidance: prefer Parquet > CSV > Arrow IPC > JSON for large imports). The batch runs across a pool of async connections sized by `concurrency` (default `min(files.len(), 8)`), so independent files finish roughly in max-time rather than sum-time. Per-file errors are captured in the response and do not abort the rest of the batch; the top-level call still returns Ok. For Apache Iceberg tables, call `load_iceberg` per table instead — this tool only handles single-file formats.\n\nUse `database` (or shorthand `persist: true`) to target a non-primary database; the same value applies to every entry in the batch. **Note: `mode = \"merge\"` is not supported here — use `load_file` once per file when you need merge/upsert semantics.**"
     )]
     fn load_files(
         &self,
@@ -1663,18 +1677,6 @@ impl HyperMcpServer {
             return Self::err_content(McpError::new(
                 ErrorCode::EmptyData,
                 "load_files: `files` must not be empty",
-            ));
-        }
-
-        // Parallel ingest uses a connection pool that only sees the ephemeral
-        // primary — non-primary targets are not yet supported.
-        if params.database.is_some() || params.persist == Some(true) {
-            return Self::err_content(McpError::new(
-                ErrorCode::InvalidArgument,
-                "load_files does not yet support the `database` or `persist` parameter \
-                 because parallel ingest uses a connection pool bound to the primary database. \
-                 Use `load_file` with `persist: true` for single-file persistent ingest."
-                    .to_string(),
             ));
         }
 
@@ -1702,16 +1704,39 @@ impl HyperMcpServer {
             }
         }
 
-        // Resolve hyperd endpoint + workspace once, under the engine lock.
-        // After this the pool operates independently of the engine's sync
-        // connection.
-        let (endpoint, workspace) = match self.with_engine(|engine| {
+        // Resolve hyperd endpoint + the workspace path matching the
+        // resolved target database. The pool opens that .hyper file
+        // directly (under the same alias the engine uses) so qualified
+        // SQL routes correctly. Read-only attachments are rejected by
+        // resolve_db.
+        let (endpoint, workspace, target_db) = match self.with_engine(|engine| {
+            let target_db =
+                self.resolve_db(engine, params.database.as_deref(), params.persist, true)?;
             let endpoint = engine.hyperd_endpoint()?;
-            // The pool connects to the engine's primary database (ephemeral).
-            // Tools that target the persistent attachment use qualified SQL
-            // through the same connection.
-            let workspace = engine.ephemeral_path().to_string_lossy().to_string();
-            Ok((endpoint, workspace))
+            let workspace = match target_db.as_deref() {
+                None => engine.ephemeral_path().to_string_lossy().to_string(),
+                Some(alias) if alias.eq_ignore_ascii_case(Engine::PERSISTENT_ALIAS) => engine
+                    .persistent_path()
+                    .ok_or_else(|| {
+                        McpError::new(
+                            ErrorCode::InvalidArgument,
+                            "target 'persistent' but the server is in --ephemeral-only mode",
+                        )
+                    })?
+                    .to_string_lossy()
+                    .to_string(),
+                Some(alias) => {
+                    let entry = self.attachments.get(alias).ok_or_else(|| {
+                        McpError::new(
+                            ErrorCode::InvalidArgument,
+                            format!("database '{alias}' is not attached"),
+                        )
+                    })?;
+                    let crate::attach::AttachSource::LocalFile { path } = &entry.source;
+                    path.to_string_lossy().to_string()
+                }
+            };
+            Ok((endpoint, workspace, target_db))
         }) {
             Ok(v) => v,
             Err(e) => return Self::err_content(e),
@@ -1764,6 +1789,7 @@ impl HyperMcpServer {
                 let mut set = tokio::task::JoinSet::new();
                 for (idx, entry) in params.files.into_iter().enumerate() {
                     let pool = Arc::clone(&pool);
+                    let entry_target_db = target_db.clone();
                     set.spawn(async move {
                         let mode = entry.mode.clone().unwrap_or_else(|| "replace".into());
                         let replace_mode = mode == "replace";
@@ -1785,6 +1811,15 @@ impl HyperMcpServer {
                                     return (idx, out);
                                 }
                             };
+                        // The pool was built against the resolved target's
+                        // .hyper file as its workspace, so from these
+                        // connections' perspective the target IS the primary
+                        // database. Keep target_db unqualified (None) so SQL
+                        // routes into the pool's primary instead of trying
+                        // to qualify against an alias that doesn't exist on
+                        // these connections. The `entry_target_db` is still
+                        // used downstream for the catalog gate.
+                        let _ = &entry_target_db;
                         let opts = IngestOptions {
                             table: entry.table.clone(),
                             mode: mode.clone(),
@@ -1945,7 +1980,8 @@ impl HyperMcpServer {
             .collect();
 
         // Update the per-table catalog stubs for every success. Requires
-        // the engine, so we run this inside `with_engine`.
+        // the engine, so we run this inside `with_engine`. The helper
+        // routes the upsert to target_db's per-DB _table_catalog.
         if let Err(e) = self.with_engine(|engine| {
             for o in &outcomes {
                 if let Some((rows, _, _)) = &o.ok {
@@ -1955,6 +1991,7 @@ impl HyperMcpServer {
                         "load_file",
                         None,
                         i64::try_from(*rows).ok(),
+                        target_db.as_deref(),
                     );
                 }
             }
@@ -2037,6 +2074,7 @@ impl HyperMcpServer {
                 "load_iceberg",
                 load_params.as_deref(),
                 i64::try_from(ingest_result.rows).ok(),
+                None,
             );
 
             Ok(json!({
@@ -2351,7 +2389,7 @@ impl HyperMcpServer {
     /// Begin watching a directory for `.ready` sentinel files. See
     /// [`crate::watcher`] for the full producer/consumer protocol.
     #[tool(
-        description = "Watch a directory for files to auto-ingest. Producers write data file + companion <name>.ready sentinel; the watcher appends the data file to the given table and deletes both on success. Disabled in read-only mode."
+        description = "Watch a directory for files to auto-ingest. Producers write data file + companion <name>.ready sentinel; the watcher appends the data file to the given table and deletes both on success. Use `database` (or shorthand `persist: true`) to target a non-primary database — the watcher's connection pool opens that file directly. `detach_database` rejects while a watcher is active; call `unwatch_directory` first. Disabled in read-only mode."
     )]
     fn watch_directory(
         &self,
@@ -2359,17 +2397,6 @@ impl HyperMcpServer {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         if let Err(e) = self.check_writable("watch_directory") {
             return Self::err_content(e);
-        }
-        // Watcher uses a connection pool bound to the primary database;
-        // non-primary targets are not yet supported.
-        if params.database.is_some() || params.persist == Some(true) {
-            return Self::err_content(McpError::new(
-                ErrorCode::InvalidArgument,
-                "watch_directory does not yet support `database` or `persist`. \
-                 The watcher's connection pool is bound to the primary database. \
-                 Use `load_file` with `persist: true` for one-off persistent ingests."
-                    .to_string(),
-            ));
         }
         let canonical = match crate::attach::validate_input_path(&params.path, "watch directory") {
             Ok(p) => p,
@@ -2382,18 +2409,31 @@ impl HyperMcpServer {
             Err(e) => return Self::err_content(e),
         }
 
+        // Resolve the target database once, under the engine lock. Read-only
+        // attachments are rejected here (require_writable=true) so the
+        // watcher can't be pointed at a destination it can't write to.
+        let target_db = match self.with_engine(|engine| {
+            self.resolve_db(engine, params.database.as_deref(), params.persist, true)
+        }) {
+            Ok(v) => v,
+            Err(e) => return Self::err_content(e),
+        };
+
         let path = canonical;
         let engine_handle = self.engine_handle();
+        let attachments = self.attachments_handle();
         let registry = self.watchers_handle();
         let options = crate::watcher::WatchOptions {
             max_concurrent: params.max_concurrent.unwrap_or(0) as usize,
         };
         let result = crate::watcher::start_watching(
             engine_handle,
+            attachments,
             registry,
             Some(self.subscriptions_handle()),
             path.clone(),
             params.table.clone(),
+            target_db,
             options,
         );
         match result {
@@ -2498,7 +2538,7 @@ impl HyperMcpServer {
     /// Export query results or a table to CSV, Parquet, Arrow IPC,
     /// Apache Iceberg, or a new `.hyper` file.
     #[tool(
-        description = "Export query results or a table to a file via hyperd's native writers. Every format listed here is server-side — hyperd writes the file directly, with zero per-row work in the MCP process — and every format round-trips cleanly through the matching loader (`load_file` or `load_iceberg`).\n\nWhen choosing a format for *data leaving* Hyper, prefer in this order:\n  1. **Parquet** (recommended default): smallest output, fastest write, preserves every type (NUMERIC precision/scale, DATE, TIMESTAMP, etc.). `path` is a single file.\n  2. **Iceberg**: produces a full Apache Iceberg table directory (`metadata/` + `data/`). Use when the consumer is a data-lake tool (Spark, Trino, DuckDB, etc.). `path` is a directory that hyperd creates.\n  3. **Arrow IPC Stream** (`arrow_ipc`): same wire shape Hyper uses internally; great for handing data to another Arrow-aware process. Larger than Parquet (no compression) but extremely fast to read back. `path` is a single file.\n  4. **CSV**: portable and human-readable but the largest output and types are lost (everything becomes text). Use for spreadsheet / shell-pipeline interop. Includes header row.\n  5. **Hyper**: an entire `.hyper` database file openable directly in Tableau Desktop. `sql`/`table` are ignored — every user table is copied.\n\nAll formats except Iceberg and Hyper require either `sql` or `table`. Iceberg output is a directory; all others are single files."
+        description = "Export query results or a table to a file via hyperd's native writers. Every format listed here is server-side — hyperd writes the file directly, with zero per-row work in the MCP process — and every format round-trips cleanly through the matching loader (`load_file` or `load_iceberg`).\n\nWhen choosing a format for *data leaving* Hyper, prefer in this order:\n  1. **Parquet** (recommended default): smallest output, fastest write, preserves every type (NUMERIC precision/scale, DATE, TIMESTAMP, etc.). `path` is a single file.\n  2. **Iceberg**: produces a full Apache Iceberg table directory (`metadata/` + `data/`). Use when the consumer is a data-lake tool (Spark, Trino, DuckDB, etc.). `path` is a directory that hyperd creates.\n  3. **Arrow IPC Stream** (`arrow_ipc`): same wire shape Hyper uses internally; great for handing data to another Arrow-aware process. Larger than Parquet (no compression) but extremely fast to read back. `path` is a single file.\n  4. **CSV**: portable and human-readable but the largest output and types are lost (everything becomes text). Use for spreadsheet / shell-pipeline interop. Includes header row.\n  5. **Hyper**: an entire `.hyper` database file openable directly in Tableau Desktop. `sql`/`table` are ignored — every user table is copied.\n\nAll formats except Iceberg and Hyper require either `sql` or `table`. Iceberg output is a directory; all others are single files.\n\nUse `database` to read from a non-primary source: for `format=\"hyper\"` it selects which database is snapshotted; for the row-oriented formats it routes the SELECT through the named database (when `table` is set) or pins `schema_search_path` for the call (when `sql` is set)."
     )]
     fn export(
         &self,
@@ -2521,26 +2561,17 @@ impl HyperMcpServer {
                     ));
                 }
             };
-            // Database routing. Two strategies:
+            // Database routing. Three strategies:
+            // - `hyper` format + non-primary: source_db plumbed through
+            //   into populate_export_target so the snapshot reads from
+            //   the requested database (no need to redirect anything;
+            //   the cross-DB CREATE TABLE AS handles it natively).
             // - `table` mode + non-primary: synthesize a fully-qualified
             //   SELECT and pass it as `sql` so export.rs's name-quoting
             //   doesn't double-quote our identifier.
             // - `sql` mode + non-primary: redirect search_path for the
             //   call duration so unqualified names resolve correctly.
-            // - `hyper` format always exports the *primary* database
-            //   (export_hyper takes a snapshot of the connection's
-            //   workspace); database+hyper would silently produce the
-            //   wrong file, so we reject it up front.
             let target_db = self.resolve_db(engine, params.database.as_deref(), None, false)?;
-            if params.format == "hyper" && target_db.is_some() {
-                return Err(McpError::new(
-                    ErrorCode::InvalidArgument,
-                    "export with format=\"hyper\" always snapshots the primary (ephemeral) \
-                     database. Drop the `database` parameter, or pick a different format \
-                     (csv, parquet, arrow_ipc, iceberg) that supports cross-database export."
-                        .to_string(),
-                ));
-            }
             let (effective_sql, effective_table) = match (&params.sql, &params.table, &target_db) {
                 (None, Some(t), Some(db)) => {
                     let esc_db = db.replace('"', "\"\"");
@@ -2567,6 +2598,7 @@ impl HyperMcpServer {
                 format: params.format,
                 overwrite: params.overwrite.unwrap_or(true),
                 format_options,
+                source_db: target_db.clone(),
             };
             let export_result = export_to_file(engine, &opts)?;
             Ok(json!({
@@ -2679,7 +2711,7 @@ impl HyperMcpServer {
 
     /// Update prose metadata for a table in the `_table_catalog`.
     #[tool(
-        description = "Update prose metadata for a table in the `_table_catalog`: source_url, source_description, purpose, license, notes. Fields you omit stay unchanged; pass an explicit empty string (\"\") to clear a field. Mechanical fields (load_tool, load_params, loaded_at, last_refreshed_at, row_count) are managed by the server. Requires an existing catalog entry — load the table first (load_file / load_data / execute CREATE TABLE) so the stub row is created automatically. Disabled in read-only mode and when the catalog table doesn't exist on the target database."
+        description = "Update prose metadata for a table in the `_table_catalog`: source_url, source_description, purpose, license, notes. Fields you omit stay unchanged; pass an explicit empty string (\"\") to clear a field. Mechanical fields (load_tool, load_params, loaded_at, last_refreshed_at, row_count) are managed by the server. Requires an existing catalog entry — load the table first (load_file / load_data / execute CREATE TABLE) so the stub row is created automatically. Use `database` to target the metadata for a table in a non-primary writable database; read-only attachments are rejected with a clear re-attach-with-writable message. Disabled in read-only mode."
     )]
     fn set_table_metadata(
         &self,
@@ -2696,8 +2728,20 @@ impl HyperMcpServer {
             notes: params.notes,
         };
         let table_name = params.table.clone();
-        let result = self
-            .with_engine(|engine| crate::table_catalog::set_metadata(engine, &table_name, &fields));
+        let result = self.with_engine(|engine| {
+            // Resolve target with require_writable=true so read-only
+            // attachments are rejected BEFORE any catalog write
+            // (defense-in-depth: ensure_exists_in's CREATE TABLE
+            // would also fail at the Hyper layer, but the resolve_db
+            // error is more actionable).
+            let target_db = self.resolve_db(engine, params.database.as_deref(), None, true)?;
+            crate::table_catalog::set_metadata_in(
+                engine,
+                &table_name,
+                &fields,
+                target_db.as_deref(),
+            )
+        });
         match result {
             Ok(entry) => Self::ok_content(entry.to_json()),
             Err(e) => Self::err_content(e),
@@ -2842,8 +2886,40 @@ impl HyperMcpServer {
         Parameters(params): Parameters<DetachDatabaseParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let alias = params.alias.clone();
+        // Reject if any active watcher targets this alias. Otherwise the
+        // watcher's pool would keep ingesting into the now-detached
+        // workspace path; or, if the user re-attached the same alias to
+        // a different file, into the wrong database. Fixed by stopping
+        // the watcher first via `unwatch_directory`.
+        if let Ok(watchers) = self.watchers.watchers.lock() {
+            let conflict = watchers.values().find(|h| {
+                h.target_db
+                    .as_deref()
+                    .is_some_and(|a| a.eq_ignore_ascii_case(&alias))
+            });
+            if let Some(h) = conflict {
+                return Self::err_content(McpError::new(
+                    ErrorCode::InvalidArgument,
+                    format!(
+                        "cannot detach '{alias}': an active watcher on directory '{}' targets it. \
+                         Call unwatch_directory(\"{}\") first.",
+                        h.directory.display(),
+                        h.directory.display()
+                    ),
+                ));
+            }
+        }
         let registry = self.attachments_handle();
-        let result = self.with_engine(|engine| registry.detach(engine, &alias));
+        let result = self.with_engine(|engine| {
+            let outcome = registry.detach(engine, &alias)?;
+            if outcome {
+                // Drop any cached "_table_catalog exists in this alias"
+                // probe so a re-attach to a different file or with
+                // different writability won't reuse a stale entry.
+                engine.clear_catalog_cache_for(&alias);
+            }
+            Ok(outcome)
+        });
         match result {
             Ok(detached) => {
                 Self::ok_content(json!({ "alias": params.alias, "detached": detached }))
@@ -3020,6 +3096,7 @@ impl HyperMcpServer {
                     "copy_query",
                     load_params.as_deref(),
                     row_count,
+                    target_db,
                 );
             }
 

@@ -47,6 +47,7 @@
 //! them into a `tokio::sync::mpsc` on a small helper thread so the tokio
 //! consumer can `.recv().await` naturally.
 
+use crate::attach::{AttachRegistry, AttachSource};
 use crate::engine::Engine;
 use crate::error::{ErrorCode, McpError};
 use crate::ingest::{
@@ -71,11 +72,64 @@ use tokio::task::JoinHandle;
 /// this to the full data file name (e.g. `orders.csv` → `orders.csv.ready`).
 pub const READY_SUFFIX: &str = ".ready";
 
+/// Resolve the file path the watcher pool should open as its workspace.
+/// `None` → primary (ephemeral). `Some("persistent")` → the engine's
+/// persistent path. `Some(alias)` → user-attached writable file from
+/// `AttachRegistry`. Read-only attachments are rejected because the
+/// watcher needs to INSERT/COPY into the table.
+fn resolve_pool_workspace(
+    eng: &Engine,
+    attachments: Option<&AttachRegistry>,
+    target_db: Option<&str>,
+) -> Result<String, McpError> {
+    let Some(alias) = target_db else {
+        return Ok(eng.ephemeral_path().to_string_lossy().to_string());
+    };
+    if alias.eq_ignore_ascii_case(Engine::PERSISTENT_ALIAS) {
+        let path = eng.persistent_path().ok_or_else(|| {
+            McpError::new(
+                ErrorCode::InvalidArgument,
+                "target 'persistent' but the server is in --ephemeral-only mode",
+            )
+        })?;
+        return Ok(path.to_string_lossy().to_string());
+    }
+    let registry = attachments.ok_or_else(|| {
+        McpError::new(
+            ErrorCode::InternalError,
+            "watcher pool requested for a user-attached alias but no AttachRegistry was supplied",
+        )
+    })?;
+    let entry = registry.get(alias).ok_or_else(|| {
+        McpError::new(
+            ErrorCode::InvalidArgument,
+            format!("database '{alias}' is not attached"),
+        )
+    })?;
+    if !entry.writable {
+        return Err(McpError::new(
+            ErrorCode::InvalidArgument,
+            format!(
+                "database '{alias}' was attached read-only. \
+                 Re-attach with writable:true to use it as a watcher target."
+            ),
+        ));
+    }
+    let AttachSource::LocalFile { path } = &entry.source;
+    Ok(path.to_string_lossy().to_string())
+}
+
 /// Build a watcher connection pool from the current engine. Pulled out
 /// of [`start_watching`] so the recovery path (post hyperd restart)
 /// can call it again to swap in a fresh pool.
+///
+/// `target_db` selects the pool's workspace file: `None` → ephemeral
+/// primary, `Some("persistent")` → persistent attachment,
+/// `Some(alias)` → user-attached writable file (from `attachments`).
 fn build_watcher_pool(
     engine: &Arc<Mutex<Option<Engine>>>,
+    attachments: Option<&AttachRegistry>,
+    target_db: Option<&str>,
     concurrency: usize,
 ) -> Result<Arc<Pool>, McpError> {
     let guard = engine
@@ -88,10 +142,7 @@ fn build_watcher_pool(
         )
     })?;
     let endpoint = eng.hyperd_endpoint()?;
-    // Watcher pool connects to the engine's primary (ephemeral). The
-    // user-supplied table on `watch_directory` always lives there
-    // unless a future flag routes it to the persistent attachment.
-    let workspace = eng.ephemeral_path().to_string_lossy().to_string();
+    let workspace = resolve_pool_workspace(eng, attachments, target_db)?;
     let cfg = PoolConfig::new(endpoint, workspace)
         .create_mode(CreateMode::DoNotCreate)
         .max_size(concurrency);
@@ -110,9 +161,11 @@ fn build_watcher_pool(
 async fn rebuild_watcher_pool(
     pool_slot: &tokio::sync::RwLock<Arc<Pool>>,
     engine: &Arc<Mutex<Option<Engine>>>,
+    attachments: Option<&AttachRegistry>,
+    target_db: Option<&str>,
     concurrency: usize,
 ) -> Result<(), McpError> {
-    let new_pool = build_watcher_pool(engine, concurrency)?;
+    let new_pool = build_watcher_pool(engine, attachments, target_db, concurrency)?;
     let mut guard = pool_slot.write().await;
     *guard = new_pool;
     Ok(())
@@ -182,6 +235,13 @@ impl WatcherStats {
 pub struct WatcherHandle {
     pub directory: PathBuf,
     pub table: String,
+    /// Resolved target database alias for this watcher. `None` →
+    /// primary; `Some("persistent")` → persistent attachment;
+    /// `Some(alias)` → user-attached writable. Stored so the
+    /// post-reconnect rebuild path resolves to the same target,
+    /// and so `detach_database` can refuse to detach an alias with
+    /// an active watcher.
+    pub target_db: Option<String>,
     pub stats: Arc<Mutex<WatcherStats>>,
     /// Live counter of in-flight ingest tasks. Decremented on task completion
     /// via an RAII guard.
@@ -262,6 +322,7 @@ impl WatcherRegistry {
                 json!({
                     "directory": h.directory.to_string_lossy(),
                     "table": h.table,
+                    "target_db": h.target_db.clone().unwrap_or_else(|| "local".into()),
                     "files_ingested": stats.files_ingested,
                     "files_failed": stats.files_failed,
                     "last_event_ms_ago": last_event_ms_ago,
@@ -329,10 +390,12 @@ impl Drop for InFlightGuard {
 ///   (file read, schema inference, or Hyper `COPY` / `INSERT` errors).
 pub fn start_watching(
     engine: Arc<Mutex<Option<Engine>>>,
+    attachments: Arc<AttachRegistry>,
     registry: Arc<WatcherRegistry>,
     subscriptions: Option<Arc<SubscriptionRegistry>>,
     dir: PathBuf,
     table: String,
+    target_db: Option<String>,
     options: WatchOptions,
 ) -> Result<WatcherStats, McpError> {
     if !dir.exists() {
@@ -380,6 +443,8 @@ pub fn start_watching(
     // watcher.
     let pool = Arc::new(tokio::sync::RwLock::new(build_watcher_pool(
         &engine,
+        Some(attachments.as_ref()),
+        target_db.as_deref(),
         concurrency,
     )?));
 
@@ -423,6 +488,8 @@ pub fn start_watching(
                     process_ready_with_recovery(
                         &pool,
                         &engine,
+                        Some(attachments.as_ref()),
+                        target_db.as_deref(),
                         concurrency,
                         subscriptions.as_deref(),
                         &canonical,
@@ -492,12 +559,14 @@ pub fn start_watching(
     let task = {
         let pool = Arc::clone(&pool);
         let engine_for_pool = Arc::clone(&engine);
+        let attachments_for_pool = Arc::clone(&attachments);
         let subs = subscriptions.clone();
         let stats = Arc::clone(&stats);
         let in_flight = Arc::clone(&in_flight);
         let in_flight_paths = Arc::clone(&in_flight_paths);
         let dir = canonical.clone();
         let table = table.clone();
+        let task_target_db = target_db.clone();
         tokio::spawn(async move {
             while let Some(event_res) = async_rx.recv().await {
                 let Ok(event) = event_res else { continue };
@@ -522,6 +591,8 @@ pub fn start_watching(
                     }
                     let pool_slot = Arc::clone(&pool);
                     let engine_handle = Arc::clone(&engine_for_pool);
+                    let attachments_handle = Arc::clone(&attachments_for_pool);
+                    let target_db_clone = task_target_db.clone();
                     let subs = subs.clone();
                     let stats = Arc::clone(&stats);
                     let in_flight = Arc::clone(&in_flight);
@@ -533,6 +604,8 @@ pub fn start_watching(
                         process_ready_with_recovery(
                             &pool_slot,
                             &engine_handle,
+                            Some(attachments_handle.as_ref()),
+                            target_db_clone.as_deref(),
                             concurrency,
                             subs.as_deref(),
                             &dir,
@@ -553,6 +626,7 @@ pub fn start_watching(
     let handle = WatcherHandle {
         directory: canonical.clone(),
         table,
+        target_db,
         stats,
         in_flight,
         watcher: Some(watcher),
@@ -669,6 +743,11 @@ async fn ingest_one_ready_file(
             format!("Failed to check out connection: {e}"),
         )
     })?;
+    // The pool was built against the target's `.hyper` file as its
+    // workspace, so from these connections' perspective the target IS
+    // the primary database — qualified SQL with "persistent"."public"
+    // wouldn't resolve here. Keep target_db = None so the unqualified
+    // identifier routes into the pool's primary.
     let opts = IngestOptions {
         table: table.to_string(),
         mode: "append".into(),
@@ -698,6 +777,8 @@ async fn ingest_one_ready_file(
 async fn process_ready_with_recovery(
     pool_slot: &tokio::sync::RwLock<Arc<Pool>>,
     engine: &Arc<Mutex<Option<Engine>>>,
+    attachments: Option<&AttachRegistry>,
+    target_db: Option<&str>,
     concurrency: usize,
     subscriptions: Option<&SubscriptionRegistry>,
     dir: &Path,
@@ -743,7 +824,8 @@ async fn process_ready_with_recovery(
                 err = %err.message,
                 "watcher: detected connection-lost error, rebuilding pool and retrying"
             );
-            match rebuild_watcher_pool(pool_slot, engine, concurrency).await {
+            match rebuild_watcher_pool(pool_slot, engine, attachments, target_db, concurrency).await
+            {
                 Ok(()) => {
                     let active_pool = pool_slot.read().await.clone();
                     result =
@@ -773,6 +855,41 @@ async fn process_ready_with_recovery(
                 data_path.display(),
                 table
             );
+            // Update _table_catalog on the engine's main connection
+            // (which sees both ephemeral and persistent + any user-
+            // attached aliases). The pool wrote the data into the
+            // target's .hyper file; the engine connection now stamps
+            // a stub row in that DB's per-DB _table_catalog.
+            //
+            // Errors here are logged but never block the success
+            // bookkeeping above — the data is in. Mirrors the sync
+            // load_file/load_data handlers' best-effort contract.
+            let row_count_i64 = i64::try_from(rows).unwrap_or(i64::MAX);
+            let load_params = serde_json::to_string(&json!({
+                "watch_directory": dir.to_string_lossy(),
+                "database": target_db.unwrap_or("local"),
+            }))
+            .ok();
+            if let Ok(guard) = engine.lock() {
+                if let Some(eng) = guard.as_ref() {
+                    if let Err(e) = crate::table_catalog::upsert_stub_in(
+                        eng,
+                        table,
+                        "watch_directory",
+                        load_params.as_deref(),
+                        Some(row_count_i64),
+                        true,
+                        target_db,
+                    ) {
+                        tracing::warn!(
+                            table = %table,
+                            target_db = ?target_db,
+                            err = %e.message,
+                            "watcher: failed to update _table_catalog after ingest"
+                        );
+                    }
+                }
+            }
             if let Some(subs) = subscriptions {
                 for uri in uris_for_table_change(table) {
                     subs.notify_updated(&uri);
