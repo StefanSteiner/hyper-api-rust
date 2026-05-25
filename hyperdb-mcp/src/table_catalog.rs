@@ -176,6 +176,9 @@ pub fn ensure_exists(engine: &Engine) -> Result<(), McpError> {
     };
     let ddl = format!("CREATE TABLE IF NOT EXISTS {qualified} {CATALOG_COLUMNS}");
     engine.execute_command(&ddl)?;
+    // After CREATE TABLE IF NOT EXISTS the catalog is guaranteed
+    // present — short-circuit subsequent existence probes.
+    engine.mark_catalog_present();
     Ok(())
 }
 
@@ -538,18 +541,22 @@ fn user_tables(engine: &Engine) -> Result<Vec<String>, McpError> {
 
 /// `true` when `_table_catalog` is present inside the persistent
 /// attachment. Returns `false` if there is no persistent attachment.
+///
+/// Caches the result on the engine after the first probe — subsequent
+/// reads/writes don't re-run the existence query. Callers that mutate
+/// the catalog (`ensure_exists`) update the cache directly via
+/// [`Engine::mark_catalog_present`].
 fn table_present(engine: &Engine) -> Result<bool, McpError> {
-    if !engine.has_persistent() {
-        return Ok(false);
-    }
-    let sql = format!(
-        "SELECT tablename FROM \"{}\".pg_catalog.pg_tables \
-         WHERE schemaname = 'public' AND tablename = {}",
-        Engine::PERSISTENT_ALIAS,
-        sql_literal(TABLE_CATALOG_TABLE)
-    );
-    let rows = engine.execute_query_to_json(&sql)?;
-    Ok(!rows.is_empty())
+    engine.catalog_present_in_persistent(|engine| {
+        let sql = format!(
+            "SELECT tablename FROM \"{}\".pg_catalog.pg_tables \
+             WHERE schemaname = 'public' AND tablename = {}",
+            Engine::PERSISTENT_ALIAS,
+            sql_literal(TABLE_CATALOG_TABLE)
+        );
+        let rows = engine.execute_query_to_json(&sql)?;
+        Ok(!rows.is_empty())
+    })
 }
 
 /// Return `COUNT(*)` for a user table inside the persistent attachment.

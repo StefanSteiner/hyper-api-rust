@@ -168,6 +168,17 @@ pub struct Engine {
     /// to `false` after the server consumes it via
     /// [`Self::take_persistent_was_created`].
     persistent_was_created: bool,
+    /// Cached "_table_catalog exists in persistent" probe. Populated on
+    /// first call to [`Self::catalog_present_in_persistent`] and held
+    /// for the lifetime of the connection. Avoids repeated
+    /// `pg_catalog.pg_tables` round-trips on every catalog read/write.
+    /// Lives on the Engine because the catalog is per-engine-lifetime
+    /// (a `ConnectionLost` reconnect creates a fresh Engine, so the
+    /// cache resets at the right boundary). `None` means "not yet
+    /// probed"; `Some(false)` is cacheable too — once the catalog is
+    /// confirmed absent on a read-only or `--ephemeral-only` flow it
+    /// stays absent for the whole engine lifetime.
+    catalog_present_cache: std::sync::Mutex<Option<bool>>,
     log_dir: PathBuf,
 }
 
@@ -301,6 +312,7 @@ impl Engine {
             ephemeral_path,
             persistent_path,
             persistent_was_created,
+            catalog_present_cache: std::sync::Mutex::new(None),
             log_dir,
         })
     }
@@ -375,6 +387,7 @@ impl Engine {
             ephemeral_path: ephemeral_path.to_path_buf(),
             persistent_path,
             persistent_was_created,
+            catalog_present_cache: std::sync::Mutex::new(None),
             log_dir: log_dir.to_path_buf(),
         }))
     }
@@ -531,6 +544,51 @@ impl Engine {
     /// startup, not a one-shot signal).
     pub fn persistent_was_just_created(&self) -> bool {
         self.persistent_was_created
+    }
+
+    /// Returns whether `_table_catalog` exists in the persistent
+    /// attachment, caching the result on first call so subsequent
+    /// catalog read/write paths skip the `pg_catalog.pg_tables` probe.
+    ///
+    /// `prober` is the SQL-side existence check; the cache layer here
+    /// is intentionally generic so the catalog module can keep its
+    /// existing probe SQL in one place.
+    ///
+    /// Returns `Ok(false)` immediately when the engine has no
+    /// persistent attachment (no probe needed).
+    ///
+    /// # Errors
+    /// Propagates whatever error `prober` returns on the first call.
+    /// On subsequent calls, the cached value is returned without
+    /// re-running the probe.
+    pub fn catalog_present_in_persistent<F>(&self, prober: F) -> Result<bool, McpError>
+    where
+        F: Fn(&Engine) -> Result<bool, McpError>,
+    {
+        if !self.has_persistent() {
+            return Ok(false);
+        }
+        // Fast path: cache already populated.
+        if let Ok(guard) = self.catalog_present_cache.lock() {
+            if let Some(present) = *guard {
+                return Ok(present);
+            }
+        }
+        // Slow path: run the probe and cache its result.
+        let present = prober(self)?;
+        if let Ok(mut guard) = self.catalog_present_cache.lock() {
+            *guard = Some(present);
+        }
+        Ok(present)
+    }
+
+    /// Synchronously set the catalog-presence cache to `true` — used by
+    /// `table_catalog::ensure_exists` after a `CREATE TABLE IF NOT
+    /// EXISTS` so subsequent reads/writes skip the existence probe.
+    pub fn mark_catalog_present(&self) {
+        if let Ok(mut guard) = self.catalog_present_cache.lock() {
+            *guard = Some(true);
+        }
     }
 
     /// Direct access to the underlying connection for operations not

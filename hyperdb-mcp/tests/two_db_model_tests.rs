@@ -72,9 +72,7 @@ fn persistent_writes_survive_engine_recreate() {
     {
         let engine = Engine::new(Some(path_str.clone())).unwrap();
         engine
-            .execute_command(
-                "CREATE TABLE \"persistent\".\"public\".\"keepers\" (n INT)",
-            )
+            .execute_command("CREATE TABLE \"persistent\".\"public\".\"keepers\" (n INT)")
             .unwrap();
         engine
             .execute_command(
@@ -85,9 +83,7 @@ fn persistent_writes_survive_engine_recreate() {
 
     let engine = Engine::new(Some(path_str)).unwrap();
     let rows = engine
-        .execute_query_to_json(
-            "SELECT n FROM \"persistent\".\"public\".\"keepers\" ORDER BY n",
-        )
+        .execute_query_to_json("SELECT n FROM \"persistent\".\"public\".\"keepers\" ORDER BY n")
         .unwrap();
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0]["n"], 1);
@@ -120,7 +116,9 @@ fn ephemeral_writes_are_discarded_on_drop() {
     // own connection (ephemeral) and through persistent — neither should
     // see it.
     let rows = engine
-        .execute_query_to_json("SELECT tablename FROM pg_catalog.pg_tables WHERE tablename = 'scratch'")
+        .execute_query_to_json(
+            "SELECT tablename FROM pg_catalog.pg_tables WHERE tablename = 'scratch'",
+        )
         .unwrap_or_default();
     assert!(
         rows.is_empty(),
@@ -136,7 +134,9 @@ fn resolve_target_db_handles_persistent_presence() {
     let path = dir.path().join("ws.hyper");
     let with_persistent = Engine::new(Some(path.to_str().unwrap().into())).unwrap();
     assert_eq!(
-        with_persistent.resolve_target_db(Some("persistent")).unwrap(),
+        with_persistent
+            .resolve_target_db(Some("persistent"))
+            .unwrap(),
         "persistent"
     );
     assert_eq!(
@@ -176,4 +176,47 @@ fn engine_status_ephemeral_only_reports_no_persistent() {
     assert!(!status["has_persistent"].as_bool().unwrap());
     assert!(status["ephemeral_path"].is_string());
     assert!(status["persistent_path"].is_null());
+}
+
+/// `catalog_present_in_persistent` caches the probe result so the
+/// underlying SQL only runs once per engine lifetime.
+#[test]
+fn catalog_presence_probe_is_cached() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("ws.hyper");
+    let engine = Engine::new(Some(path.to_str().unwrap().into())).unwrap();
+
+    let probe_count = std::sync::atomic::AtomicUsize::new(0);
+    let probe = |_e: &Engine| -> Result<bool, hyperdb_mcp::error::McpError> {
+        probe_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(false)
+    };
+
+    // First call runs the probe.
+    assert!(!engine.catalog_present_in_persistent(probe).unwrap());
+    assert_eq!(probe_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    // Second call uses the cache; probe count stays at 1.
+    assert!(!engine.catalog_present_in_persistent(probe).unwrap());
+    assert_eq!(probe_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    // After mark_catalog_present, the cached value flips to true and
+    // the probe stays untouched.
+    engine.mark_catalog_present();
+    assert!(engine.catalog_present_in_persistent(probe).unwrap());
+    assert_eq!(probe_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// In ephemeral-only mode, the cache short-circuits to `false` without
+/// running the probe at all.
+#[test]
+fn catalog_presence_short_circuits_in_ephemeral_only() {
+    let engine = Engine::new(None).unwrap();
+    let probe_count = std::sync::atomic::AtomicUsize::new(0);
+    let probe = |_e: &Engine| -> Result<bool, hyperdb_mcp::error::McpError> {
+        probe_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(true)
+    };
+    assert!(!engine.catalog_present_in_persistent(probe).unwrap());
+    assert_eq!(probe_count.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
