@@ -61,6 +61,12 @@ pub struct ExportOptions {
     /// may be strings, booleans, or numbers; anything else is rejected.
     /// Ignored for `"hyper"` format (which is not a `COPY` at all).
     pub format_options: Option<Map<String, Value>>,
+    /// Source database to snapshot when `format = "hyper"`. `None` →
+    /// the primary (ephemeral) workspace; `Some("persistent")` or
+    /// `Some("user_alias")` snapshots that attached database. Ignored
+    /// for the row-oriented formats which already qualify via `sql`
+    /// or via `scoped_search_path`.
+    pub source_db: Option<String>,
 }
 
 /// Returned by [`export_to_file`] with the exported row count and telemetry.
@@ -119,7 +125,7 @@ pub fn export_to_file(engine: &Engine, opts: &ExportOptions) -> Result<ExportRes
     // `table` is meaningful for it, so branch before the SQL-resolution
     // check that the row-oriented formats require.
     if opts.format == "hyper" {
-        return export_hyper(engine, &opts.path, &timer);
+        return export_hyper(engine, &opts.path, opts.source_db.as_deref(), &timer);
     }
 
     let select_sql = match (&opts.sql, &opts.table) {
@@ -434,7 +440,12 @@ fn walk_dir_size(dir: &std::path::Path) -> std::io::Result<u64> {
 /// reproduced. That's acceptable for the current callers (LLMs
 /// exporting workspace data for Tableau Desktop), but documented here
 /// so a future caller that needs full catalog fidelity knows why.
-fn export_hyper(engine: &Engine, path: &str, timer: &StatsTimer) -> Result<ExportResult, McpError> {
+fn export_hyper(
+    engine: &Engine,
+    path: &str,
+    source_db: Option<&str>,
+    timer: &StatsTimer,
+) -> Result<ExportResult, McpError> {
     // The target path is a separate file from the primary workspace,
     // so OS-level copy/delete on it is fine — the lock conflict only
     // affects the workspace hyperd has open. Pre-delete on overwrite
@@ -465,7 +476,7 @@ fn export_hyper(engine: &Engine, path: &str, timer: &StatsTimer) -> Result<Expor
         alias.replace('"', "\"\""),
     ))?;
 
-    let result = populate_export_target(engine, &alias);
+    let result = populate_export_target(engine, source_db, &alias);
 
     // Always detach, even on failure — the attach was scoped to this
     // call. A failed detach is logged but not surfaced: the caller
@@ -498,16 +509,20 @@ fn export_hyper(engine: &Engine, path: &str, timer: &StatsTimer) -> Result<Expor
     })
 }
 
-/// Copy every user table from the primary workspace into the database
-/// attached as `alias`. Returns the total row count written. Excludes
-/// `pg_catalog` / `information_schema` (and Hyper's own system
-/// schemas) so we only touch user data.
-fn populate_export_target(engine: &Engine, alias: &str) -> Result<u64, McpError> {
-    let escaped_alias = alias.replace('"', "\"\"");
-    let primary = engine.primary_db_name();
-    let escaped_primary = primary.replace('"', "\"\"");
+/// Copy every user table from `source_db` (None → primary) into the
+/// database attached as `target_alias`. Returns the total row count
+/// written. Excludes `pg_catalog` / `information_schema` (and Hyper's
+/// own system schemas) so we only touch user data.
+fn populate_export_target(
+    engine: &Engine,
+    source_db: Option<&str>,
+    target_alias: &str,
+) -> Result<u64, McpError> {
+    let escaped_alias = target_alias.replace('"', "\"\"");
+    let source = source_db.map_or_else(|| engine.primary_db_name(), str::to_string);
+    let escaped_source = source.replace('"', "\"\"");
 
-    let schemas = list_user_schemas(engine, &escaped_primary)?;
+    let schemas = list_user_schemas(engine, &escaped_source)?;
     let mut total_rows: u64 = 0;
 
     for schema in &schemas {
@@ -521,7 +536,7 @@ fn populate_export_target(engine: &Engine, alias: &str) -> Result<u64, McpError>
             ))?;
         }
 
-        let tables = list_user_tables(engine, &escaped_primary, schema)?;
+        let tables = list_user_tables(engine, &escaped_source, schema)?;
         for table in &tables {
             if crate::engine::is_internal_table(table) {
                 continue;
@@ -529,7 +544,7 @@ fn populate_export_target(engine: &Engine, alias: &str) -> Result<u64, McpError>
             let escaped_table = table.replace('"', "\"\"");
             let rows_copied = engine.execute_command(&format!(
                 "CREATE TABLE \"{escaped_alias}\".\"{escaped_schema}\".\"{escaped_table}\" AS \
-                 SELECT * FROM \"{escaped_primary}\".\"{escaped_schema}\".\"{escaped_table}\"",
+                 SELECT * FROM \"{escaped_source}\".\"{escaped_schema}\".\"{escaped_table}\"",
             ))?;
             total_rows = total_rows.saturating_add(rows_copied);
         }

@@ -2509,26 +2509,17 @@ impl HyperMcpServer {
                     ));
                 }
             };
-            // Database routing. Two strategies:
+            // Database routing. Three strategies:
+            // - `hyper` format + non-primary: source_db plumbed through
+            //   into populate_export_target so the snapshot reads from
+            //   the requested database (no need to redirect anything;
+            //   the cross-DB CREATE TABLE AS handles it natively).
             // - `table` mode + non-primary: synthesize a fully-qualified
             //   SELECT and pass it as `sql` so export.rs's name-quoting
             //   doesn't double-quote our identifier.
             // - `sql` mode + non-primary: redirect search_path for the
             //   call duration so unqualified names resolve correctly.
-            // - `hyper` format always exports the *primary* database
-            //   (export_hyper takes a snapshot of the connection's
-            //   workspace); database+hyper would silently produce the
-            //   wrong file, so we reject it up front.
             let target_db = self.resolve_db(engine, params.database.as_deref(), None, false)?;
-            if params.format == "hyper" && target_db.is_some() {
-                return Err(McpError::new(
-                    ErrorCode::InvalidArgument,
-                    "export with format=\"hyper\" always snapshots the primary (ephemeral) \
-                     database. Drop the `database` parameter, or pick a different format \
-                     (csv, parquet, arrow_ipc, iceberg) that supports cross-database export."
-                        .to_string(),
-                ));
-            }
             let (effective_sql, effective_table) = match (&params.sql, &params.table, &target_db) {
                 (None, Some(t), Some(db)) => {
                     let esc_db = db.replace('"', "\"\"");
@@ -2555,6 +2546,7 @@ impl HyperMcpServer {
                 format: params.format,
                 overwrite: params.overwrite.unwrap_or(true),
                 format_options,
+                source_db: target_db.clone(),
             };
             let export_result = export_to_file(engine, &opts)?;
             Ok(json!({
