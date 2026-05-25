@@ -46,6 +46,7 @@ pub mod ingest;
 pub mod ingest_arrow;
 pub mod inspect;
 pub mod lakehouse;
+pub mod paths;
 pub mod readme;
 pub mod saved_queries;
 pub mod schema;

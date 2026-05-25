@@ -958,7 +958,8 @@ impl HyperMcpServer {
                 Engine::new(self.workspace_path.clone())?
             };
             tracing::info!(
-                workspace_path = %engine.workspace_path().display(),
+                ephemeral_path = %engine.ephemeral_path().display(),
+                persistent_path = ?engine.persistent_path(),
                 log_dir = %engine.log_dir().display(),
                 "engine ready"
             );
@@ -1574,7 +1575,10 @@ impl HyperMcpServer {
         // connection.
         let (endpoint, workspace) = match self.with_engine(|engine| {
             let endpoint = engine.hyperd_endpoint()?;
-            let workspace = engine.workspace_path().to_string_lossy().to_string();
+            // The pool connects to the engine's primary database (ephemeral).
+            // Tools that target the persistent attachment use qualified SQL
+            // through the same connection.
+            let workspace = engine.ephemeral_path().to_string_lossy().to_string();
             Ok((endpoint, workspace))
         }) {
             Ok(v) => v,

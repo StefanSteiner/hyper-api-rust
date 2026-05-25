@@ -665,14 +665,18 @@ fn engine_recovers_after_hyperd_killed() {
     let path = tmp.path().join("recover.hyper");
     let path_str = path.to_str().unwrap().to_string();
 
-    // Engine #1: pre-kill
+    // Engine #1: pre-kill. Write data into the persistent attachment via
+    // fully-qualified SQL so it survives the engine drop and the
+    // hyperd restart (the engine's ephemeral primary would not).
     {
         let engine = hyperdb_mcp::engine::Engine::new(Some(path_str.clone())).unwrap();
         engine
-            .execute_command("CREATE TABLE keepers (n INT)")
+            .execute_command("CREATE TABLE \"persistent\".\"public\".\"keepers\" (n INT)")
             .unwrap();
         engine
-            .execute_command("INSERT INTO keepers VALUES (1), (2), (3)")
+            .execute_command(
+                "INSERT INTO \"persistent\".\"public\".\"keepers\" VALUES (1), (2), (3)",
+            )
             .unwrap();
     }
 
@@ -688,12 +692,10 @@ fn engine_recovers_after_hyperd_killed() {
     // Engine #2: post-restart. This mirrors what `with_engine` does after a
     // ConnectionLost — drop the old engine (already done above) and create a
     // fresh one. The fresh engine re-discovers the daemon and connects to the
-    // new endpoint.
+    // new endpoint, then re-attaches the persistent file.
     let engine = hyperdb_mcp::engine::Engine::new(Some(path_str)).unwrap();
-    // The persistent .hyper file is intact on disk. Re-attaching via a new
-    // engine should let us see the data we wrote pre-kill.
     let rows = engine
-        .execute_query_to_json("SELECT n FROM keepers ORDER BY n")
+        .execute_query_to_json("SELECT n FROM \"persistent\".\"public\".\"keepers\" ORDER BY n")
         .unwrap();
     assert_eq!(rows.len(), 3, "data persisted across hyperd restart");
 }
@@ -704,9 +706,9 @@ fn daemon_mode_ephemeral_database_cleaned_up_on_drop() {
     let _daemon = TestDaemon::start();
 
     let engine = hyperdb_mcp::engine::Engine::new(None).unwrap();
-    let workspace_path = engine.workspace_path().to_path_buf();
+    let ephemeral_path = engine.ephemeral_path().to_path_buf();
 
-    assert!(workspace_path.exists());
+    assert!(ephemeral_path.exists());
 
     engine
         .execute_command("CREATE TABLE ephemeral_test (id INT)")
@@ -715,7 +717,7 @@ fn daemon_mode_ephemeral_database_cleaned_up_on_drop() {
     drop(engine);
 
     assert!(
-        !workspace_path.exists(),
+        !ephemeral_path.exists(),
         "ephemeral .hyper file should be deleted after engine drop"
     );
 }

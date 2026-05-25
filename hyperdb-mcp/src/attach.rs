@@ -67,13 +67,25 @@ fn set_primary_search_path(engine: &Engine) -> Result<(), McpError> {
     Ok(())
 }
 
-/// Inverse of [`set_primary_search_path`] — restores Hyper's default
-/// `"$single"` search mode. Called when the registry has just
-/// transitioned back to zero attachments so the connection behaves
-/// exactly like a fresh single-database session.
+/// Restore the connection's search-path posture when the user-visible
+/// attachment registry transitions back to zero attachments.
+///
+/// - When the engine has the default persistent attachment, leave the
+///   pin in place: even with no user attachments, the persistent DB is
+///   *still attached*, so Hyper's `"$single"` resolution would fail.
+///   We pin explicitly to the ephemeral primary's name.
+/// - When `--ephemeral-only` (no persistent attachment), restore Hyper's
+///   default `"$single"` mode so the connection behaves exactly like a
+///   fresh single-database session.
 fn reset_search_path(engine: &Engine) -> Result<(), McpError> {
-    engine.execute_command("RESET schema_search_path")?;
-    Ok(())
+    if engine.has_persistent() {
+        // Re-pin to the primary's name so unqualified resolution keeps
+        // working alongside the ever-present persistent attachment.
+        set_primary_search_path(engine)
+    } else {
+        engine.execute_command("RESET schema_search_path")?;
+        Ok(())
+    }
 }
 
 /// Policy for what [`AttachRegistry::attach`] should do when the

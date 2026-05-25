@@ -21,13 +21,24 @@
 //! path covers both transport-level failures and the `"desynchronized"` state
 //! surfaced by the `hyper-client` layer's bounded drain.
 //!
-//! # Workspace Modes
+//! # Workspace Model
 //!
-//! - **Persistent** — caller supplies a path via `--workspace`; the `.hyper`
-//!   file survives across sessions. Tables can be built up incrementally and
-//!   exported to Tableau Desktop.
-//! - **Ephemeral** — a temp directory is created per process; everything is
-//!   discarded when the server exits. No configuration needed.
+//! Every session has an **ephemeral primary database** at
+//! `$TMPDIR/hyperdb-mcp-<pid>/scratch.hyper`. This is where unqualified
+//! tool calls land — exploratory loads, ad-hoc queries, scratch tables.
+//! It is created fresh on engine start and deleted (DETACH + remove) when
+//! the engine drops.
+//!
+//! When a persistent path is supplied (CLI `--persistent-db`, env var
+//! `HYPERDB_PERSISTENT_DB`, or the platform default), the engine records
+//! it; the [`crate::server::HyperMcpServer`] then ATTACHes that file under
+//! alias `"persistent"` after construction so the LLM can target it via
+//! the `database` parameter on data tools, or via `persist: true` on
+//! load tools. The persistent file lives across sessions.
+//!
+//! Passing `None` (or `--ephemeral-only` at the CLI) skips the persistent
+//! attachment; the only available database is the ephemeral primary plus
+//! any user-attached DBs.
 //!
 //! # Sync Calls in an Async Server
 //!
@@ -41,20 +52,104 @@
 use crate::daemon;
 use crate::error::{ErrorCode, McpError};
 use crate::schema::ColumnSchema;
-use hyperdb_api::{Catalog, Connection, CreateMode, HyperProcess, Parameters, SqlType};
+use hyperdb_api::{
+    escape_sql_path, Catalog, Connection, CreateMode, HyperProcess, Parameters, SqlType,
+};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Owns a connection to `hyperd` and the workspace `.hyper` file. All SQL
-/// execution flows through this struct.
+/// Per-process counter so multiple `Engine` instances in the same PID get
+/// distinct ephemeral directories (parallel test runners, embedded uses).
+static EPHEMERAL_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Reserved alias under which the default persistent database is attached.
+/// Mirrored as [`Engine::PERSISTENT_ALIAS`] for the public API.
+const PERSISTENT_ALIAS: &str = "persistent";
+
+/// Outcome of [`attach_default_persistent`] — flags whether the file was
+/// freshly created so the catalog-seed step can fire (or skip).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PersistentAttachOutcome {
+    /// `true` when MCP just created the `.hyper` file as part of the
+    /// attach; `false` when the file already existed and we attached it
+    /// as-is.
+    pub file_was_created: bool,
+}
+
+/// Attach the persistent database under the reserved `"persistent"`
+/// alias on `connection`, creating the underlying `.hyper` file if it
+/// doesn't yet exist. Also pins `schema_search_path` to `primary_db_name`
+/// so unqualified SQL keeps routing to the ephemeral primary.
+fn attach_default_persistent(
+    connection: &Connection,
+    persistent_path: &Path,
+    primary_db_name: &str,
+) -> Result<PersistentAttachOutcome, McpError> {
+    let path_str = persistent_path.to_string_lossy();
+    let file_was_created = !persistent_path.exists();
+    if file_was_created {
+        let create_sql = format!(
+            "CREATE DATABASE IF NOT EXISTS {}",
+            escape_sql_path(&path_str)
+        );
+        connection.execute_command(&create_sql).map_err(|e| {
+            McpError::new(
+                ErrorCode::InternalError,
+                format!("Failed to create persistent database: {e}"),
+            )
+        })?;
+    }
+    let attach_sql = format!(
+        "ATTACH DATABASE {path} AS \"{alias}\"",
+        path = escape_sql_path(&path_str),
+        alias = PERSISTENT_ALIAS,
+    );
+    connection.execute_command(&attach_sql).map_err(|e| {
+        McpError::new(
+            ErrorCode::InternalError,
+            format!("Failed to attach persistent database: {e}"),
+        )
+    })?;
+    // Pin search_path to the primary so unqualified SQL keeps routing
+    // there even with the persistent attachment present. Mirrors the
+    // logic AttachRegistry uses for user-attached databases.
+    let pin_sql = format!(
+        "SET schema_search_path = '{}'",
+        primary_db_name.replace('\'', "''")
+    );
+    connection.execute_command(&pin_sql).map_err(|e| {
+        McpError::new(
+            ErrorCode::InternalError,
+            format!("Failed to pin schema_search_path: {e}"),
+        )
+    })?;
+    Ok(PersistentAttachOutcome { file_was_created })
+}
+
+/// File-stem of a `.hyper` path as the unqualified database name Hyper
+/// uses internally. Falls back to `"scratch"` if the stem can't be read.
+fn path_stem(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("scratch")
+        .to_string()
+}
+
+/// Owns a connection to `hyperd`, the ephemeral primary database, and an
+/// optional persistent attachment path. All SQL execution flows through
+/// this struct.
 ///
 /// Two process modes:
 /// - **Local** — this engine owns the `HyperProcess` subprocess directly.
 /// - **Daemon** — a shared daemon manages `hyperd`; the engine only holds a connection.
 ///
-/// Two workspace modes:
-/// - **Persistent** — caller supplies a path; the `.hyper` file survives across sessions.
-/// - **Ephemeral** — a temp directory is created per process; discarded on exit.
+/// Database layout:
+/// - The connection is *bound* to the ephemeral primary at
+///   [`Self::ephemeral_path`]. Unqualified SQL routes here.
+/// - When [`Self::persistent_path`] is `Some`, the server attaches that
+///   file as `"persistent"` after engine construction. When `None`, no
+///   persistent storage is available this session (`--ephemeral-only`).
 #[derive(Debug)]
 pub struct Engine {
     /// `None` in daemon mode (the daemon owns the process).
@@ -62,20 +157,31 @@ pub struct Engine {
     /// Stored endpoint for daemon mode (the daemon advertises this).
     daemon_endpoint: Option<String>,
     connection: Connection,
-    workspace_path: PathBuf,
+    /// The primary database for this session. Lives in a temp dir and is
+    /// deleted on `Drop`.
+    ephemeral_path: PathBuf,
+    /// User-data persistent database. Attached under alias `"persistent"`
+    /// during [`Engine::new`]. `None` in `--ephemeral-only` mode.
+    persistent_path: Option<PathBuf>,
+    /// `true` when the persistent `.hyper` file was just created during
+    /// engine construction (so the catalog-seed step should fire). Reset
+    /// to `false` after the server consumes it via
+    /// [`Self::take_persistent_was_created`].
+    persistent_was_created: bool,
     log_dir: PathBuf,
-    is_persistent: bool,
 }
 
 impl Engine {
-    /// Create a new Engine. If `workspace_path` is Some, use that path (persistent mode).
-    /// If None, use a temp file (ephemeral mode).
+    /// Create a new Engine. The connection is bound to a fresh ephemeral
+    /// primary in a temp directory. If `persistent_db_path` is `Some`,
+    /// the path is recorded so the server can ATTACH it post-construction;
+    /// passing `None` means `--ephemeral-only`.
     ///
     /// Connects to the shared daemon if available, falling back to a local `hyperd`.
     ///
     /// # Errors
     ///
-    /// - Returns [`ErrorCode::PermissionDenied`] if the workspace parent
+    /// - Returns [`ErrorCode::PermissionDenied`] if the persistent parent
     ///   directory or the log directory cannot be created.
     /// - Returns [`ErrorCode::InternalError`] if the ephemeral temp
     ///   directory cannot be created, if the `public` schema bootstrap
@@ -83,46 +189,62 @@ impl Engine {
     /// - Returns [`ErrorCode::HyperdNotFound`] when [`HyperProcess::new`]
     ///   reports the `hyperd` executable is missing or unreachable via
     ///   `HYPERD_PATH`.
-    pub fn new(workspace_path: Option<String>) -> Result<Self, McpError> {
-        Self::new_with_mode(workspace_path, false)
+    pub fn new(persistent_db_path: Option<String>) -> Result<Self, McpError> {
+        Self::new_with_mode(persistent_db_path, false)
     }
 
     /// Create an engine that bypasses the shared daemon and spawns a private `hyperd`.
     ///
     /// # Errors
     /// Same as [`Self::new`].
-    pub fn new_no_daemon(workspace_path: Option<String>) -> Result<Self, McpError> {
-        Self::new_with_mode(workspace_path, true)
+    pub fn new_no_daemon(persistent_db_path: Option<String>) -> Result<Self, McpError> {
+        Self::new_with_mode(persistent_db_path, true)
     }
 
     #[expect(
         clippy::needless_pass_by_value,
-        reason = "Option<String> is consumed by the workspace path resolution logic"
+        reason = "Option<String> is consumed by the path-expansion logic below"
     )]
-    fn new_with_mode(workspace_path: Option<String>, no_daemon: bool) -> Result<Self, McpError> {
-        let (path, is_persistent) = if let Some(ref p) = workspace_path {
-            let path = PathBuf::from(shellexpand_tilde(p));
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    McpError::new(
-                        ErrorCode::PermissionDenied,
-                        format!("Cannot create workspace directory: {e}"),
-                    )
-                })?;
+    fn new_with_mode(
+        persistent_db_path: Option<String>,
+        no_daemon: bool,
+    ) -> Result<Self, McpError> {
+        // Resolve persistent path (if requested) and pre-create its parent dir.
+        let persistent_path = match persistent_db_path.as_deref() {
+            Some(p) => {
+                let path = PathBuf::from(shellexpand_tilde(p));
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| {
+                        McpError::new(
+                            ErrorCode::PermissionDenied,
+                            format!("Cannot create persistent-db directory: {e}"),
+                        )
+                    })?;
+                }
+                Some(path)
             }
-            (path, true)
-        } else {
-            let dir = std::env::temp_dir().join(format!("hyperdb-mcp-{}", std::process::id()));
-            std::fs::create_dir_all(&dir).map_err(|e| {
-                McpError::new(
-                    ErrorCode::InternalError,
-                    format!("Cannot create temp directory: {e}"),
-                )
-            })?;
-            (dir.join("workspace.hyper"), false)
+            None => None,
         };
 
-        let log_dir = resolve_log_dir(workspace_path.as_deref());
+        // Always allocate a fresh ephemeral primary in a per-engine temp dir.
+        // The directory name combines the PID and a process-wide counter so
+        // multiple Engine instances in the same process (parallel tests,
+        // embedded uses, restart-after-ConnectionLost) never collide.
+        let seq = EPHEMERAL_SEQ.fetch_add(1, Ordering::Relaxed);
+        let ephemeral_dir =
+            std::env::temp_dir().join(format!("hyperdb-mcp-{}-{seq}", std::process::id()));
+        std::fs::create_dir_all(&ephemeral_dir).map_err(|e| {
+            McpError::new(
+                ErrorCode::InternalError,
+                format!("Cannot create ephemeral directory: {e}"),
+            )
+        })?;
+        let ephemeral_path = ephemeral_dir.join("scratch.hyper");
+
+        // Logs live next to the persistent file when one was supplied so
+        // operators find them in a stable location; otherwise next to the
+        // ephemeral primary.
+        let log_dir = resolve_log_dir(persistent_db_path.as_deref());
         std::fs::create_dir_all(&log_dir).map_err(|e| {
             McpError::new(
                 ErrorCode::PermissionDenied,
@@ -132,7 +254,9 @@ impl Engine {
 
         // Try daemon mode first unless disabled
         if !no_daemon {
-            if let Some(engine) = Self::try_daemon_mode(&path, &log_dir, is_persistent)? {
+            if let Some(engine) =
+                Self::try_daemon_mode(&ephemeral_path, persistent_path.clone(), &log_dir)?
+            {
                 return Ok(engine);
             }
         }
@@ -153,29 +277,56 @@ impl Engine {
             }
         })?;
 
-        let connection =
-            Connection::new(&hyper, &path, CreateMode::CreateIfNotExists).map_err(|e| {
+        // Bind to the ephemeral primary. CreateAndReplace because a stale
+        // file in the per-pid temp dir from a crashed prior session would
+        // otherwise leak into this one.
+        let connection = Connection::new(&hyper, &ephemeral_path, CreateMode::CreateAndReplace)
+            .map_err(|e| {
                 McpError::new(ErrorCode::InternalError, format!("Failed to connect: {e}"))
             })?;
 
         bootstrap_public_schema(&connection)?;
 
+        let primary_db_name = path_stem(&ephemeral_path);
+        let persistent_was_created = Self::attach_persistent_if_present(
+            &connection,
+            persistent_path.as_deref(),
+            &primary_db_name,
+        )?;
+
         Ok(Self {
             hyper: Some(hyper),
             daemon_endpoint: None,
             connection,
-            workspace_path: path,
+            ephemeral_path,
+            persistent_path,
+            persistent_was_created,
             log_dir,
-            is_persistent,
         })
+    }
+
+    /// If `persistent_path` is `Some`, attach the file under the reserved
+    /// `"persistent"` alias and pin the search path. Returns `true` if
+    /// the file was just created, `false` if it already existed or if
+    /// `persistent_path` is `None`.
+    fn attach_persistent_if_present(
+        connection: &Connection,
+        persistent_path: Option<&Path>,
+        primary_db_name: &str,
+    ) -> Result<bool, McpError> {
+        let Some(path) = persistent_path else {
+            return Ok(false);
+        };
+        let outcome = attach_default_persistent(connection, path, primary_db_name)?;
+        Ok(outcome.file_was_created)
     }
 
     /// Attempt to connect via the shared daemon. Returns `None` if the daemon
     /// cannot be reached (falls back to local mode).
     fn try_daemon_mode(
-        path: &Path,
+        ephemeral_path: &Path,
+        persistent_path: Option<PathBuf>,
         log_dir: &Path,
-        is_persistent: bool,
     ) -> Result<Option<Self>, McpError> {
         let port = daemon::discovery::resolve_port();
         let info = match daemon::spawn::ensure_daemon(port) {
@@ -187,10 +338,12 @@ impl Engine {
         };
 
         let endpoint = &info.hyperd_endpoint;
+        // CreateAndReplace: same rationale as the local path — a per-pid
+        // temp file from a crashed prior session shouldn't leak in.
         let connection = Connection::connect(
             endpoint,
-            &path.to_string_lossy(),
-            CreateMode::CreateIfNotExists,
+            &ephemeral_path.to_string_lossy(),
+            CreateMode::CreateAndReplace,
         )
         .map_err(|e| {
             // The daemon's discovery file points at this endpoint but we can't
@@ -208,13 +361,21 @@ impl Engine {
         // Send heartbeat so daemon knows we're active
         let _ = daemon::health::send_command(info.health_port, "HEARTBEAT");
 
+        let primary_db_name = path_stem(ephemeral_path);
+        let persistent_was_created = Self::attach_persistent_if_present(
+            &connection,
+            persistent_path.as_deref(),
+            &primary_db_name,
+        )?;
+
         Ok(Some(Self {
             hyper: None,
             daemon_endpoint: Some(info.hyperd_endpoint),
             connection,
-            workspace_path: path.to_path_buf(),
+            ephemeral_path: ephemeral_path.to_path_buf(),
+            persistent_path,
+            persistent_was_created,
             log_dir: log_dir.to_path_buf(),
-            is_persistent,
         }))
     }
 
@@ -253,16 +414,27 @@ impl Engine {
             .map_err(|e| McpError::new(ErrorCode::InternalError, e.to_string()))
     }
 
-    /// Absolute path to the `.hyper` workspace file on disk.
-    pub fn workspace_path(&self) -> &Path {
-        &self.workspace_path
+    /// Absolute path to the ephemeral primary `.hyper` file on disk.
+    pub fn ephemeral_path(&self) -> &Path {
+        &self.ephemeral_path
     }
 
-    /// Unqualified database name Hyper uses for the primary workspace —
-    /// the stem of [`Self::workspace_path`]. Matches what
-    /// [`hyperdb_api::Connection::new`] registers when it issues its implicit
-    /// `ATTACH DATABASE`, so fully-qualified SQL built with this value
-    /// resolves to the primary workspace.
+    /// Absolute path to the persistent `.hyper` file, or `None` when the
+    /// session is `--ephemeral-only`.
+    pub fn persistent_path(&self) -> Option<&Path> {
+        self.persistent_path.as_deref()
+    }
+
+    /// Reserved alias under which the persistent database is attached
+    /// when [`Self::persistent_path`] is set. Visible to the LLM via the
+    /// `database` parameter and via `list_attached_databases`.
+    pub const PERSISTENT_ALIAS: &'static str = "persistent";
+
+    /// Unqualified database name Hyper uses for the ephemeral primary —
+    /// the stem of [`Self::ephemeral_path`]. Matches what
+    /// [`hyperdb_api::Connection::new`] registers when it issues its
+    /// implicit `ATTACH DATABASE`, so fully-qualified SQL built with this
+    /// value resolves to the primary.
     ///
     /// Also the correct value for `SET schema_search_path = '…'` while
     /// additional databases are attached: Hyper's default search path
@@ -270,11 +442,44 @@ impl Engine {
     /// databases are attached, and starts resolving unqualified names to
     /// nothing the moment an `ATTACH DATABASE` runs.
     pub fn primary_db_name(&self) -> String {
-        self.workspace_path
+        self.ephemeral_path
             .file_stem()
             .and_then(|s| s.to_str())
-            .unwrap_or("workspace")
+            .unwrap_or("scratch")
             .to_string()
+    }
+
+    /// Resolve a tool's optional `database` parameter to a concrete
+    /// alias suitable for fully-qualifying SQL. `None` and `Some("")`
+    /// mean "the primary (ephemeral)"; `Some("persistent")` requires the
+    /// persistent attachment exists; any other value is returned
+    /// verbatim and assumed to be a user-attached alias.
+    ///
+    /// Returns the database alias to qualify against, or `None` to mean
+    /// "use the primary's name". This lets callers build qualified SQL
+    /// uniformly: `format!("\"{}\".\"public\".\"{}\"", alias_or_primary, table)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorCode::InvalidArgument`] when `Some("persistent")`
+    /// is passed but [`Self::persistent_path`] is `None`
+    /// (`--ephemeral-only` mode).
+    pub fn resolve_target_db(&self, requested: Option<&str>) -> Result<String, McpError> {
+        match requested.map(str::trim) {
+            None | Some("") => Ok(self.primary_db_name()),
+            Some(Self::PERSISTENT_ALIAS) => {
+                if self.persistent_path.is_none() {
+                    return Err(McpError::new(
+                        ErrorCode::InvalidArgument,
+                        "no persistent database in this session — \
+                         hyperdb-mcp was started with --ephemeral-only"
+                            .to_string(),
+                    ));
+                }
+                Ok(Self::PERSISTENT_ALIAS.to_string())
+            }
+            Some(other) => Ok(other.to_string()),
+        }
     }
 
     /// Directory where `hyperd` writes its log files. The MCP binary should
@@ -313,10 +518,19 @@ impl Engine {
         candidates.into_iter().next().map(|(_, p)| p)
     }
 
-    /// `true` if the workspace was created from a user-supplied path
-    /// (data survives across sessions).
-    pub fn is_persistent(&self) -> bool {
-        self.is_persistent
+    /// `true` if a persistent database is attached to this session.
+    /// Equivalent to [`Self::persistent_path`] being `Some`.
+    pub fn has_persistent(&self) -> bool {
+        self.persistent_path.is_some()
+    }
+
+    /// `true` when this engine just created the persistent `.hyper` file
+    /// during construction. The server consumes this signal once to
+    /// decide whether to seed `_table_catalog`; subsequent reads stay
+    /// `true` (the flag isn't reset — it's a fact about the engine's
+    /// startup, not a one-shot signal).
+    pub fn persistent_was_just_created(&self) -> bool {
+        self.persistent_was_created
     }
 
     /// Direct access to the underlying connection for operations not
@@ -829,7 +1043,15 @@ impl Engine {
             .map(|name| catalog.get_row_count(name.as_str()).unwrap_or(0))
             .sum();
 
-        let disk_bytes = std::fs::metadata(&self.workspace_path).map_or(0, |m| m.len());
+        // Disk size of the ephemeral primary. The persistent file is
+        // reported separately when present.
+        let ephemeral_bytes = std::fs::metadata(&self.ephemeral_path).map_or(0, |m| m.len());
+        let persistent_bytes = self
+            .persistent_path
+            .as_ref()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .map_or(0u64, |m| m.len());
+        let disk_bytes = ephemeral_bytes.saturating_add(persistent_bytes);
 
         let hyperd_log = self.hyperd_log_path().map_or(Value::Null, |p| {
             Value::String(p.to_string_lossy().into_owned())
@@ -841,10 +1063,15 @@ impl Engine {
             Value::Null
         };
 
+        let persistent_path_value = self.persistent_path.as_ref().map_or(Value::Null, |p| {
+            Value::String(p.to_string_lossy().into_owned())
+        });
+
         Ok(json!({
             "hyperd_running": self.is_running(),
-            "workspace_path": self.workspace_path.to_string_lossy(),
-            "workspace_mode": if self.is_persistent { "persistent" } else { "ephemeral" },
+            "ephemeral_path": self.ephemeral_path.to_string_lossy(),
+            "persistent_path": persistent_path_value,
+            "has_persistent": self.has_persistent(),
             "table_count": table_count,
             "total_rows": total_rows,
             "disk_usage_bytes": disk_bytes,
@@ -1005,14 +1232,16 @@ pub fn is_internal_table(name: &str) -> bool {
 /// tracing log. Shared by [`Engine::new`] and `main` so both land in the
 /// same place.
 ///
-/// - Persistent mode: same directory as the workspace file (with `~`
-///   expansion applied). This way a project workspace like
+/// - When a persistent path is supplied: same directory as that file
+///   (with `~` expansion applied). A project DB like
 ///   `~/projects/foo.hyper` gets logs in `~/projects/`.
-/// - Ephemeral mode: same temp directory the Engine creates for the
-///   workspace (`$TMPDIR/hyperdb-mcp-<pid>/`).
+/// - When no persistent path is supplied (ephemeral-only sessions):
+///   `$TMPDIR/hyperdb-mcp-<pid>/`. Multiple engines in the same PID
+///   share this log dir, which is fine — `tracing` is process-wide and
+///   the `.hyper` files themselves live in distinct per-engine subdirs.
 #[must_use]
-pub fn resolve_log_dir(workspace_path: Option<&str>) -> PathBuf {
-    match workspace_path {
+pub fn resolve_log_dir(persistent_db_path: Option<&str>) -> PathBuf {
+    match persistent_db_path {
         Some(p) => {
             let expanded = PathBuf::from(shellexpand_tilde(p));
             expanded
@@ -1148,16 +1377,24 @@ fn strip_leading_sql_comments(sql: &str) -> &str {
 
 impl Drop for Engine {
     fn drop(&mut self) {
-        // In daemon mode with ephemeral databases, DETACH the workspace from hyperd
-        // (releases the file handle — critical on Windows) then delete the temp file.
-        if !self.is_persistent && self.daemon_endpoint.is_some() {
+        // The ephemeral primary is always cleaned up. In daemon mode the
+        // shared hyperd holds the file handle even after this engine is
+        // dropped, so we DETACH first (Windows enforces file locks; this
+        // is a no-op on Unix but keeps behavior identical across platforms).
+        // The persistent attachment is left in place — its lifetime
+        // outlives the engine.
+        if self.daemon_endpoint.is_some() {
             let db_name = self.primary_db_name();
             let detach = format!("DETACH DATABASE \"{db_name}\"");
             let _ = self.connection.execute_command(&detach);
-            // Remove the temp directory containing the ephemeral .hyper file
-            if let Some(parent) = self.workspace_path.parent() {
-                let _ = std::fs::remove_dir_all(parent);
-            }
+        }
+        // Remove the per-pid temp directory holding the ephemeral file.
+        // Safe in both daemon and local modes: in local mode the
+        // HyperProcess Drop tears down hyperd before this fires (Drop
+        // runs in field-declaration order), so the file is no longer
+        // open by the time we delete it.
+        if let Some(parent) = self.ephemeral_path.parent() {
+            let _ = std::fs::remove_dir_all(parent);
         }
     }
 }

@@ -336,7 +336,10 @@ pub fn start_watching(
             )
         })?;
         let endpoint = eng.hyperd_endpoint()?;
-        let workspace = eng.workspace_path().to_string_lossy().to_string();
+        // Watcher pool connects to the engine's primary (ephemeral). The
+        // user-supplied table on `watch_directory` always lives there
+        // unless a future flag routes it to the persistent attachment.
+        let workspace = eng.ephemeral_path().to_string_lossy().to_string();
         let cfg = PoolConfig::new(endpoint, workspace)
             .create_mode(CreateMode::DoNotCreate)
             .max_size(concurrency);

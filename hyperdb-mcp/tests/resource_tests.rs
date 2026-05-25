@@ -7,8 +7,9 @@
 use hyperdb_mcp::server::HyperMcpServer;
 use tempfile::TempDir;
 
-/// Build a server with a fresh temp workspace, populate it with a test table,
-/// and return both the server and the temp dir (held for lifetime).
+/// Build a server with a fresh temp workspace, populate the engine's
+/// ephemeral primary with a test table, and return both the server and
+/// the temp dir.
 ///
 /// The server is constructed in `--bare` mode so the MCP-managed
 /// `_table_catalog` doesn't appear alongside `widgets` and perturb the
@@ -17,14 +18,24 @@ use tempfile::TempDir;
 ///
 /// Uses `no_daemon` mode to avoid interference from any daemon running
 /// in parallel (e.g. from daemon_tests in the same `cargo test` run).
+///
+/// To seed the table inside the server's own engine (so the data is
+/// visible to resource handlers), we read `hyper://workspace` first to
+/// trigger lazy engine init, then reach into the engine handle to run
+/// the seeding DDL/DML directly.
 fn server_with_test_table() -> (HyperMcpServer, TempDir) {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("workspace.hyper");
     let server =
         HyperMcpServer::with_no_daemon(Some(path.to_str().unwrap().into()), false, true, true);
+    // Trigger lazy engine init.
+    let _ = server.resource_body_for_uri("hyper://workspace");
+    // Seed the test table in the server's ephemeral primary so the
+    // resource handlers see it through `describe_tables` etc.
     {
-        use hyperdb_mcp::engine::Engine;
-        let engine = Engine::new_no_daemon(Some(path.to_str().unwrap().into())).unwrap();
+        let handle = server.engine_handle();
+        let guard = handle.lock().expect("engine mutex");
+        let engine = guard.as_ref().expect("engine initialized");
         engine
             .execute_command("CREATE TABLE widgets (id INT NOT NULL, name TEXT)")
             .unwrap();
@@ -64,7 +75,13 @@ fn read_workspace_resource_returns_status() {
     assert_eq!(body.mime_type(), "application/json");
     let json = body.as_json().expect("workspace is JSON");
     assert_eq!(json["hyperd_running"], true);
-    assert!(json["workspace_path"].is_string());
+    assert!(json["ephemeral_path"].is_string());
+    // `persistent_path` is either a string (when persistent attached) or
+    // null (--ephemeral-only). The test fixture supplies a path so we
+    // expect the string form; the orthogonal `has_persistent` flag mirrors
+    // the same fact and is checked first.
+    assert_eq!(json["has_persistent"], true);
+    assert!(json["persistent_path"].is_string());
     assert_eq!(json["table_count"], 1);
     let version = json["hyper_rust_api_version"]
         .as_str()

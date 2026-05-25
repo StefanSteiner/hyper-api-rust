@@ -230,7 +230,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Step 1: spin up engine ─────────────────────────────────────────
     section("Step 1 · Launch the engine (ephemeral workspace)");
     let engine = Engine::new(None)?;
-    println!("   Workspace: {}", engine.workspace_path().display());
+    println!("   Ephemeral DB: {}", engine.ephemeral_path().display());
     println!("   Log dir:   {}", engine.log_dir().display());
     println!("   hyperd is running: {}", engine.is_running());
 

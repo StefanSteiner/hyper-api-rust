@@ -40,14 +40,20 @@ fn primary_workspace() -> (Engine, TempDir) {
 fn build_source_hyper_file(dir: &TempDir, name: &str, rows: &[(i32, &str)]) -> std::path::PathBuf {
     let path = dir.path().join(name);
     {
+        // Spin up a throwaway engine with this path as the persistent
+        // attachment, write data into it via fully-qualified SQL, then
+        // drop the engine. The `.hyper` file at `path` survives with the
+        // populated table; the engine's ephemeral primary is cleaned up.
         let engine = Engine::new_no_daemon(Some(path.to_string_lossy().into())).unwrap();
         engine
-            .execute_command("CREATE TABLE t (a INT, b TEXT)")
+            .execute_command("CREATE TABLE \"persistent\".\"public\".\"t\" (a INT, b TEXT)")
             .unwrap();
         for (a, b) in rows {
             let escaped = b.replace('\'', "''");
             engine
-                .execute_command(&format!("INSERT INTO t VALUES ({a}, '{escaped}')"))
+                .execute_command(&format!(
+                    "INSERT INTO \"persistent\".\"public\".\"t\" VALUES ({a}, '{escaped}')"
+                ))
                 .unwrap();
         }
     }
@@ -529,12 +535,7 @@ fn copy_create_from_attached_source() {
     // an unqualified `CREATE TABLE imported` would fail with
     // "create statement could not resolve the schema (3F000)". These
     // direct SQL statements mirror what `perform_copy` emits.
-    let primary_db = engine
-        .workspace_path()
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap()
-        .to_string();
+    let primary_db = engine.primary_db_name();
     let target = format!("\"{primary_db}\".\"public\".\"imported\"");
 
     // "create" mode — target does not exist yet.
@@ -634,12 +635,7 @@ fn copy_create_stubs_table_catalog_on_primary_workspace() {
     // Seed a source table that lives inside the primary workspace —
     // no attachment needed for this regression. Matches the shape a
     // `copy_query` call would produce.
-    let primary_alias = engine
-        .workspace_path()
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap()
-        .to_string();
+    let primary_alias = engine.primary_db_name();
     let qualified_target = format!("\"{primary_alias}\".\"public\".\"derived\"");
     engine
         .execute_command(&format!(
@@ -802,7 +798,10 @@ fn detach_resets_schema_search_path_and_preserves_primary_access() {
     assert!(registry.detach(&engine, "src").unwrap());
     assert!(registry.list().is_empty());
 
-    // Post-detach: the RESET landed, `"$single"` is back.
+    // Post-detach: with the default persistent attachment in place,
+    // search_path stays pinned to the primary's name (we cannot RESET to
+    // `"$single"` because the persistent DB is still attached). Without
+    // the pin, unqualified resolution would break.
     let rows = engine
         .execute_query_to_json("SHOW schema_search_path")
         .unwrap();
@@ -811,8 +810,9 @@ fn detach_resets_schema_search_path_and_preserves_primary_access() {
         .and_then(|v| v.as_str())
         .unwrap_or("");
     assert_eq!(
-        setting, "\"$single\"",
-        "last detach should restore Hyper's default; got {setting:?}"
+        setting,
+        engine.primary_db_name(),
+        "last detach should pin to primary while persistent stays attached; got {setting:?}"
     );
 
     // Unqualified SELECT still works — the real user contract.
@@ -871,12 +871,15 @@ fn replay_restores_schema_search_path_pin() {
     let dir = TempDir::new().unwrap();
     let primary_path = dir.path().join("primary.hyper");
     {
+        // Seed the persistent file directly via fully-qualified SQL.
         let engine = Engine::new_no_daemon(Some(primary_path.to_string_lossy().into())).unwrap();
         engine
-            .execute_command("CREATE TABLE primary_t (x INT)")
+            .execute_command("CREATE TABLE \"persistent\".\"public\".\"primary_t\" (x INT)")
             .unwrap();
         engine
-            .execute_command("INSERT INTO primary_t VALUES (1), (2), (3)")
+            .execute_command(
+                "INSERT INTO \"persistent\".\"public\".\"primary_t\" VALUES (1), (2), (3)",
+            )
             .unwrap();
     }
     let source = build_source_hyper_file(&dir, "source.hyper", &[(1, "a")]);
@@ -902,8 +905,11 @@ fn replay_restores_schema_search_path_pin() {
     let engine_b = Engine::new_no_daemon(Some(primary_path.to_string_lossy().into())).unwrap();
     registry.replay_all(&engine_b).unwrap();
 
-    // Unqualified access to the primary must work after replay.
-    assert_eq!(row_count(&engine_b, "primary_t"), 3);
+    // Qualified access to the seeded persistent table.
+    assert_eq!(
+        row_count(&engine_b, "\"persistent\".\"public\".\"primary_t\""),
+        3
+    );
     // Qualified access to the replayed attachment must also work.
     assert_eq!(row_count(&engine_b, "\"src\".public.t"), 1);
 }

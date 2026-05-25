@@ -521,7 +521,7 @@ async fn load_files_runs_parallel_parquet_ingests() {
     // Build a pool against the running hyperd — same recipe the MCP's
     // `load_files` tool uses.
     let endpoint = te.engine.hyperd_endpoint().unwrap();
-    let workspace = te.engine.workspace_path().to_string_lossy().to_string();
+    let workspace = te.engine.ephemeral_path().to_string_lossy().to_string();
     let pool = Arc::new(
         create_pool(
             PoolConfig::new(endpoint, workspace)
