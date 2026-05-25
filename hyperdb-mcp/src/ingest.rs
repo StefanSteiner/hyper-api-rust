@@ -130,6 +130,24 @@ pub struct IngestOptions {
     /// in merge mode; rejected in any other mode (the per-call site validates
     /// up-front so the lower ingest paths can stay format-agnostic).
     pub merge_key: Option<Vec<String>>,
+    /// Resolved database alias for fully-qualified SQL. `None` means the
+    /// primary (ephemeral); `Some("persistent")` or `Some("user_alias")`
+    /// qualifies table references as `"<db>"."public"."<table>"`.
+    /// Must be pre-resolved via `Engine::resolve_target_db` before setting.
+    pub target_db: Option<String>,
+}
+
+/// Build a SQL table identifier from `IngestOptions`. When `target_db` is
+/// set, returns `"db"."public"."table"`; otherwise `"table"` (unqualified).
+pub fn qualified_table(opts: &IngestOptions) -> String {
+    match &opts.target_db {
+        Some(db) => {
+            let esc_db = db.replace('"', "\"\"");
+            let esc_tbl = opts.table.replace('"', "\"\"");
+            format!("\"{esc_db}\".\"public\".\"{esc_tbl}\"")
+        }
+        None => format!("\"{}\"", opts.table.replace('"', "\"\"")),
+    }
 }
 
 /// Returned by every ingest function with the row count, resolved schema,
@@ -338,6 +356,7 @@ where
         mode: "replace".into(),
         schema_override: opts.schema_override.clone(),
         merge_key: None,
+        target_db: None,
     };
     let tmp_result = replace_load(&tmp_opts)?;
 
@@ -588,8 +607,9 @@ pub fn ingest_json(
     // All mutations run inside a transaction so a partial failure leaves
     // zero side effects.
     let is_replace = opts.mode != "append";
+    let qualified = qualified_table(opts);
     let row_count = engine.execute_in_transaction(|engine| {
-        engine.create_table(&opts.table, &columns, is_replace)?;
+        engine.create_table_in(&opts.table, &columns, is_replace, opts.target_db.as_deref())?;
         let mut row_count = 0u64;
         let col_names: Vec<String> = columns.iter().map(|c| format!("\"{}\"", c.name)).collect();
         for obj in &array {
@@ -605,8 +625,8 @@ pub fn ingest_json(
                 .collect();
 
             let sql = format!(
-                "INSERT INTO \"{}\" ({}) VALUES ({})",
-                opts.table,
+                "INSERT INTO {} ({}) VALUES ({})",
+                qualified,
                 col_names.join(", "),
                 values.join(", ")
             );
@@ -715,9 +735,10 @@ pub fn ingest_csv(
     // breaking downstream `WHERE col IS NULL` and failing outright on
     // numeric columns.
     let canonical_temp = canonicalize_for_copy(&temp_path);
+    let qualified = qualified_table(opts);
     let copy_sql = format!(
-        "COPY \"{}\" FROM {} WITH (FORMAT csv, NULL '', DELIMITER ',', HEADER)",
-        opts.table,
+        "COPY {} FROM {} WITH (FORMAT csv, NULL '', DELIMITER ',', HEADER)",
+        qualified,
         hyperdb_api::escape_string_literal(canonical_temp.to_str().unwrap_or(""))
     );
 
@@ -725,7 +746,7 @@ pub fn ingest_csv(
     // unwinds the table creation.
     let is_replace = opts.mode != "append";
     let row_count = engine.execute_in_transaction(|engine| {
-        engine.create_table(&opts.table, &columns, is_replace)?;
+        engine.create_table_in(&opts.table, &columns, is_replace, opts.target_db.as_deref())?;
         engine.execute_command(&copy_sql)
     });
 
@@ -808,17 +829,18 @@ pub fn ingest_csv_file(
 
     // COPY FROM the file directly, inside a transaction with CREATE TABLE.
     let canonical = canonicalize_for_copy(abs_path);
+    let qualified = qualified_table(opts);
     // See `ingest_csv` above for the NULL-handling rationale: `NULL ''`
     // makes unquoted empty cells load as SQL NULL.
     let copy_sql = format!(
-        "COPY \"{}\" FROM {} WITH (FORMAT csv, NULL '', DELIMITER ',', HEADER)",
-        opts.table,
+        "COPY {} FROM {} WITH (FORMAT csv, NULL '', DELIMITER ',', HEADER)",
+        qualified,
         hyperdb_api::escape_string_literal(canonical.to_str().unwrap_or(""))
     );
 
     let is_replace = opts.mode != "append";
     let row_count = engine.execute_in_transaction(|engine| {
-        engine.create_table(&opts.table, &columns, is_replace)?;
+        engine.create_table_in(&opts.table, &columns, is_replace, opts.target_db.as_deref())?;
         engine.execute_command(&copy_sql)
     })?;
 
@@ -896,10 +918,11 @@ pub async fn ingest_csv_file_async(
     let schema_ms = schema_timer.elapsed_ms();
 
     let canonical = canonicalize_for_copy(abs_path);
+    let qualified = qualified_table(opts);
     // `NULL ''` — unquoted empty cells load as SQL NULL (see sync twin).
     let copy_sql = format!(
-        "COPY \"{}\" FROM {} WITH (FORMAT csv, NULL '', DELIMITER ',', HEADER)",
-        opts.table,
+        "COPY {} FROM {} WITH (FORMAT csv, NULL '', DELIMITER ',', HEADER)",
+        qualified,
         hyperdb_api::escape_string_literal(canonical.to_str().unwrap_or(""))
     );
 
@@ -907,7 +930,14 @@ pub async fn ingest_csv_file_async(
 
     conn.begin_transaction().await.map_err(McpError::from)?;
     let inner: Result<u64, McpError> = async {
-        create_table_async(conn, &opts.table, &columns, is_replace).await?;
+        create_table_async(
+            conn,
+            &opts.table,
+            &columns,
+            is_replace,
+            opts.target_db.as_deref(),
+        )
+        .await?;
         conn.execute_command(&copy_sql)
             .await
             .map_err(McpError::from)
@@ -1046,10 +1076,18 @@ pub async fn ingest_json_async(
     }
 
     let is_replace = opts.mode != "append";
+    let qualified = qualified_table(opts);
 
     conn.begin_transaction().await.map_err(McpError::from)?;
     let inner: Result<u64, McpError> = async {
-        create_table_async(conn, &opts.table, &columns, is_replace).await?;
+        create_table_async(
+            conn,
+            &opts.table,
+            &columns,
+            is_replace,
+            opts.target_db.as_deref(),
+        )
+        .await?;
         let mut row_count = 0u64;
         let col_names: Vec<String> = columns.iter().map(|c| format!("\"{}\"", c.name)).collect();
         for obj in &array {
@@ -1065,8 +1103,8 @@ pub async fn ingest_json_async(
                 .collect();
 
             let sql = format!(
-                "INSERT INTO \"{}\" ({}) VALUES ({})",
-                opts.table,
+                "INSERT INTO {} ({}) VALUES ({})",
+                qualified,
                 col_names.join(", "),
                 values.join(", ")
             );
@@ -1165,6 +1203,7 @@ pub(crate) async fn create_table_async(
     table_name: &str,
     columns: &[ColumnSchema],
     replace: bool,
+    target_db: Option<&str>,
 ) -> Result<(), McpError> {
     if columns.is_empty() {
         return Err(McpError::new(
@@ -1184,7 +1223,14 @@ pub(crate) async fn create_table_async(
         }
     }
 
-    let quoted_table = format!("\"{}\"", table_name.replace('"', "\"\""));
+    let quoted_table = match target_db {
+        Some(db) => {
+            let esc_db = db.replace('"', "\"\"");
+            let esc_tbl = table_name.replace('"', "\"\"");
+            format!("\"{esc_db}\".\"public\".\"{esc_tbl}\"")
+        }
+        None => format!("\"{}\"", table_name.replace('"', "\"\"")),
+    };
     if replace {
         conn.execute_command(&format!("DROP TABLE IF EXISTS {quoted_table}"))
             .await

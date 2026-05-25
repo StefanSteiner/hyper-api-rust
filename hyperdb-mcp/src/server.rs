@@ -153,6 +153,15 @@ pub struct LoadDataParams {
     /// Partial schema override keyed by column name: `{"col": "BIGINT", ...}`.
     /// See the docs on `QueryDataParams` for the full spec.
     pub schema: Option<Value>,
+    /// Target database alias. Omit (or pass `"local"`) to write to the
+    /// ephemeral primary. Pass `"persistent"` to write to the durable
+    /// database that survives across sessions. Other values target a
+    /// user-attached database (must be writable).
+    pub database: Option<String>,
+    /// Shorthand for `database: "persistent"`. When true, data is written
+    /// to the persistent database. If both `database` and `persist` are
+    /// set, `database` wins.
+    pub persist: Option<bool>,
 }
 
 /// Parameters for the `load_file` workspace tool.
@@ -185,6 +194,15 @@ pub struct LoadFileParams {
     /// (`["cell", "job_id"]`). Required for merge; rejected with a clear
     /// error if set for `replace` or `append`.
     pub merge_key: Option<MergeKey>,
+    /// Target database alias. Omit (or pass `"local"`) to write to the
+    /// ephemeral primary. Pass `"persistent"` to write to the durable
+    /// database. Other values target a user-attached writable database.
+    /// Note: `mode: "merge"` with a non-primary database is not yet
+    /// supported and will return an error.
+    pub database: Option<String>,
+    /// Shorthand for `database: "persistent"`. If both `database` and
+    /// `persist` are set, `database` wins.
+    pub persist: Option<bool>,
 }
 
 /// One or many column names. Accepts either a JSON string `"col"` or
@@ -290,6 +308,14 @@ pub struct LoadFilesParams {
     /// hyperd's side; more connections don't help past a certain point
     /// and can starve the primary connection.
     pub concurrency: Option<u32>,
+    /// Target database alias. **Currently only the primary (ephemeral)
+    /// database is supported for parallel ingest.** Passing `"persistent"`
+    /// or another alias returns an error — use `load_file` with
+    /// `persist: true` instead for single-file persistent ingest.
+    pub database: Option<String>,
+    /// Shorthand for `database: "persistent"`. Same limitation as
+    /// `database` applies — not yet supported for parallel ingest.
+    pub persist: Option<bool>,
 }
 
 /// Validate the (`mode`, `merge_key`) combination at the tool boundary.
@@ -350,6 +376,10 @@ pub struct LoadIcebergParams {
 pub struct QueryParams {
     /// SQL SELECT / WITH / EXPLAIN / SHOW / VALUES statement (read-only)
     pub sql: String,
+    /// Target database alias for unqualified name resolution. Omit to
+    /// query the ephemeral primary. Pass `"persistent"` to route to the
+    /// durable database, or any user-attached alias.
+    pub database: Option<String>,
 }
 
 /// Parameters for the mutating `execute` workspace tool.
@@ -357,6 +387,10 @@ pub struct QueryParams {
 pub struct ExecuteParams {
     /// DDL/DML SQL statement (CREATE, INSERT, UPDATE, DELETE, DROP, ALTER, COPY, etc.)
     pub sql: String,
+    /// Target database alias for unqualified name resolution. Omit to
+    /// run against the ephemeral primary. Pass `"persistent"` to write
+    /// to the durable database (or a writable user-attached alias).
+    pub database: Option<String>,
 }
 
 /// Parameters for the `sample` convenience tool.
@@ -366,6 +400,9 @@ pub struct SampleParams {
     pub table: String,
     /// Number of rows to return (default: 5, max: 100)
     pub n: Option<u64>,
+    /// Target database alias. Omit to sample from the ephemeral primary;
+    /// pass `"persistent"` or a user-attached alias to sample from there.
+    pub database: Option<String>,
 }
 
 /// Parameters for the `describe` tool. Both fields are optional to preserve
@@ -376,6 +413,10 @@ pub struct DescribeParams {
     /// If set, return the schema and row count for just this table. Omit to
     /// list every public table in the workspace.
     pub table: Option<String>,
+    /// Target database alias. Omit to describe tables in the ephemeral
+    /// primary; pass `"persistent"` or a user-attached alias to describe
+    /// tables in another database.
+    pub database: Option<String>,
 }
 
 /// Parameters for the `chart` tool.
@@ -441,6 +482,10 @@ pub struct ChartParams {
     /// and return `PERMISSION_DENIED` without touching it. Defaults to
     /// true (overwrite silently), matching the `export` tool.
     pub overwrite: Option<bool>,
+    /// Target database alias for unqualified name resolution in the
+    /// chart's SQL. Omit to query the ephemeral primary. Pass
+    /// `"persistent"` or a user-attached alias to chart from there.
+    pub database: Option<String>,
 }
 
 /// Parameters for the `watch_directory` tool.
@@ -454,6 +499,15 @@ pub struct WatchDirectoryParams {
     /// Each in-flight ingest holds one connection to hyperd plus a transaction.
     #[serde(default)]
     pub max_concurrent: Option<u32>,
+    /// Target database alias. **Currently only the primary (ephemeral)
+    /// database is supported by the watcher** — the connection pool is
+    /// bound to the primary file. Passing `"persistent"` returns an
+    /// error. Use `load_file` with `persist: true` for one-off persistent
+    /// ingests.
+    pub database: Option<String>,
+    /// Shorthand for `database: "persistent"`. Same limitation applies —
+    /// not yet supported by the watcher.
+    pub persist: Option<bool>,
 }
 
 /// Parameters for the `unwatch_directory` tool.
@@ -523,6 +577,12 @@ pub struct ExportParams {
     ///
     /// Ignored for `format = "hyper"` (which isn't a `COPY`).
     pub format_options: Option<Value>,
+    /// Source database alias. Omit to read from the ephemeral primary.
+    /// Pass `"persistent"` or a user-attached alias to export from there.
+    /// In `table` mode, the table name is fully qualified against this
+    /// database. In `sql` mode, unqualified names in the SQL resolve
+    /// against this database for the duration of the call.
+    pub database: Option<String>,
 }
 
 /// Parameters for the `save_query` tool.
@@ -911,6 +971,63 @@ impl HyperMcpServer {
         }
     }
 
+    /// Resolve the effective database alias from a tool's `database` and
+    /// `persist` parameters. Returns `None` when the target is the primary
+    /// (ephemeral) — callers should leave SQL unqualified. Returns
+    /// `Some(alias)` when targeting a non-primary database.
+    ///
+    /// When `require_writable` is true, verifies the target alias is
+    /// either the primary, `"persistent"` (always writable), or a
+    /// user-attached database with `writable: true`.
+    fn resolve_db(
+        &self,
+        engine: &Engine,
+        database: Option<&str>,
+        persist: Option<bool>,
+        require_writable: bool,
+    ) -> Result<Option<String>, McpError> {
+        let effective = match (database, persist) {
+            (Some(db), _) => Some(db),
+            (None, Some(true)) => Some(Engine::PERSISTENT_ALIAS),
+            _ => None,
+        };
+        // Filter LOCAL_ALIAS ("local") — treat as primary
+        let effective = effective.filter(|s| !s.eq_ignore_ascii_case(crate::attach::LOCAL_ALIAS));
+
+        let resolved = engine.resolve_target_db(effective)?;
+        let primary = engine.primary_db_name();
+
+        if resolved == primary {
+            return Ok(None);
+        }
+
+        if require_writable && resolved != Engine::PERSISTENT_ALIAS {
+            match self.attachments.get(&resolved) {
+                None => {
+                    return Err(McpError::new(
+                        ErrorCode::InvalidArgument,
+                        format!(
+                            "database '{resolved}' is not attached. \
+                             Call attach_database first, or use \"persistent\"."
+                        ),
+                    ));
+                }
+                Some(entry) if !entry.writable => {
+                    return Err(McpError::new(
+                        ErrorCode::InvalidArgument,
+                        format!(
+                            "database '{resolved}' was attached read-only. \
+                             Re-attach with writable:true to write to it."
+                        ),
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        Ok(Some(resolved))
+    }
+
     /// Lazily start the Hyper engine on first use, returning a mutex guard
     /// that holds a reference to the initialized `Engine`.
     ///
@@ -1208,6 +1325,7 @@ impl HyperMcpServer {
                 mode: "replace".into(),
                 schema_override,
                 merge_key: None,
+                target_db: None,
             };
 
             let ingest_result = match fmt.as_str() {
@@ -1255,6 +1373,7 @@ impl HyperMcpServer {
                 mode: "replace".into(),
                 schema_override,
                 merge_key: None,
+                target_db: None,
             };
 
             let ingest_result = if let Some(ref json_path) = params.json_extract_path {
@@ -1317,6 +1436,8 @@ impl HyperMcpServer {
         // closure so we can pick the right notifications after success.
         let mode = params.mode.clone().unwrap_or_else(|| "replace".into());
         let result = self.with_engine(|engine| {
+            let target_db =
+                self.resolve_db(engine, params.database.as_deref(), params.persist, true)?;
             let fmt = params.format.unwrap_or_else(|| detect_format(&params.data));
             let schema_override = crate::schema::normalize_schema_param(params.schema.as_ref())?;
             let opts = IngestOptions {
@@ -1324,6 +1445,7 @@ impl HyperMcpServer {
                 mode: mode.clone(),
                 schema_override,
                 merge_key: None,
+                target_db: target_db.clone(),
             };
 
             let ingest_result = match fmt.as_str() {
@@ -1343,22 +1465,23 @@ impl HyperMcpServer {
                 })
                 .collect();
 
-            // Best-effort catalog bookkeeping. Runs inside `with_engine`
-            // so the ConnectionLost recovery path also covers it, but
-            // errors are swallowed inside — a bad catalog write must
-            // never fail a good load.
-            let load_params = serde_json::to_string(&json!({
-                "mode": mode,
-                "format": fmt,
-            }))
-            .ok();
-            self.after_ingest_catalog_update(
-                engine,
-                &params.table,
-                "load_data",
-                load_params.as_deref(),
-                i64::try_from(ingest_result.rows).ok(),
-            );
+            // Catalog bookkeeping: only for primary or persistent targets.
+            // User-attached databases are not tracked in the catalog.
+            if target_db.is_none() || target_db.as_deref() == Some(Engine::PERSISTENT_ALIAS) {
+                let load_params = serde_json::to_string(&json!({
+                    "mode": mode,
+                    "format": fmt,
+                    "database": target_db.as_deref().unwrap_or("local"),
+                }))
+                .ok();
+                self.after_ingest_catalog_update(
+                    engine,
+                    &params.table,
+                    "load_data",
+                    load_params.as_deref(),
+                    i64::try_from(ingest_result.rows).ok(),
+                );
+            }
 
             Ok(json!({
                 "rows": ingest_result.rows,
@@ -1407,6 +1530,18 @@ impl HyperMcpServer {
         // an `ALTER TABLE ADD COLUMN`. `replace` always changes shape;
         // `merge` only does conditionally; `append` never does.
         let result = self.with_engine(|engine| {
+            let target_db =
+                self.resolve_db(engine, params.database.as_deref(), params.persist, true)?;
+            // Merge mode + non-primary database is not yet supported
+            // (cross-database DML for temp tables is unverified).
+            if mode == "merge" && target_db.is_some() {
+                return Err(McpError::new(
+                    ErrorCode::InvalidArgument,
+                    "merge mode with a non-primary database is not yet supported. \
+                     Use replace or append mode, or omit the database parameter."
+                        .to_string(),
+                ));
+            }
             crate::attach::validate_input_path(&params.path, "data file")?;
             let schema_override = crate::schema::normalize_schema_param(params.schema.as_ref())?;
             let opts = IngestOptions {
@@ -1414,6 +1549,7 @@ impl HyperMcpServer {
                 mode: mode.clone(),
                 schema_override,
                 merge_key: merge_key_vec.clone(),
+                target_db: target_db.clone(),
             };
 
             let ingest_result = if let Some(ref json_path) = params.json_extract_path {
@@ -1458,24 +1594,25 @@ impl HyperMcpServer {
                 })
                 .collect();
 
-            // Capture enough load context for a future refresh (source
-            // path, mode, schema override, json_extract_path). See
-            // `load_data` for the matching pattern.
-            let load_params = serde_json::to_string(&json!({
-                "source_path": params.path,
-                "mode": mode,
-                "schema": params.schema,
-                "json_extract_path": params.json_extract_path,
-                "merge_key": merge_key_vec,
-            }))
-            .ok();
-            self.after_ingest_catalog_update(
-                engine,
-                &params.table,
-                "load_file",
-                load_params.as_deref(),
-                i64::try_from(ingest_result.rows).ok(),
-            );
+            // Catalog: only for primary or persistent targets.
+            if target_db.is_none() || target_db.as_deref() == Some(Engine::PERSISTENT_ALIAS) {
+                let load_params = serde_json::to_string(&json!({
+                    "source_path": params.path,
+                    "mode": mode,
+                    "schema": params.schema,
+                    "json_extract_path": params.json_extract_path,
+                    "merge_key": merge_key_vec,
+                    "database": target_db.as_deref().unwrap_or("local"),
+                }))
+                .ok();
+                self.after_ingest_catalog_update(
+                    engine,
+                    &params.table,
+                    "load_file",
+                    load_params.as_deref(),
+                    i64::try_from(ingest_result.rows).ok(),
+                );
+            }
 
             Ok((
                 json!({
@@ -1526,6 +1663,18 @@ impl HyperMcpServer {
             return Self::err_content(McpError::new(
                 ErrorCode::EmptyData,
                 "load_files: `files` must not be empty",
+            ));
+        }
+
+        // Parallel ingest uses a connection pool that only sees the ephemeral
+        // primary — non-primary targets are not yet supported.
+        if params.database.is_some() || params.persist == Some(true) {
+            return Self::err_content(McpError::new(
+                ErrorCode::InvalidArgument,
+                "load_files does not yet support the `database` or `persist` parameter \
+                 because parallel ingest uses a connection pool bound to the primary database. \
+                 Use `load_file` with `persist: true` for single-file persistent ingest."
+                    .to_string(),
             ));
         }
 
@@ -1641,6 +1790,7 @@ impl HyperMcpServer {
                             mode: mode.clone(),
                             schema_override,
                             merge_key: None,
+                            target_db: None,
                         };
 
                         // Check out a connection from the pool. Held only
@@ -1923,6 +2073,13 @@ impl HyperMcpServer {
                     "The query tool only accepts read-only SQL (SELECT, WITH, EXPLAIN, SHOW, VALUES). Use the execute tool for DDL/DML.",
                 ));
             }
+            // Optional database routing — temporarily redirect search_path
+            // for the duration of this call. Restored on guard drop.
+            let target_db = self.resolve_db(engine, params.database.as_deref(), None, false)?;
+            let _search_guard = match target_db {
+                Some(ref alias) => Some(engine.scoped_search_path(alias)?),
+                None => None,
+            };
             // Cap result-set size sent back to the LLM. Larger result sets blow
             // the model's context window and stall the conversation. Users who
             // need full scans should use `export` to write to a file.
@@ -1998,6 +2155,13 @@ impl HyperMcpServer {
                     "The execute tool is for DDL/DML. Use the query tool for SELECT/WITH/EXPLAIN statements.",
                 ));
             }
+            // Optional database routing — temporarily redirect search_path.
+            // require_writable=true ensures non-primary aliases must be writable.
+            let target_db = self.resolve_db(engine, params.database.as_deref(), None, true)?;
+            let _search_guard = match target_db {
+                Some(ref alias) => Some(engine.scoped_search_path(alias)?),
+                None => None,
+            };
             let timer = crate::stats::StatsTimer::start();
             let affected = engine.execute_command(&params.sql)?;
             let elapsed = timer.elapsed_ms();
@@ -2038,9 +2202,10 @@ impl HyperMcpServer {
         Parameters(params): Parameters<SampleParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let result = self.with_engine(|engine| {
+            let target_db = self.resolve_db(engine, params.database.as_deref(), None, false)?;
             let timer = crate::stats::StatsTimer::start();
             let n = params.n.unwrap_or(5);
-            let mut sample = engine.sample_table(&params.table, n)?;
+            let mut sample = engine.sample_table_in(target_db.as_deref(), &params.table, n)?;
             let elapsed = timer.elapsed_ms();
             if let Some(obj) = sample.as_object_mut() {
                 obj.insert(
@@ -2084,6 +2249,14 @@ impl HyperMcpServer {
                 params.format.as_deref(),
                 params.output_path.as_deref(),
             )?;
+
+            // Optional database routing — temporarily redirect search_path
+            // so unqualified names in the chart SQL resolve there.
+            let target_db = self.resolve_db(engine, params.database.as_deref(), None, false)?;
+            let _search_guard = match target_db {
+                Some(ref alias) => Some(engine.scoped_search_path(alias)?),
+                None => None,
+            };
 
             let timer = crate::stats::StatsTimer::start();
             let rows = engine.execute_query_to_json(&params.sql)?;
@@ -2187,6 +2360,17 @@ impl HyperMcpServer {
         if let Err(e) = self.check_writable("watch_directory") {
             return Self::err_content(e);
         }
+        // Watcher uses a connection pool bound to the primary database;
+        // non-primary targets are not yet supported.
+        if params.database.is_some() || params.persist == Some(true) {
+            return Self::err_content(McpError::new(
+                ErrorCode::InvalidArgument,
+                "watch_directory does not yet support `database` or `persist`. \
+                 The watcher's connection pool is bound to the primary database. \
+                 Use `load_file` with `persist: true` for one-off persistent ingests."
+                    .to_string(),
+            ));
+        }
         let canonical = match crate::attach::validate_input_path(&params.path, "watch directory") {
             Ok(p) => p,
             Err(e) => return Self::err_content(e),
@@ -2255,9 +2439,14 @@ impl HyperMcpServer {
         &self,
         Parameters(params): Parameters<DescribeParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let result = self.with_engine(|engine| match params.table.as_deref() {
-            Some(name) => engine.describe_table(name).map(|t| vec![t]),
-            None => engine.describe_tables(),
+        let result = self.with_engine(|engine| {
+            let target_db = self.resolve_db(engine, params.database.as_deref(), None, false)?;
+            match params.table.as_deref() {
+                Some(name) => engine
+                    .describe_table_in(target_db.as_deref(), name)
+                    .map(|t| vec![t]),
+                None => engine.describe_tables_in(target_db.as_deref()),
+            }
         });
 
         match result {
@@ -2332,9 +2521,48 @@ impl HyperMcpServer {
                     ));
                 }
             };
+            // Database routing. Two strategies:
+            // - `table` mode + non-primary: synthesize a fully-qualified
+            //   SELECT and pass it as `sql` so export.rs's name-quoting
+            //   doesn't double-quote our identifier.
+            // - `sql` mode + non-primary: redirect search_path for the
+            //   call duration so unqualified names resolve correctly.
+            // - `hyper` format always exports the *primary* database
+            //   (export_hyper takes a snapshot of the connection's
+            //   workspace); database+hyper would silently produce the
+            //   wrong file, so we reject it up front.
+            let target_db = self.resolve_db(engine, params.database.as_deref(), None, false)?;
+            if params.format == "hyper" && target_db.is_some() {
+                return Err(McpError::new(
+                    ErrorCode::InvalidArgument,
+                    "export with format=\"hyper\" always snapshots the primary (ephemeral) \
+                     database. Drop the `database` parameter, or pick a different format \
+                     (csv, parquet, arrow_ipc, iceberg) that supports cross-database export."
+                        .to_string(),
+                ));
+            }
+            let (effective_sql, effective_table) = match (&params.sql, &params.table, &target_db) {
+                (None, Some(t), Some(db)) => {
+                    let esc_db = db.replace('"', "\"\"");
+                    let esc_tbl = t.replace('"', "\"\"");
+                    (
+                        Some(format!(
+                            "SELECT * FROM \"{esc_db}\".\"public\".\"{esc_tbl}\""
+                        )),
+                        None,
+                    )
+                }
+                _ => (params.sql.clone(), params.table.clone()),
+            };
+            let _search_guard = match (&effective_sql, &target_db, &params.sql) {
+                // Only pin search_path when the user supplied raw SQL
+                // (not when we synthesized a fully-qualified SELECT).
+                (Some(_), Some(alias), Some(_)) => Some(engine.scoped_search_path(alias)?),
+                _ => None,
+            };
             let opts = ExportOptions {
-                sql: params.sql,
-                table: params.table,
+                sql: effective_sql,
+                table: effective_table,
                 path: params.path,
                 format: params.format,
                 overwrite: params.overwrite.unwrap_or(true),
