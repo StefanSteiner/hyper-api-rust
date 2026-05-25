@@ -28,13 +28,19 @@ fn workspace_engine() -> (Engine, TempDir) {
     (engine, dir)
 }
 
-/// `true` if the workspace has a public-schema table named `name`.
+/// `true` if `name` exists in the persistent attachment's `public`
+/// schema. The catalog tests target the persistent DB because that's
+/// where MCP-managed bookkeeping lives in the new model; user-data
+/// tables only matter to these tests in the same scope.
 fn table_exists(engine: &Engine, name: &str) -> bool {
+    let sql = format!(
+        "SELECT tablename FROM \"persistent\".pg_catalog.pg_tables \
+         WHERE schemaname = 'public' AND tablename = '{}'",
+        name.replace('\'', "''")
+    );
     engine
-        .describe_tables()
-        .unwrap()
-        .iter()
-        .any(|t| t.get("name").and_then(|v| v.as_str()) == Some(name))
+        .execute_query_to_json(&sql)
+        .is_ok_and(|rows| !rows.is_empty())
 }
 
 // --- Catalog module ---------------------------------------------------------
@@ -56,7 +62,7 @@ fn ensure_exists_is_idempotent() {
 fn upsert_stub_creates_row_with_null_prose_fields() {
     let (engine, _dir) = workspace_engine();
     engine
-        .execute_command("CREATE TABLE widgets (id INT)")
+        .execute_command("CREATE TABLE \"persistent\".\"public\".widgets (id INT)")
         .unwrap();
     table_catalog::upsert_stub(
         &engine,
@@ -88,7 +94,7 @@ fn upsert_stub_creates_row_with_null_prose_fields() {
 fn upsert_stub_preserves_prose_on_reload() {
     let (engine, _dir) = workspace_engine();
     engine
-        .execute_command("CREATE TABLE widgets (id INT)")
+        .execute_command("CREATE TABLE \"persistent\".\"public\".widgets (id INT)")
         .unwrap();
     table_catalog::upsert_stub(&engine, "widgets", "load_file", None, Some(10), true).unwrap();
     table_catalog::set_metadata(
@@ -125,7 +131,7 @@ fn upsert_stub_preserves_prose_on_reload() {
 fn upsert_stub_bump_refresh_updates_last_refreshed_not_loaded_at() {
     let (engine, _dir) = workspace_engine();
     engine
-        .execute_command("CREATE TABLE widgets (id INT)")
+        .execute_command("CREATE TABLE \"persistent\".\"public\".widgets (id INT)")
         .unwrap();
     table_catalog::upsert_stub(&engine, "widgets", "load_file", None, Some(1), true).unwrap();
     let first = table_catalog::get(&engine, "widgets").unwrap().unwrap();
@@ -151,7 +157,7 @@ fn upsert_stub_bump_refresh_updates_last_refreshed_not_loaded_at() {
 fn set_metadata_updates_prose_without_touching_mechanical_fields() {
     let (engine, _dir) = workspace_engine();
     engine
-        .execute_command("CREATE TABLE widgets (id INT)")
+        .execute_command("CREATE TABLE \"persistent\".\"public\".widgets (id INT)")
         .unwrap();
     table_catalog::upsert_stub(&engine, "widgets", "load_file", None, Some(10), true).unwrap();
     let before = table_catalog::get(&engine, "widgets").unwrap().unwrap();
@@ -179,7 +185,7 @@ fn set_metadata_updates_prose_without_touching_mechanical_fields() {
 fn set_metadata_empty_string_clears_field() {
     let (engine, _dir) = workspace_engine();
     engine
-        .execute_command("CREATE TABLE widgets (id INT)")
+        .execute_command("CREATE TABLE \"persistent\".\"public\".widgets (id INT)")
         .unwrap();
     table_catalog::upsert_stub(&engine, "widgets", "load_file", None, Some(1), true).unwrap();
     table_catalog::set_metadata(
@@ -211,7 +217,7 @@ fn set_metadata_empty_string_clears_field() {
 fn set_metadata_rejects_empty_payload() {
     let (engine, _dir) = workspace_engine();
     engine
-        .execute_command("CREATE TABLE widgets (id INT)")
+        .execute_command("CREATE TABLE \"persistent\".\"public\".widgets (id INT)")
         .unwrap();
     table_catalog::upsert_stub(&engine, "widgets", "load_file", None, Some(1), true).unwrap();
     let err =
@@ -248,16 +254,16 @@ fn reconcile_inserts_stubs_drops_orphans_refreshes_counts() {
     // Three user tables exist; the catalog starts with an entry for a
     // table that was dropped, and only one of the three live tables.
     engine
-        .execute_command("CREATE TABLE alpha (id INT)")
+        .execute_command("CREATE TABLE \"persistent\".\"public\".alpha (id INT)")
         .unwrap();
     engine
-        .execute_command("INSERT INTO alpha VALUES (1), (2)")
+        .execute_command("INSERT INTO \"persistent\".\"public\".alpha VALUES (1), (2)")
         .unwrap();
     engine
-        .execute_command("CREATE TABLE beta (id INT)")
+        .execute_command("CREATE TABLE \"persistent\".\"public\".beta (id INT)")
         .unwrap();
     engine
-        .execute_command("CREATE TABLE gamma (id INT)")
+        .execute_command("CREATE TABLE \"persistent\".\"public\".gamma (id INT)")
         .unwrap();
 
     // Pre-populate catalog: known `alpha` (stale count) + orphan `zeta`.
@@ -299,7 +305,7 @@ fn reconcile_inserts_stubs_drops_orphans_refreshes_counts() {
 fn reconcile_skips_internal_tables() {
     let (engine, _dir) = workspace_engine();
     engine
-        .execute_command("CREATE TABLE alpha (id INT)")
+        .execute_command("CREATE TABLE \"persistent\".\"public\".alpha (id INT)")
         .unwrap();
     // Force-create a `_hyperdb_*` table the way `saved_queries` would.
     engine
@@ -320,7 +326,7 @@ fn reconcile_skips_internal_tables() {
 fn delete_for_is_idempotent() {
     let (engine, _dir) = workspace_engine();
     engine
-        .execute_command("CREATE TABLE widgets (id INT)")
+        .execute_command("CREATE TABLE \"persistent\".\"public\".widgets (id INT)")
         .unwrap();
     table_catalog::upsert_stub(&engine, "widgets", "load_file", None, Some(1), true).unwrap();
     assert!(table_catalog::delete_for(&engine, "widgets").unwrap());
@@ -344,7 +350,8 @@ fn default_server_auto_creates_catalog_on_first_engine_use() {
     let path_str = path.to_str().unwrap().to_string();
 
     {
-        let server = HyperMcpServer::with_no_daemon(Some(path_str.clone()), false, false, true);
+        let server = HyperMcpServer::with_no_daemon(Some(path_str.clone()), false, true);
+        // Any tool that takes the engine lazily triggers bootstrap.
         let _ = server.resource_body_for_uri("hyper://workspace").unwrap();
     }
 
@@ -352,31 +359,6 @@ fn default_server_auto_creates_catalog_on_first_engine_use() {
     assert!(
         table_exists(&engine, TABLE_CATALOG_TABLE),
         "_table_catalog must be present in the workspace after a default server has touched it"
-    );
-}
-
-/// `--bare`: the catalog is never created, even after the engine has run
-/// tool calls. The workspace file stays free of MCP bookkeeping.
-#[test]
-fn bare_server_does_not_create_catalog() {
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join("ws.hyper");
-    let path_str = path.to_str().unwrap().to_string();
-
-    {
-        let server = HyperMcpServer::with_no_daemon(Some(path_str.clone()), false, true, true);
-        assert!(server.is_bare());
-        let _ = server.resource_body_for_uri("hyper://workspace").unwrap();
-    }
-
-    let engine = Engine::new_no_daemon(Some(path_str)).unwrap();
-    assert!(
-        !table_exists(&engine, TABLE_CATALOG_TABLE),
-        "_table_catalog must NOT be present when the server was started with --bare"
-    );
-    assert!(
-        !table_exists(&engine, "_hyperdb_saved_queries"),
-        "saved-queries meta-table must NOT be present in bare mode either"
     );
 }
 
@@ -395,12 +377,12 @@ fn read_only_server_does_not_create_catalog() {
     {
         let engine = Engine::new_no_daemon(Some(path_str.clone())).unwrap();
         engine
-            .execute_command("CREATE TABLE widgets (id INT)")
+            .execute_command("CREATE TABLE \"persistent\".\"public\".widgets (id INT)")
             .unwrap();
     }
 
     {
-        let server = HyperMcpServer::with_no_daemon(Some(path_str.clone()), true, false, true);
+        let server = HyperMcpServer::with_no_daemon(Some(path_str.clone()), true, true);
         let _ = server.resource_body_for_uri("hyper://workspace").unwrap();
     }
 
@@ -424,18 +406,18 @@ fn backfill_stubs_preexisting_tables_on_reopen() {
     {
         let engine = Engine::new_no_daemon(Some(path_str.clone())).unwrap();
         engine
-            .execute_command("CREATE TABLE alpha (id INT)")
+            .execute_command("CREATE TABLE \"persistent\".\"public\".alpha (id INT)")
             .unwrap();
         engine
-            .execute_command("INSERT INTO alpha VALUES (1), (2), (3)")
+            .execute_command("INSERT INTO \"persistent\".\"public\".alpha VALUES (1), (2), (3)")
             .unwrap();
         engine
-            .execute_command("CREATE TABLE beta (id INT)")
+            .execute_command("CREATE TABLE \"persistent\".\"public\".beta (id INT)")
             .unwrap();
     }
 
     {
-        let server = HyperMcpServer::with_no_daemon(Some(path_str.clone()), false, false, true);
+        let server = HyperMcpServer::with_no_daemon(Some(path_str.clone()), false, true);
         let _ = server.resource_body_for_uri("hyper://workspace").unwrap();
     }
 
@@ -451,14 +433,4 @@ fn backfill_stubs_preexisting_tables_on_reopen() {
         Some("unknown"),
         "backfilled rows are tagged as unknown origin"
     );
-}
-
-/// `is_bare()` reflects the constructor argument (trivial, but guards
-/// against regression of the accessor wiring).
-#[test]
-fn is_bare_reflects_constructor_argument() {
-    let bare = HyperMcpServer::with_no_daemon(None, false, true, true);
-    let normal = HyperMcpServer::with_no_daemon(None, false, false, true);
-    assert!(bare.is_bare());
-    assert!(!normal.is_bare());
 }

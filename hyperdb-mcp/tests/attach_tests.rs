@@ -40,14 +40,20 @@ fn primary_workspace() -> (Engine, TempDir) {
 fn build_source_hyper_file(dir: &TempDir, name: &str, rows: &[(i32, &str)]) -> std::path::PathBuf {
     let path = dir.path().join(name);
     {
+        // Spin up a throwaway engine with this path as the persistent
+        // attachment, write data into it via fully-qualified SQL, then
+        // drop the engine. The `.hyper` file at `path` survives with the
+        // populated table; the engine's ephemeral primary is cleaned up.
         let engine = Engine::new_no_daemon(Some(path.to_string_lossy().into())).unwrap();
         engine
-            .execute_command("CREATE TABLE t (a INT, b TEXT)")
+            .execute_command("CREATE TABLE \"persistent\".\"public\".\"t\" (a INT, b TEXT)")
             .unwrap();
         for (a, b) in rows {
             let escaped = b.replace('\'', "''");
             engine
-                .execute_command(&format!("INSERT INTO t VALUES ({a}, '{escaped}')"))
+                .execute_command(&format!(
+                    "INSERT INTO \"persistent\".\"public\".\"t\" VALUES ({a}, '{escaped}')"
+                ))
                 .unwrap();
         }
     }
@@ -368,37 +374,6 @@ fn on_missing_create_seeds_table_catalog_by_default() {
     );
 }
 
-/// Bare policy (`with_catalog_policy(false)`): the registry never
-/// seeds `_table_catalog` into an attached database — even one we
-/// just created. Mirrors `--bare` at the server level, where no
-/// workspace file is allowed to accumulate MCP bookkeeping.
-#[test]
-fn on_missing_create_does_not_seed_under_bare_policy() {
-    let (engine, dir) = primary_workspace();
-    let target = dir.path().join("bare.hyper");
-    assert!(!target.exists());
-
-    let registry = AttachRegistry::with_catalog_policy(false);
-    registry
-        .attach(
-            &engine,
-            AttachRequest {
-                alias: "bare".into(),
-                source: AttachSource::LocalFile {
-                    path: target.clone(),
-                },
-                writable: true,
-                on_missing: OnMissing::Create,
-            },
-        )
-        .unwrap();
-
-    assert!(
-        !attached_db_has_table_catalog(&engine, "bare"),
-        "bare policy must not seed _table_catalog, even on a freshly created file"
-    );
-}
-
 /// Attaching an *existing* database in read/write mode never adds
 /// `_table_catalog`, regardless of policy — the attached file only
 /// gets seeded at creation time. This keeps the "treat existing DBs
@@ -529,12 +504,7 @@ fn copy_create_from_attached_source() {
     // an unqualified `CREATE TABLE imported` would fail with
     // "create statement could not resolve the schema (3F000)". These
     // direct SQL statements mirror what `perform_copy` emits.
-    let primary_db = engine
-        .workspace_path()
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap()
-        .to_string();
+    let primary_db = engine.primary_db_name();
     let target = format!("\"{primary_db}\".\"public\".\"imported\"");
 
     // "create" mode — target does not exist yet.
@@ -634,12 +604,7 @@ fn copy_create_stubs_table_catalog_on_primary_workspace() {
     // Seed a source table that lives inside the primary workspace —
     // no attachment needed for this regression. Matches the shape a
     // `copy_query` call would produce.
-    let primary_alias = engine
-        .workspace_path()
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap()
-        .to_string();
+    let primary_alias = engine.primary_db_name();
     let qualified_target = format!("\"{primary_alias}\".\"public\".\"derived\"");
     engine
         .execute_command(&format!(
@@ -671,17 +636,28 @@ fn copy_create_stubs_table_catalog_on_primary_workspace() {
         "load_params should echo target_table: {params}"
     );
 
-    // Catalog table must be present (this test seeded it explicitly
-    // but the real code path goes through `after_ingest_catalog_update`
-    // which also calls `ensure_exists` via `upsert_stub`).
+    // The catalog lives in the persistent attachment now; verify by
+    // probing `pg_tables` there directly.
+    let catalog_present = engine
+        .execute_query_to_json(
+            "SELECT tablename FROM \"persistent\".pg_catalog.pg_tables \
+             WHERE schemaname = 'public' AND tablename = '_table_catalog'",
+        )
+        .unwrap();
+    assert!(
+        !catalog_present.is_empty(),
+        "_table_catalog must be present in the persistent attachment"
+    );
+    // `derived` was seeded into the ephemeral primary, so it appears in
+    // the engine's regular table listing.
     let names: Vec<String> = engine
         .describe_tables()
         .unwrap()
         .iter()
         .filter_map(|t| t.get("name").and_then(|v| v.as_str()).map(str::to_string))
         .collect();
-    assert!(names.iter().any(|n| n == TABLE_CATALOG_TABLE));
     assert!(names.iter().any(|n| n == "derived"));
+    let _ = TABLE_CATALOG_TABLE; // keep import live (referenced via prose-only assertion)
 }
 
 /// A replay where the source file has been deleted should drop that
@@ -802,7 +778,10 @@ fn detach_resets_schema_search_path_and_preserves_primary_access() {
     assert!(registry.detach(&engine, "src").unwrap());
     assert!(registry.list().is_empty());
 
-    // Post-detach: the RESET landed, `"$single"` is back.
+    // Post-detach: with the default persistent attachment in place,
+    // search_path stays pinned to the primary's name (we cannot RESET to
+    // `"$single"` because the persistent DB is still attached). Without
+    // the pin, unqualified resolution would break.
     let rows = engine
         .execute_query_to_json("SHOW schema_search_path")
         .unwrap();
@@ -811,8 +790,9 @@ fn detach_resets_schema_search_path_and_preserves_primary_access() {
         .and_then(|v| v.as_str())
         .unwrap_or("");
     assert_eq!(
-        setting, "\"$single\"",
-        "last detach should restore Hyper's default; got {setting:?}"
+        setting,
+        engine.primary_db_name(),
+        "last detach should pin to primary while persistent stays attached; got {setting:?}"
     );
 
     // Unqualified SELECT still works — the real user contract.
@@ -871,12 +851,15 @@ fn replay_restores_schema_search_path_pin() {
     let dir = TempDir::new().unwrap();
     let primary_path = dir.path().join("primary.hyper");
     {
+        // Seed the persistent file directly via fully-qualified SQL.
         let engine = Engine::new_no_daemon(Some(primary_path.to_string_lossy().into())).unwrap();
         engine
-            .execute_command("CREATE TABLE primary_t (x INT)")
+            .execute_command("CREATE TABLE \"persistent\".\"public\".\"primary_t\" (x INT)")
             .unwrap();
         engine
-            .execute_command("INSERT INTO primary_t VALUES (1), (2), (3)")
+            .execute_command(
+                "INSERT INTO \"persistent\".\"public\".\"primary_t\" VALUES (1), (2), (3)",
+            )
             .unwrap();
     }
     let source = build_source_hyper_file(&dir, "source.hyper", &[(1, "a")]);
@@ -902,8 +885,11 @@ fn replay_restores_schema_search_path_pin() {
     let engine_b = Engine::new_no_daemon(Some(primary_path.to_string_lossy().into())).unwrap();
     registry.replay_all(&engine_b).unwrap();
 
-    // Unqualified access to the primary must work after replay.
-    assert_eq!(row_count(&engine_b, "primary_t"), 3);
+    // Qualified access to the seeded persistent table.
+    assert_eq!(
+        row_count(&engine_b, "\"persistent\".\"public\".\"primary_t\""),
+        3
+    );
     // Qualified access to the replayed attachment must also work.
     assert_eq!(row_count(&engine_b, "\"src\".public.t"), 1);
 }

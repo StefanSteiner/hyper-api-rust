@@ -196,12 +196,16 @@ Derived fields are merged into the serialized JSON so callers get a self-contain
 
 ---
 
-## Workspace Modes Internals
+## Two-Database Engine Model
 
-- **Ephemeral** — `Engine::new(None)` creates a temp directory (`$TMPDIR/hyperdb-mcp-<pid>/`) with a `workspace.hyper` file. Cleaned up on process exit. In daemon mode, `Engine::drop` issues `DETACH DATABASE` (releasing Hyper's file lock — required on Windows) before `remove_dir_all` deletes the temp directory.
-- **Persistent** — `Engine::new(Some(path))` uses the caller-supplied path. Parent directories are created automatically. `~` is expanded via `$HOME` (no shell crate dependency).
+Every `Engine` holds:
 
-Logs (both `hyperd` server logs and the MCP client log) land in the same directory as the workspace file. The `status` tool reports log paths so operators know where to look.
+- **Ephemeral primary** at `$TMPDIR/hyperdb-mcp-<pid>-<seq>/scratch.hyper`. Created fresh on each `Engine::new` (`<seq>` is a process-wide atomic so parallel test runners and restart-after-ConnectionLost reconnects get distinct files). The connection is *bound* to this database — unqualified SQL routes here. `Engine::drop` always deletes the per-engine temp directory.
+- **Persistent attachment** under the alias `"persistent"`. When `Engine::new(Some(path))` is called, the engine runs `CREATE DATABASE IF NOT EXISTS '<path>'` (creating the file if missing) and `ATTACH DATABASE '<path>' AS "persistent"`. Then `SET schema_search_path = '<primary_db>'` keeps unqualified resolution routing into the ephemeral primary. `Engine::new(None)` skips this step (the `--ephemeral-only` mode); `engine.has_persistent()` reflects which mode was selected.
+
+Catalog and saved-queries meta-tables live in the persistent attachment, qualified via `"persistent"."public"."_table_catalog"` etc. When the engine has no persistent attachment, those operations no-op. See `crate::table_catalog::qualified_catalog` and `crate::saved_queries::WorkspaceStore::qualified_table` for the routing helpers.
+
+Logs land next to the persistent file when one is supplied (so users find them in a stable per-project location); ephemeral-only sessions log to `$TMPDIR/hyperdb-mcp-<pid>/`. The `status` tool reports `ephemeral_path`, `persistent_path`, and `has_persistent` so operators can confirm where data lives.
 
 ## Daemon Mode Internals
 
@@ -239,7 +243,7 @@ Two new code paths fire `report_hyperd_error_to_daemon` (best-effort, 200ms time
 ### Known limitations
 
 - **Hung-but-alive `hyperd`** (TCP listening, but unresponsive to queries) is NOT detected. The monitor's `try_wait()` returns `None` for a hung process; client tool calls hang on the read side without producing a `ConnectionLost` error. Operator recovery is `hyperdb-mcp daemon stop` followed by reconnect.
-- **Watchers (background tasks holding `AsyncConnection` handles in `WatcherRegistry`)** do not currently auto-reconnect after a hyperd restart. They will go quiet until the user re-issues `watch_directory`.
+- **Watchers** auto-recover from hyperd restarts: when an ingest fails with a connection-lost error, the watcher rebuilds its connection pool against the engine's current endpoint and retries the file once. Persistent failures (the second attempt also fails) fall through to the standard `failed/` move so a single broken file can't keep the watcher pinned in retry loops.
 
 See `src/daemon/{mod,discovery,health,run,spawn}.rs` for the full implementation.
 
