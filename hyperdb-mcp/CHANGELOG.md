@@ -68,20 +68,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   both `database` and `persist` are set, `database` wins. Combining
   `persist: true` with `--ephemeral-only` returns a clear
   `InvalidArgument` error.
-- **Catalog updates are database-aware.** `_table_catalog` rows are
-  only written when ingesting to the primary or persistent database.
-  User-attached databases manage their own metadata if any.
+- **Cross-database merge.** `load_file` with `mode: "merge"` now
+  accepts any writable `database`. The merge path keeps the temp
+  table inside the target database so DELETE-USING and INSERT-SELECT
+  stay single-DB — no cross-database DML is required. Engine
+  helpers `table_exists_in`, `column_metadata_in`, and
+  `alter_table_add_columns_in` carry the routing.
+- **`export(format="hyper", database=...)`.** The hyper-format
+  export now snapshots whichever database the caller named (via a
+  new `ExportOptions.source_db` field plumbed into
+  `populate_export_target`). Default behavior (snapshot primary)
+  unchanged.
+- **`load_files` and `watch_directory` accept `database` / `persist`.**
+  Their connection pool now opens the resolved target's `.hyper`
+  file directly as its workspace, so unqualified ingest SQL routes
+  into the right database without further plumbing. The watcher's
+  reconnect-recovery path re-resolves the target so a hyperd
+  restart picks the right file. `WatcherHandle` records its
+  `target_db`; `detach_database` rejects with `InvalidArgument` if
+  any active watcher targets the alias (call `unwatch_directory`
+  first to release it).
+- **Per-database `_table_catalog`.** Every writable database
+  receives its own catalog, lazily seeded on first ingest. The
+  catalog CRUD API gains `*_in(target_db)` siblings
+  (`ensure_exists_in`, `upsert_stub_in`, `set_metadata_in`,
+  `get_in`, `list_in`, `delete_for_in`, `reconcile_in`). The
+  per-engine catalog-presence cache is now keyed by canonical
+  alias (`Mutex<HashMap<String, bool>>`); detach clears the entry.
+- **`set_table_metadata.database` parameter.** Routes the catalog
+  write to the named database's `_table_catalog`. Read-only
+  attachments are rejected up front with a clear "re-attach with
+  writable:true" message.
 
-### Limitations (deferred to a follow-up)
+### Changed (breaking — pre-1.0)
 
-- `load_files` and `watch_directory` reject `database` / `persist`
-  with a clear error — their connection pool is bound to the primary
-  database and can't reach attached databases. Use `load_file` with
-  `persist: true` for one-off persistent ingests until pool routing
-  ships.
-- `load_file` with `mode: "merge"` rejects non-primary `database`.
-  The merge implementation uses a temp table and cross-database DML
-  isn't yet verified across all hyperd versions.
+- `Engine::catalog_present_in_persistent` → `Engine::catalog_present_in(alias, prober)`.
+- `Engine::mark_catalog_present` → `Engine::mark_catalog_present_for(alias)`.
+- `Engine::catalog_present_cache` field shape: `Mutex<Option<bool>>` → `Mutex<HashMap<String, bool>>` keyed by lowercased alias.
+- New `Engine::clear_catalog_cache_for(alias)` paired with `detach_database`.
+- `table_catalog::ensure_exists_in_database(engine, alias)` is now a deprecated wrapper over `ensure_exists_in(engine, Some(alias))`.
 
 ### Removed
 
@@ -92,10 +117,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Performance
 
-- **Per-engine `_table_catalog` presence cache.** Catalog reads/writes
+- **Per-database `_table_catalog` presence cache.** Catalog reads/writes
   used to round-trip a `pg_catalog.pg_tables` probe on every call;
-  now the existence check is cached for the engine's lifetime and
-  primed immediately after `CREATE TABLE IF NOT EXISTS`.
+  now the existence check is cached per (engine, alias) and primed
+  immediately after `CREATE TABLE IF NOT EXISTS`. `detach_database`
+  clears the alias's entry so a re-attach to a different file isn't
+  served stale.
 
 ### Fixed
 

@@ -203,7 +203,7 @@ describe({ database: "persistent" })
 sample({ table: "customers", database: "persistent" })
 ```
 
-The `database` parameter is available on `query`, `execute`, `load_data`, `load_file`, `describe`, `sample`, `chart`, and `export`. The shorthand `persist: true` (sugar for `database: "persistent"`) is available on `load_data` and `load_file`. Pass any user-attached writable alias (created via `attach_database`) to target a custom database.
+The `database` parameter is available on `query`, `execute`, `load_data`, `load_file`, `load_files`, `watch_directory`, `describe`, `sample`, `chart`, `export`, and `set_table_metadata`. The shorthand `persist: true` (sugar for `database: "persistent"`) is available on `load_data`, `load_file`, `load_files`, and `watch_directory`. Pass any user-attached writable alias (created via `attach_database`) to target a custom database.
 
 (`query_data` and `query_file` are one-shot tools that materialize the inline data into their own temp table and query it — they do not accept a `database` parameter because the data isn't in a persisted database to begin with.)
 
@@ -218,9 +218,9 @@ CREATE TABLE "persistent"."public"."revenue_2026" AS
   SELECT region, SUM(amount) FROM scratch_orders GROUP BY region;
 ```
 
-The `_table_catalog` (which tracks MCP-managed metadata for your tables) lives in the persistent attachment automatically — there's nothing to manage. If you want a pristine `.hyper` file for export with no MCP bookkeeping, run `DROP TABLE "persistent"."public"."_table_catalog"` once and subsequent sessions opening that file will leave it dropped.
+**Per-database `_table_catalog`:** every writable database — persistent and any user-attached writable file — gets its own `_table_catalog` lazily seeded on first ingest. MCP-managed metadata (load tool, params, timestamps, prose fields set via `set_table_metadata`) lives alongside the data file, so opening a `.hyper` file later as a primary workspace finds the catalog ready. If you want a pristine `.hyper` file for export with no MCP bookkeeping, run `DROP TABLE "<alias>"."public"."_table_catalog"` once and subsequent sessions opening that file will leave it dropped.
 
-**v1 limitations:** `load_files` and `watch_directory` use a connection pool bound to the primary database and don't yet accept `database`/`persist` — use `load_file` with `persist: true` for one-off persistent ingests. Merge mode (`load_file` with `mode: "merge"`) only works against the primary database in v1.
+**Detach safety:** `detach_database` rejects with `InvalidArgument` if any active watcher targets the alias — call `unwatch_directory` first. This prevents the watcher's pool from silently writing into a now-detached file (or worse, the wrong file if the alias is later re-attached to a different path).
 
 ### Daemon management
 
