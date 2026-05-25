@@ -157,6 +157,100 @@ fn cross_db_qualified_alter_add_column() {
     assert_eq!(rows[0]["extra"], "x");
 }
 
+/// Shape 6 (Iter 4): `CREATE TABLE … (col TEXT PRIMARY KEY, …)` against
+/// an attached writable DB.
+///
+/// **Result: rejected by Hyper with "Index support is disabled (0A000)".**
+/// Hyper backs PKs with indexes, which aren't supported in the bundled
+/// build. PK-based atomic upsert is therefore not viable; Iter 4
+/// designs around it via a Rust-side per-(alias, table_name) Mutex
+/// plus DELETE+INSERT in a transaction (the existing pattern, just
+/// extended cross-DB).
+#[test]
+#[ignore = "pre-flight smoke; run with --ignored — DOCUMENTS that Hyper rejects PK"]
+fn cross_db_create_table_with_primary_key_is_rejected() {
+    let (engine, _reg, _dir) = setup();
+
+    let err = engine
+        .execute_command(
+            "CREATE TABLE \"smoke\".\"public\".\"with_pk\" \
+             (k TEXT PRIMARY KEY, v INT)",
+        )
+        .expect_err("Hyper must reject PK creation — design depends on this");
+    assert!(
+        err.message.contains("Index support is disabled")
+            || err.message.contains("not implemented")
+            || err.message.contains("not supported"),
+        "expected an index/PK rejection, got: {}",
+        err.message
+    );
+}
+
+/// Shape 7 (Iter 4): `ALTER TABLE … ADD CONSTRAINT … PRIMARY KEY` against
+/// an attached writable DB.
+///
+/// **Result: rejected by Hyper with "named constraints not implemented
+/// yet (0A000)".** Confirms that PK migration via ALTER is also a dead
+/// end. Iter 4 falls back to non-PK design — see the plan.
+#[test]
+#[ignore = "pre-flight smoke; run with --ignored — DOCUMENTS that Hyper rejects ALTER ADD CONSTRAINT"]
+fn cross_db_alter_add_primary_key_is_rejected() {
+    let (engine, _reg, _dir) = setup();
+
+    engine
+        .execute_command("CREATE TABLE \"smoke\".\"public\".\"add_pk\" (k TEXT, v INT)")
+        .unwrap();
+    let err = engine
+        .execute_command(
+            "ALTER TABLE \"smoke\".\"public\".\"add_pk\" \
+             ADD CONSTRAINT add_pk_pk PRIMARY KEY (k)",
+        )
+        .expect_err("Hyper must reject ADD CONSTRAINT");
+    assert!(
+        err.message.contains("not implemented")
+            || err.message.contains("Index support is disabled"),
+        "expected a not-implemented/index rejection, got: {}",
+        err.message
+    );
+}
+
+/// Shape 8 (Iter 4): `INSERT … ON CONFLICT … DO UPDATE` against an
+/// attached writable DB.
+///
+/// **Result: rejected because ON CONFLICT requires a unique index on
+/// the conflict columns, which Hyper doesn't support.** Atomic upsert
+/// in a single statement is therefore not viable.
+#[test]
+#[ignore = "pre-flight smoke; run with --ignored — DOCUMENTS that ON CONFLICT is unavailable"]
+fn cross_db_insert_on_conflict_is_rejected() {
+    let (engine, _reg, _dir) = setup();
+
+    engine
+        .execute_command("CREATE TABLE \"smoke\".\"public\".\"upsert\" (k TEXT, v INT, prose TEXT)")
+        .unwrap();
+    engine
+        .execute_command("INSERT INTO \"smoke\".\"public\".\"upsert\" VALUES ('a', 1, 'hello')")
+        .unwrap();
+
+    let err = engine
+        .execute_command(
+            "INSERT INTO \"smoke\".\"public\".\"upsert\" (k, v, prose) \
+             VALUES ('a', 99, 'overwritten') \
+             ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v",
+        )
+        .expect_err("Hyper must reject ON CONFLICT — syntax not supported");
+    // Hyper rejects ON CONFLICT at the *parser* layer ("syntax error: got
+    // ON, expected FETCH, FOR, LIMIT, OFFSET") — the dialect doesn't
+    // include the upsert grammar at all, regardless of index support.
+    assert!(
+        err.message.contains("syntax error")
+            || err.message.contains("Index support is disabled")
+            || err.message.contains("not implemented"),
+        "expected a syntax/index rejection, got: {}",
+        err.message
+    );
+}
+
 /// Shape 5: qualified `pg_catalog.pg_tables` and column-introspection
 /// probes against the attached DB — the basis for `table_exists_in` and
 /// `column_metadata_in`.

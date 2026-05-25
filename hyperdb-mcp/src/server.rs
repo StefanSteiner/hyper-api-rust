@@ -1113,11 +1113,17 @@ impl HyperMcpServer {
     /// swallows errors — a bookkeeping failure should never fail an
     /// otherwise-successful load.
     ///
-    /// `&self` is kept for consistency with sibling helpers and because
-    /// upcoming work (per-DB catalog presence cache) will need it.
+    /// Routes the upsert to `target_db`'s `_table_catalog`. The
+    /// catalog is lazily seeded if absent. `target_db = None` and
+    /// `target_db = Some("persistent")` both write to the persistent
+    /// catalog (the single-engine ephemeral primary stubs survive
+    /// there for the session). User-attached writable aliases get
+    /// their own per-DB catalog. Read-only attachments are rejected
+    /// upstream by `resolve_db(require_writable=true)` so this helper
+    /// never sees them.
     #[expect(
         clippy::unused_self,
-        reason = "kept for forthcoming per-DB catalog presence cache"
+        reason = "kept for symmetry with after_execute_catalog_update; both run inside with_engine"
     )]
     fn after_ingest_catalog_update(
         &self,
@@ -1128,33 +1134,18 @@ impl HyperMcpServer {
         row_count: Option<i64>,
         target_db: Option<&str>,
     ) {
-        // The catalog currently lives in the persistent attachment only
-        // (per-DB catalogs ship in a follow-up iter). For ingests into
-        // user-attached writable databases we deliberately skip the
-        // upsert: writing a stub for a table that doesn't live in
-        // persistent would be misleading. The skip is logged at debug
-        // so it shows up under -v but doesn't spam normal logs.
-        if let Some(alias) = target_db {
-            if !alias.eq_ignore_ascii_case(Engine::PERSISTENT_ALIAS) {
-                tracing::debug!(
-                    table = %table_name,
-                    target_db = %alias,
-                    "skipping _table_catalog update: catalog is persistent-only; \
-                     per-DB catalog is a follow-up"
-                );
-                return;
-            }
-        }
-        if let Err(e) = crate::table_catalog::upsert_stub(
+        if let Err(e) = crate::table_catalog::upsert_stub_in(
             engine,
             table_name,
             load_tool,
             load_params,
             row_count,
             true,
+            target_db,
         ) {
             tracing::warn!(
                 table = %table_name,
+                target_db = ?target_db,
                 err = %e.message,
                 "failed to update _table_catalog after ingest"
             );
@@ -1165,7 +1156,7 @@ impl HyperMcpServer {
     /// error-swallowing rationale as [`Self::after_ingest_catalog_update`].
     #[expect(
         clippy::unused_self,
-        reason = "kept for forthcoming per-DB catalog presence cache"
+        reason = "kept for symmetry; runs inside with_engine"
     )]
     fn after_execute_catalog_update(&self, engine: &Engine) {
         if let Err(e) = crate::table_catalog::reconcile(engine) {
@@ -2898,7 +2889,16 @@ impl HyperMcpServer {
             }
         }
         let registry = self.attachments_handle();
-        let result = self.with_engine(|engine| registry.detach(engine, &alias));
+        let result = self.with_engine(|engine| {
+            let outcome = registry.detach(engine, &alias)?;
+            if outcome {
+                // Drop any cached "_table_catalog exists in this alias"
+                // probe so a re-attach to a different file or with
+                // different writability won't reuse a stale entry.
+                engine.clear_catalog_cache_for(&alias);
+            }
+            Ok(outcome)
+        });
         match result {
             Ok(detached) => {
                 Self::ok_content(json!({ "alias": params.alias, "detached": detached }))

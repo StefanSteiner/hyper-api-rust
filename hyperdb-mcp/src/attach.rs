@@ -366,7 +366,7 @@ impl AttachRegistry {
         // DB" which implicitly promises a catalog; leaving an
         // attached-but-unseeded file would silently violate that.
         if file_was_created {
-            if let Err(e) = crate::table_catalog::ensure_exists_in_database(engine, &req.alias) {
+            if let Err(e) = crate::table_catalog::ensure_exists_in(engine, Some(&req.alias)) {
                 let detach_sql = format!("DETACH DATABASE \"{}\"", req.alias.replace('"', "\"\""));
                 if let Err(de) = engine.execute_command(&detach_sql) {
                     tracing::warn!(
