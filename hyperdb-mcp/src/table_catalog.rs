@@ -50,17 +50,16 @@
 //!
 //! # Concurrency
 //!
-//! Catalog upserts use DELETE + INSERT inside a single transaction.
-//! Hyper rejects PRIMARY KEY ("Index support is disabled") and
-//! `INSERT … ON CONFLICT` ("syntax error: got ON"), so atomic upsert
-//! at the SQL layer isn't viable. Within one MCP server engine the
-//! lack of a PK is not a race risk: every catalog write runs inside
-//! [`crate::server::HyperMcpServer::with_engine`], which holds the
-//! engine mutex for the duration — so concurrent ingests serialize
-//! at the catalog write boundary even though the data-write path is
-//! parallel through the watcher pool's separate connections.
-//! Cross-process concurrency on the same `.hyper` file is out of
-//! scope.
+//! Catalog upserts use an optimistic UPDATE-then-conditional-INSERT
+//! pattern. Hyper rejects PRIMARY KEY ("Index support is disabled")
+//! and `INSERT … ON CONFLICT` ("syntax error: got ON"), but supports
+//! `INSERT … SELECT … WHERE NOT EXISTS (…)` as a single atomic
+//! statement. Because `hyperd` serializes individual statements,
+//! the conditional INSERT can never produce duplicate rows — even
+//! when multiple MCP server processes race to upsert the same
+//! `table_name` concurrently. The UPDATE uses last-writer-wins
+//! semantics for mechanical fields while preserving prose columns
+//! untouched.
 //!
 //! [`HyperMcpServer`]: crate::server::HyperMcpServer
 
@@ -355,18 +354,18 @@ pub fn get(engine: &Engine, table_name: &str) -> Result<Option<CatalogEntry>, Mc
 /// * Prose fields (`source_url`, `source_description`, `purpose`,
 ///   `license`, `notes`) — preserved unchanged from the existing row.
 ///
-/// Implementation is DELETE + INSERT inside a transaction. Hyper
-/// rejects PRIMARY KEY and `INSERT … ON CONFLICT`, so this is the
-/// only available shape. Within one MCP server engine, concurrent
-/// upserts of the same row are serialized by the engine mutex (see
-/// the module-level concurrency note).
+/// Implementation uses optimistic concurrency: UPDATE (last writer
+/// wins for existing rows) followed by a conditional INSERT that
+/// only fires when no row exists. Each statement is individually
+/// atomic at the hyperd level, so concurrent upserts from multiple
+/// MCP server processes cannot produce duplicate rows — even without
+/// an external lock or transaction wrapper.
 ///
 /// # Errors
 ///
-/// - Propagates errors from [`ensure_exists_in`] and [`get_in`].
-/// - Propagates any transaction error from the enclosing
-///   [`Engine::execute_in_transaction`] — typically DELETE, INSERT,
-///   commit, or connection-loss failures.
+/// - Propagates errors from [`ensure_exists_in`].
+/// - Propagates any error from the UPDATE or INSERT statements —
+///   typically connection-loss failures.
 pub fn upsert_stub_in(
     engine: &Engine,
     table_name: &str,
@@ -378,60 +377,62 @@ pub fn upsert_stub_in(
 ) -> Result<(), McpError> {
     ensure_exists_in(engine, target_db)?;
     let Some(qualified) = qualified_catalog_in(engine, target_db) else {
-        // No durable destination; nothing to write to.
         return Ok(());
     };
 
-    let existing = get_in(engine, table_name, target_db)?;
     let now = Utc::now();
-    let loaded_at = existing.as_ref().map_or(now, |e| e.loaded_at);
-    let last_refreshed_at = if bump_refresh {
-        now
+    let row_count_sql = row_count.map_or_else(|| "NULL".into(), |n: i64| n.to_string());
+
+    // Step 1: UPDATE mechanical fields on the existing row. Prose
+    // fields are left untouched. Returns affected_rows > 0 if the
+    // row existed.
+    let set_clauses = if bump_refresh {
+        format!(
+            "load_tool = {}, load_params = {}, row_count = {}, \
+             last_refreshed_at = TIMESTAMP {}",
+            sql_literal(load_tool),
+            opt_sql_literal(load_params),
+            row_count_sql,
+            sql_literal(&format_timestamp(now)),
+        )
     } else {
-        existing.as_ref().map_or(now, |e| e.last_refreshed_at)
+        format!(
+            "load_tool = {}, load_params = {}, row_count = {}",
+            sql_literal(load_tool),
+            opt_sql_literal(load_params),
+            row_count_sql,
+        )
     };
 
-    let (source_url, source_description, purpose, license, notes) = match existing.as_ref() {
-        Some(e) => (
-            e.source_url.clone(),
-            e.source_description.clone(),
-            e.purpose.clone(),
-            e.license.clone(),
-            e.notes.clone(),
-        ),
-        None => (None, None, None, None, None),
-    };
+    let update_sql = format!(
+        "UPDATE {qualified} SET {set_clauses} WHERE table_name = {}",
+        sql_literal(table_name),
+    );
+    let updated = engine.execute_command(&update_sql)?;
 
-    engine.execute_in_transaction(|engine| {
-        let delete_sql = format!(
-            "DELETE FROM {qualified} WHERE table_name = {}",
-            sql_literal(table_name)
-        );
-        engine.execute_command(&delete_sql)?;
-
+    // Step 2: If no row existed, conditionally INSERT a new one.
+    // The WHERE NOT EXISTS guard prevents duplicates when multiple
+    // processes race to insert the same table_name concurrently —
+    // hyperd serializes individual statements, so exactly one INSERT
+    // will see the absence and succeed.
+    if updated == 0 {
         let insert_sql = format!(
             "INSERT INTO {qualified} \
              (table_name, source_url, source_description, purpose, load_tool, \
               load_params, license, loaded_at, last_refreshed_at, row_count, notes) \
-             VALUES ({name}, {source_url}, {source_description}, {purpose}, {load_tool}, \
-                     {load_params}, {license}, TIMESTAMP {loaded_at}, TIMESTAMP {last_refreshed_at}, \
-                     {row_count}, {notes})",
+             SELECT {name}, NULL, NULL, NULL, {load_tool}, \
+                    {load_params}, NULL, TIMESTAMP {loaded_at}, TIMESTAMP {last_refreshed_at}, \
+                    {row_count}, NULL \
+             WHERE NOT EXISTS (SELECT 1 FROM {qualified} WHERE table_name = {name})",
             name = sql_literal(table_name),
-            source_url = opt_sql_literal(source_url.as_deref()),
-            source_description = opt_sql_literal(source_description.as_deref()),
-            purpose = opt_sql_literal(purpose.as_deref()),
             load_tool = sql_literal(load_tool),
             load_params = opt_sql_literal(load_params),
-            license = opt_sql_literal(license.as_deref()),
-            loaded_at = sql_literal(&format_timestamp(loaded_at)),
-            last_refreshed_at = sql_literal(&format_timestamp(last_refreshed_at)),
-            row_count = row_count.map_or_else(|| "NULL".into(), |n| n.to_string()),
-            notes = opt_sql_literal(notes.as_deref()),
+            loaded_at = sql_literal(&format_timestamp(now)),
+            last_refreshed_at = sql_literal(&format_timestamp(now)),
+            row_count = row_count_sql,
         );
-
         engine.execute_command(&insert_sql)?;
-        Ok(())
-    })?;
+    }
     Ok(())
 }
 
