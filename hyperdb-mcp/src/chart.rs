@@ -623,7 +623,12 @@ fn strip_shared_tz_suffix(labels: &[String]) -> Vec<String> {
     };
     labels
         .iter()
-        .map(|l| l.strip_suffix(suffix.as_str()).unwrap_or(l).trim().to_string())
+        .map(|l| {
+            l.strip_suffix(suffix.as_str())
+                .unwrap_or(l)
+                .trim()
+                .to_string()
+        })
         .collect()
 }
 
@@ -666,11 +671,7 @@ fn auto_tick_count(labels: &[String], chart_width: u32) -> usize {
     if labels.len() <= 1 {
         return labels.len();
     }
-    let max_chars = labels
-        .iter()
-        .map(|l| l.chars().count())
-        .max()
-        .unwrap_or(1);
+    let max_chars = labels.iter().map(|l| l.chars().count()).max().unwrap_or(1);
     tick_count_for_label_width(max_chars, chart_width).min(labels.len())
 }
 
@@ -834,13 +835,19 @@ fn parse_temporal(s: &str) -> Option<(TemporalKind, f64)> {
     ];
     for fmt in DT_FORMATS {
         if let Ok(dt) = NaiveDateTime::parse_from_str(s, fmt) {
-            return Some((TemporalKind::DateTime, Utc.from_utc_datetime(&dt).timestamp() as f64));
+            return Some((
+                TemporalKind::DateTime,
+                Utc.from_utc_datetime(&dt).timestamp() as f64,
+            ));
         }
     }
 
     if let Ok(date) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
         let dt = date.and_hms_opt(0, 0, 0)?;
-        return Some((TemporalKind::Date, Utc.from_utc_datetime(&dt).timestamp() as f64));
+        return Some((
+            TemporalKind::Date,
+            Utc.from_utc_datetime(&dt).timestamp() as f64,
+        ));
     }
 
     None
@@ -1529,32 +1536,29 @@ mod tests {
             "2026-05-03 18:30:00+00:00",
         ]);
         let stripped = strip_shared_tz_suffix(&labels);
-        assert_eq!(stripped, s(&[
-            "2026-05-01 08:00:00",
-            "2026-05-02 06:15:00",
-            "2026-05-03 18:30:00",
-        ]));
+        assert_eq!(
+            stripped,
+            s(&[
+                "2026-05-01 08:00:00",
+                "2026-05-02 06:15:00",
+                "2026-05-03 18:30:00",
+            ])
+        );
     }
 
     #[test]
     fn strip_shared_tz_suffix_handles_non_utc_offset() {
-        let labels = s(&[
-            "2026-05-01 08:00:00+05:30",
-            "2026-05-02 06:15:00+05:30",
-        ]);
+        let labels = s(&["2026-05-01 08:00:00+05:30", "2026-05-02 06:15:00+05:30"]);
         let stripped = strip_shared_tz_suffix(&labels);
-        assert_eq!(stripped, s(&[
-            "2026-05-01 08:00:00",
-            "2026-05-02 06:15:00",
-        ]));
+        assert_eq!(
+            stripped,
+            s(&["2026-05-01 08:00:00", "2026-05-02 06:15:00",])
+        );
     }
 
     #[test]
     fn strip_shared_tz_suffix_preserves_when_offsets_differ() {
-        let labels = s(&[
-            "2026-05-01 08:00:00+00:00",
-            "2026-05-02 06:15:00+05:30",
-        ]);
+        let labels = s(&["2026-05-01 08:00:00+00:00", "2026-05-02 06:15:00+05:30"]);
         let stripped = strip_shared_tz_suffix(&labels);
         assert_eq!(stripped, labels, "differing offsets must not be stripped");
     }
@@ -1655,11 +1659,9 @@ mod tests {
 
     #[test]
     fn parse_temporal_recognizes_timestamp() {
-        let (kind, secs1) =
-            parse_temporal("2026-05-01 08:00:00").expect("TIMESTAMP should parse");
+        let (kind, secs1) = parse_temporal("2026-05-01 08:00:00").expect("TIMESTAMP should parse");
         assert_eq!(kind, TemporalKind::DateTime);
-        let (_, secs2) =
-            parse_temporal("2026-05-01 12:30:00").expect("TIMESTAMP should parse");
+        let (_, secs2) = parse_temporal("2026-05-01 12:30:00").expect("TIMESTAMP should parse");
         // Same date, 4.5 hours apart.
         let delta = secs2 - secs1;
         assert!(
