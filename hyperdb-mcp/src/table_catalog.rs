@@ -63,6 +63,8 @@
 //!
 //! [`HyperMcpServer`]: crate::server::HyperMcpServer
 
+use std::fmt::Write as _;
+
 use crate::engine::{is_internal_table, Engine};
 use crate::error::{ErrorCode, McpError};
 use chrono::{DateTime, Utc};
@@ -133,6 +135,8 @@ pub struct CatalogEntry {
     pub last_refreshed_at: DateTime<Utc>,
     pub row_count: Option<i64>,
     pub notes: Option<String>,
+    pub created_by: Option<String>,
+    pub last_modified_by: Option<String>,
 }
 
 impl CatalogEntry {
@@ -153,6 +157,8 @@ impl CatalogEntry {
             "last_refreshed_at": self.last_refreshed_at.to_rfc3339(),
             "row_count": self.row_count,
             "notes": self.notes,
+            "created_by": self.created_by,
+            "last_modified_by": self.last_modified_by,
         })
     }
 }
@@ -198,7 +204,9 @@ const CATALOG_COLUMNS: &str = "(\
      loaded_at          TIMESTAMP NOT NULL, \
      last_refreshed_at  TIMESTAMP NOT NULL, \
      row_count          BIGINT, \
-     notes              TEXT\
+     notes              TEXT, \
+     created_by         TEXT, \
+     last_modified_by   TEXT\
  )";
 
 /// Idempotently create the backing table in `target_db`. Safe to call
@@ -225,6 +233,13 @@ pub fn ensure_exists_in(engine: &Engine, target_db: Option<&str>) -> Result<(), 
     };
     let ddl = format!("CREATE TABLE IF NOT EXISTS {qualified} {CATALOG_COLUMNS}");
     engine.execute_command(&ddl)?;
+    // Migrate pre-existing catalogs: add columns introduced after the
+    // initial schema. Each ALTER is idempotent — if the column already
+    // exists Hyper returns an error that we swallow.
+    for col in ["created_by TEXT", "last_modified_by TEXT"] {
+        let alter = format!("ALTER TABLE {qualified} ADD COLUMN {col}");
+        let _ = engine.execute_command(&alter);
+    }
     // After CREATE TABLE IF NOT EXISTS the catalog is guaranteed
     // present in this DB — short-circuit subsequent existence probes.
     if let Some(alias) = resolve_catalog_alias(engine, target_db) {
@@ -281,7 +296,7 @@ pub fn list_in(engine: &Engine, target_db: Option<&str>) -> Result<Vec<CatalogEn
     let sql = format!(
         "SELECT table_name, source_url, source_description, purpose, \
                 load_tool, load_params, license, loaded_at, last_refreshed_at, \
-                row_count, notes \
+                row_count, notes, created_by, last_modified_by \
          FROM {qualified} ORDER BY table_name"
     );
     let rows = engine.execute_query_to_json(&sql)?;
@@ -317,7 +332,7 @@ pub fn get_in(
     let sql = format!(
         "SELECT table_name, source_url, source_description, purpose, \
                 load_tool, load_params, license, loaded_at, last_refreshed_at, \
-                row_count, notes \
+                row_count, notes, created_by, last_modified_by \
          FROM {qualified} WHERE table_name = {}",
         sql_literal(table_name)
     );
@@ -374,6 +389,7 @@ pub fn upsert_stub_in(
     row_count: Option<i64>,
     bump_refresh: bool,
     target_db: Option<&str>,
+    client_name: Option<&str>,
 ) -> Result<(), McpError> {
     ensure_exists_in(engine, target_db)?;
     let Some(qualified) = qualified_catalog_in(engine, target_db) else {
@@ -382,26 +398,34 @@ pub fn upsert_stub_in(
 
     let now = Utc::now();
     let row_count_sql = row_count.map_or_else(|| "NULL".into(), |n: i64| n.to_string());
+    let client_sql = opt_sql_literal(client_name);
 
     // Step 1: UPDATE mechanical fields on the existing row. Prose
-    // fields are left untouched. Returns affected_rows > 0 if the
-    // row existed.
+    // fields are left untouched. `created_by` is never overwritten.
     let set_clauses = if bump_refresh {
-        format!(
+        let mut s = format!(
             "load_tool = {}, load_params = {}, row_count = {}, \
              last_refreshed_at = TIMESTAMP {}",
             sql_literal(load_tool),
             opt_sql_literal(load_params),
             row_count_sql,
             sql_literal(&format_timestamp(now)),
-        )
+        );
+        if let Some(name) = client_name {
+            let _ = write!(s, ", last_modified_by = {}", sql_literal(name));
+        }
+        s
     } else {
-        format!(
+        let mut s = format!(
             "load_tool = {}, load_params = {}, row_count = {}",
             sql_literal(load_tool),
             opt_sql_literal(load_params),
             row_count_sql,
-        )
+        );
+        if let Some(name) = client_name {
+            let _ = write!(s, ", last_modified_by = {}", sql_literal(name));
+        }
+        s
     };
 
     let update_sql = format!(
@@ -419,10 +443,11 @@ pub fn upsert_stub_in(
         let insert_sql = format!(
             "INSERT INTO {qualified} \
              (table_name, source_url, source_description, purpose, load_tool, \
-              load_params, license, loaded_at, last_refreshed_at, row_count, notes) \
+              load_params, license, loaded_at, last_refreshed_at, row_count, notes, \
+              created_by, last_modified_by) \
              SELECT {name}, NULL, NULL, NULL, {load_tool}, \
                     {load_params}, NULL, TIMESTAMP {loaded_at}, TIMESTAMP {last_refreshed_at}, \
-                    {row_count}, NULL \
+                    {row_count}, NULL, {created_by}, {modified_by} \
              WHERE NOT EXISTS (SELECT 1 FROM {qualified} WHERE table_name = {name})",
             name = sql_literal(table_name),
             load_tool = sql_literal(load_tool),
@@ -430,6 +455,8 @@ pub fn upsert_stub_in(
             loaded_at = sql_literal(&format_timestamp(now)),
             last_refreshed_at = sql_literal(&format_timestamp(now)),
             row_count = row_count_sql,
+            created_by = client_sql,
+            modified_by = client_sql,
         );
         engine.execute_command(&insert_sql)?;
     }
@@ -456,6 +483,7 @@ pub fn upsert_stub(
         load_params,
         row_count,
         bump_refresh,
+        None,
         None,
     )
 }
@@ -651,7 +679,9 @@ pub fn reconcile_in(engine: &Engine, target_db: Option<&str>) -> Result<(), McpE
         if catalog_names.contains(table) {
             refresh_row_count_in(engine, table, row_count, target_db)?;
         } else {
-            upsert_stub_in(engine, table, "unknown", None, row_count, false, target_db)?;
+            upsert_stub_in(
+                engine, table, "unknown", None, row_count, false, target_db, None,
+            )?;
         }
     }
     Ok(())
@@ -843,6 +873,8 @@ fn row_to_entry(row: &Value) -> Result<CatalogEntry, McpError> {
         last_refreshed_at,
         row_count,
         notes: str_field("notes"),
+        created_by: str_field("created_by"),
+        last_modified_by: str_field("last_modified_by"),
     })
 }
 
