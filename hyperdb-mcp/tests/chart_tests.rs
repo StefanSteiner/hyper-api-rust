@@ -107,13 +107,14 @@ fn line_chart_categorical_x() {
     let result = render_chart(&rows, &opts).unwrap();
     assert_eq!(result.rows_plotted, 5);
     assert_eq!(result.mime_type, "image/png");
-    // Without x_as_category this would fail the numeric-parse check.
+    // Without explicit x_as_category, auto-detection kicks in and
+    // recognizes the string x column as categorical.
     let without_category = ChartOptions {
         x_as_category: None,
         ..opts
     };
-    let err = render_chart(&rows, &without_category).unwrap_err();
-    assert!(err.message.contains("not numeric"));
+    let result2 = render_chart(&rows, &without_category).unwrap();
+    assert_eq!(result2.rows_plotted, 5);
 }
 
 /// Scatter chart with no series column renders every row as one series.

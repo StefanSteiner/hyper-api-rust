@@ -10,8 +10,8 @@
 //! # Supported Chart Types
 //!
 //! - **Bar** — categorical x-axis by default; multi-series supported via `series` column.
-//! - **Line** — numeric x-axis by default; set `x_as_category = true` for DATE/string x.
-//! - **Scatter** — numeric x-axis by default; same `x_as_category` option as line.
+//! - **Line** — auto-detects categorical x (DATE/TIMESTAMP/TEXT); override with `x_as_category`.
+//! - **Scatter** — same auto-detection as line.
 //! - **Histogram** — single numeric column binned into N buckets (default 20).
 //!
 //! # Rendering Pipeline
@@ -879,9 +879,15 @@ where
 {
     let x_col = require_column(&opts.x_column, "x")?;
     let y_col = require_column(&opts.y_column, "y")?;
-    // Line and scatter default to numeric x; callers with non-numeric x
-    // (dates, labels, enums) opt in via `ChartOptions::x_as_category`.
-    let x_as_category = opts.x_as_category.unwrap_or(false);
+    // Auto-detect categorical x: if the caller didn't explicitly set
+    // x_as_category and the first row's x value isn't numeric (e.g.
+    // DATE, TIMESTAMP, TEXT), flip to categorical mode automatically.
+    let x_as_category = opts.x_as_category.unwrap_or_else(|| {
+        rows.first()
+            .and_then(Value::as_object)
+            .and_then(|obj| obj.get(x_col))
+            .is_some_and(|v| as_number(v).is_none())
+    });
     let groups = group_series(
         rows,
         x_col,
