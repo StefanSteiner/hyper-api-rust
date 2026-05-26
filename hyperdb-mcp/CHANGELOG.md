@@ -107,6 +107,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `Engine::catalog_present_cache` field shape: `Mutex<Option<bool>>` → `Mutex<HashMap<String, bool>>` keyed by lowercased alias.
 - New `Engine::clear_catalog_cache_for(alias)` paired with `detach_database`.
 - `table_catalog::ensure_exists_in_database(engine, alias)` is now a deprecated wrapper over `ensure_exists_in(engine, Some(alias))`.
+- **Attach aliases are canonicalized to lowercase at attach time.**
+  `attach_database(alias="MyDB", …)` now stores `"mydb"` in the registry,
+  and `Engine::resolve_target_db` returns the lowercase form for any
+  alias. Eliminates the latent footgun where attaching as `"User_DB"`
+  and detaching as `"user_db"` silently no-op'd while leaving the
+  catalog-presence cache populated. Affects users who relied on
+  case-sensitive registry distinctness — pre-1.0, no migration is
+  shipped.
 
 ### Removed
 
@@ -132,6 +140,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   one retry on a fresh pool; persistent failures still flow into the
   standard `failed/` move so a single broken file can't pin the
   watcher in retry loops.
+- **`execute` now reconciles the user-attached target's `_table_catalog`.**
+  Pre-fix, raw DDL like `execute(database="foo", sql="DROP TABLE bar")`
+  removed the table from the user-attached DB but left its stub row
+  stranded in `"foo"."public"."_table_catalog"` indefinitely (bootstrap
+  reconcile and the post-execute reconcile both walked persistent
+  only). `after_execute_catalog_update` now reconciles persistent
+  first and then the user-attached target if non-persistent. Gated on
+  `is_structural_sql` (CREATE / DROP / ALTER / TRUNCATE / RENAME) so
+  per-row `INSERT` / `UPDATE` / `DELETE` no longer triggers a
+  workspace-wide catalog scan on every call.
+- **`copy_query.target_database` now canonicalizes mixed-case aliases.**
+  Pre-fix, `attach_database(alias="My_DB")` (which the registry stores
+  as `"my_db"` after the alias-canonicalization change) followed by
+  `copy_query(target_database="My_DB")` rendered SQL referring to
+  `"My_DB"` and Hyper rejected it with "database does not exist"
+  (Hyper is case-sensitive on quoted identifiers). The tool now
+  lowercases `target_database` after the `LOCAL_ALIAS` filter so the
+  registry lookup AND the qualified-SQL build path agree on the
+  canonical lowercase form.
 
 ## [0.1.1] - 2026-05-13
 

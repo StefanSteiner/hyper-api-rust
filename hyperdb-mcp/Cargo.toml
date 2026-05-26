@@ -51,6 +51,13 @@ workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
+# `client` feature unlocks `ClientHandler` and the raw
+# `client.call_tool(...)` entry point. The end-to-end MCP test
+# harness in `tests/end_to_end_mcp_tests.rs` connects an in-memory
+# `tokio::io::duplex` pair so tool calls exercise the full rmcp
+# dispatch path (params deserialization, request-context plumbing,
+# error mapping) rather than skipping straight to the engine layer.
+rmcp = { version = "1.7", features = ["server", "transport-io", "client"] }
 
 [build-dependencies]
 # Build-time only: used to stamp dirty builds with an ISO-8601 basic UTC
