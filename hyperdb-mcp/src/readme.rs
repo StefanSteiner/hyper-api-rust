@@ -216,6 +216,19 @@ differences from standard PostgreSQL:
 - **`TOP N`** is accepted alongside `LIMIT`.
 - **No AI scalar functions** (`AI_CLASSIFY`, `AI_SENTIMENT`, etc. — those
   are Data Cloud federation features, not Hyper).
+- **No `ON CONFLICT` / `INSERT ... ON DUPLICATE KEY`** — Hyper does not
+  support upsert syntax. Use a two-statement pattern instead:
+  ```
+  UPDATE target SET col = val WHERE key = 'x';
+  INSERT INTO target (key, col)
+    SELECT 'x', val
+    WHERE NOT EXISTS (SELECT 1 FROM target WHERE key = 'x');
+  ```
+  Hyper supports transactions (`BEGIN` / `COMMIT` / `ROLLBACK`), but
+  the MCP `execute` tool runs one statement per call and each call
+  auto-commits. The pattern is still race-safe because `hyperd`
+  serializes statements on the same database. Call `execute` twice
+  (one UPDATE, one INSERT).
 
 Full reference: https://developer.salesforce.com/docs/data/data-cloud-query-guide/references/dc-sql-reference
 
@@ -264,6 +277,17 @@ load_file({
   \"table\": \"extract_timing_failures\",
   \"mode\": \"merge\",
   \"merge_key\": \"job_id\"
+})
+
+// Upsert (ON CONFLICT is not supported — use UPDATE + INSERT WHERE NOT EXISTS)
+execute({
+  \"sql\": \"UPDATE settings SET value = 'dark' WHERE key = 'theme'\",
+  \"database\": \"persistent\"
+})
+execute({
+  \"sql\": \"INSERT INTO settings (key, value) SELECT 'theme', 'dark' \
+           WHERE NOT EXISTS (SELECT 1 FROM settings WHERE key = 'theme')\",
+  \"database\": \"persistent\"
 })
 
 // Chart

@@ -741,6 +741,24 @@ Semantics:
 
 Hyper uses the Salesforce Data Cloud SQL dialect (PostgreSQL-compatible with extensions). Supports `SELECT`, JOINs, subqueries, CTEs, window functions, aggregations, DDL, DML, and `COPY FROM`.
 
+### Upserts (INSERT or UPDATE)
+
+Hyper does **not** support `ON CONFLICT` or `INSERT ... ON DUPLICATE KEY`. Use a two-statement pattern instead:
+
+```sql
+-- Update existing row (no-op if it doesn't exist)
+UPDATE settings SET value = 'dark' WHERE key = 'theme';
+
+-- Insert only if the row doesn't already exist
+INSERT INTO settings (key, value)
+  SELECT 'theme', 'dark'
+  WHERE NOT EXISTS (SELECT 1 FROM settings WHERE key = 'theme');
+```
+
+Hyper supports transactions (`BEGIN` / `COMMIT` / `ROLLBACK`) at the API level, but the MCP `execute` tool runs one statement per call and each call auto-commits. The pattern is still race-safe because `hyperd` serializes statements on the same database — no interleaving between the UPDATE and INSERT. Call `execute` twice (one UPDATE, one INSERT).
+
+> **Tip:** For file-based upserts (merging updated data from a CSV/JSON file into an existing table), use `load_file` with `mode: "merge"` and a `merge_key` instead of writing manual SQL — it handles the UPDATE/INSERT logic automatically and also auto-adds new columns.
+
 Full reference: [Data Cloud SQL Reference](https://developer.salesforce.com/docs/data/data-cloud-query-guide/references/dc-sql-reference/data-cloud-sql-context.html)
 
 ---
