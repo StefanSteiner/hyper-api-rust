@@ -98,7 +98,10 @@ watcher targets the alias; call `unwatch_directory` first.
 - `query` — run a read-only SELECT / WITH / EXPLAIN / SHOW / VALUES.
 - `execute` — run one or more DDL/DML statements as an atomic batch.
   `sql` is an array; multi-element batches run inside a transaction
-  (all commit or all roll back). Disabled in read-only mode.
+  (all commit or all roll back). Response shape:
+  `{ statements, affected_rows, per_statement: [{sql, affected_rows,
+  elapsed_ms}], stats: {operation, elapsed_ms} }`. Disabled in
+  read-only mode.
 - `query_data` — ingest inline JSON or CSV and run one SQL query in a
   single call (table is temporary).
 - `query_file` — same as `query_data` but reads from a file path. The

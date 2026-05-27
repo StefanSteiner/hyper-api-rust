@@ -2250,61 +2250,68 @@ impl HyperMcpServer {
                 None => None,
             };
             let total_timer = crate::stats::StatsTimer::start();
-            let (per_statement, operation): (Vec<Value>, &'static str) = if params.sql.len() == 1 {
-                // Singletons skip BEGIN/COMMIT — same auto-commit behavior
-                // as the pre-batch `execute` tool, and DDL singletons stay
-                // legal (Hyper auto-commits DDL anyway).
-                let stmt = &params.sql[0];
-                let t = crate::stats::StatsTimer::start();
-                let affected = engine.execute_command(stmt)?;
-                (
-                    vec![json!({
-                        "sql": Self::fmt_sql(stmt),
-                        "affected_rows": affected,
-                        "elapsed_ms": t.elapsed_ms(),
-                    })],
-                    "command",
-                )
-            } else {
-                let stmts = &params.sql;
-                let results = engine.execute_in_transaction(|engine| {
-                    let mut out = Vec::with_capacity(stmts.len());
-                    for (idx, stmt) in stmts.iter().enumerate() {
-                        let t = crate::stats::StatsTimer::start();
-                        let affected = engine.execute_command(stmt).map_err(|e| {
-                            // Preserve the original error's code AND its
-                            // suggestion (e.g. Hyper's "did you mean
-                            // <column>?") — append the rollback context
-                            // rather than replacing it.
-                            let rollback_note = format!(
-                                "Failing SQL: {sql}. All previous statements in this batch were rolled back.",
-                                sql = Self::fmt_sql(stmt)
-                            );
-                            let combined = match e.suggestion.as_deref() {
-                                Some(orig) => format!("{orig} | {rollback_note}"),
-                                None => rollback_note,
-                            };
-                            McpError::new(
-                                e.code,
-                                format!(
-                                    "statement {} of {} failed: {}",
-                                    idx + 1,
-                                    stmts.len(),
-                                    e.message
-                                ),
-                            )
-                            .with_suggestion(combined)
-                        })?;
-                        out.push(json!({
+            let (per_statement, affected_total, operation): (Vec<Value>, u64, &'static str) =
+                if params.sql.len() == 1 {
+                    // Singletons skip BEGIN/COMMIT — same auto-commit behavior
+                    // as the pre-batch `execute` tool, and DDL singletons stay
+                    // legal (Hyper auto-commits DDL anyway).
+                    let stmt = &params.sql[0];
+                    let t = crate::stats::StatsTimer::start();
+                    let affected = engine.execute_command(stmt)?;
+                    (
+                        vec![json!({
                             "sql": Self::fmt_sql(stmt),
                             "affected_rows": affected,
                             "elapsed_ms": t.elapsed_ms(),
-                        }));
-                    }
-                    Ok(out)
-                })?;
-                (results, "transaction")
-            };
+                        })],
+                        affected,
+                        "command",
+                    )
+                } else {
+                    let stmts = &params.sql;
+                    let (results, total) = engine.execute_in_transaction(|engine| {
+                        let mut out = Vec::with_capacity(stmts.len());
+                        let mut total: u64 = 0;
+                        for (idx, stmt) in stmts.iter().enumerate() {
+                            let t = crate::stats::StatsTimer::start();
+                            let affected = engine.execute_command(stmt).map_err(|e| {
+                                // Preserve the original error's code AND its
+                                // suggestion (e.g. Hyper's "did you mean
+                                // <column>?") — append the rollback context
+                                // rather than replacing it.
+                                let rollback_note = format!(
+                                    "Failing SQL: {sql}. All previous statements in this batch were rolled back.",
+                                    sql = Self::fmt_sql(stmt)
+                                );
+                                let combined = match e.suggestion.as_deref() {
+                                    Some(orig) => format!("{orig} | {rollback_note}"),
+                                    None => rollback_note,
+                                };
+                                McpError::new(
+                                    e.code,
+                                    format!(
+                                        "statement {} of {} failed: {}",
+                                        idx + 1,
+                                        stmts.len(),
+                                        e.message
+                                    ),
+                                )
+                                .with_suggestion(combined)
+                            })?;
+                            // saturating_add: a single batch summing to >2^64 rows
+                            // is implausible, but clamp rather than wrap on the
+                            // off chance — wrap-around would silently undercount.
+                            total = total.saturating_add(affected);
+                            out.push(json!({
+                                "sql": Self::fmt_sql(stmt),
+                                "affected_rows": affected,
+                                "elapsed_ms": t.elapsed_ms(),
+                            }));
+                        }
+                        Ok((out, total))
+                    })?;
+                    (results, total, "transaction")
+                };
             let elapsed = total_timer.elapsed_ms();
             // Reconcile only when the batch contains a statement that
             // could have changed the set of tables (CREATE / DROP /
@@ -2321,10 +2328,6 @@ impl HyperMcpServer {
             if any_structural {
                 self.after_execute_catalog_update(engine, target_db.as_deref());
             }
-            let affected_total: u64 = per_statement
-                .iter()
-                .filter_map(|v| v.get("affected_rows").and_then(Value::as_u64))
-                .sum();
             Ok(json!({
                 "statements": per_statement.len(),
                 "affected_rows": affected_total,
@@ -4285,13 +4288,14 @@ fn validate_execute_batch(stmts: &[String]) -> Result<(), McpError> {
             )
             .with_suggestion("Remove the empty element or replace it with a real statement."));
         }
-        first_statement_only(stmt).map_err(|e| {
-            McpError::new(e.code, format!("`sql[{idx}]`: {}", e.message)).with_suggestion(
-                e.suggestion.unwrap_or_else(|| {
-                    "Split semicolon-separated statements into separate array elements.".to_string()
-                }),
-            )
-        })?;
+        // Classification first — this is comment-aware and only inspects
+        // the leading keyword, so it returns a meaningful answer even
+        // for multi-statement input. We want the read-only / DDL-mix
+        // / transaction-control errors to fire BEFORE the
+        // "exactly-one-statement" error, otherwise an LLM that passed
+        // `"SELECT 1; SELECT 2"` is told to split into separate array
+        // elements first, and only on the retry learns it should have
+        // used the `query` tool.
         match classify_statement(stmt) {
             StatementKind::ReadOnly => {
                 return Err(McpError::new(
@@ -4326,6 +4330,13 @@ fn validate_execute_batch(stmts: &[String]) -> Result<(), McpError> {
             StatementKind::Dml => has_data_mutation = true,
             StatementKind::Other => {}
         }
+        first_statement_only(stmt).map_err(|e| {
+            McpError::new(e.code, format!("`sql[{idx}]`: {}", e.message)).with_suggestion(
+                e.suggestion.unwrap_or_else(|| {
+                    "Split semicolon-separated statements into separate array elements.".to_string()
+                }),
+            )
+        })?;
     }
 
     if has_schema_change && has_data_mutation {

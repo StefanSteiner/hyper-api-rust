@@ -1714,8 +1714,8 @@ pub fn is_read_only_sql(sql: &str) -> bool {
 /// Used by the atomic-batch `execute` tool to enforce the rule "a batch
 /// must be either all-DDL singletons or all-DML; mixing the two aborts
 /// the transaction with SQLSTATE 0A000". The first-keyword heuristic
-/// matches what `is_read_only_sql` and the legacy `is_structural_sql`
-/// already trust elsewhere in the codebase.
+/// matches what `is_read_only_sql` already trusts elsewhere in the
+/// codebase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatementKind {
     /// `SELECT` / `WITH` / `EXPLAIN` / `SHOW` / `VALUES`.
@@ -1734,6 +1734,13 @@ pub enum StatementKind {
     Other,
 }
 
+/// Coarse-classify the first SQL statement in `sql` after stripping
+/// leading whitespace and line/block comments.
+///
+/// First-keyword only: a `WITH x AS (DELETE …) SELECT …` CTE is
+/// classified as `ReadOnly` even though it mutates. Hyper itself
+/// rejects data-modifying CTEs, so this is a defense-in-depth heuristic
+/// rather than the only barrier.
 #[must_use]
 pub fn classify_statement(sql: &str) -> StatementKind {
     let stripped = strip_leading_sql_comments(sql);
