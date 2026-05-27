@@ -304,7 +304,7 @@ async fn tool_watch_directory_persist_via_router_now_works() -> TestResult {
         &h.client,
         "execute",
         serde_json::json!({
-            "sql": "CREATE TABLE \"persistent\".\"public\".\"w_events\" (id INT, name TEXT)"
+            "sql": ["CREATE TABLE \"persistent\".\"public\".\"w_events\" (id INT, name TEXT)"]
         }),
     )
     .await?;
@@ -596,7 +596,7 @@ async fn tool_detach_database_rejects_when_watcher_active() -> TestResult {
         &h.client,
         "execute",
         serde_json::json!({
-            "sql": "CREATE TABLE \"user_db\".\"public\".\"events\" (id INT, name TEXT)"
+            "sql": ["CREATE TABLE \"user_db\".\"public\".\"events\" (id INT, name TEXT)"]
         }),
     )
     .await?;
@@ -703,5 +703,165 @@ async fn tool_copy_query_target_database_mixed_case_canonicalizes() -> TestResul
         "row must land in canonical lowercase database; got: {body}"
     );
 
+    h.shutdown().await
+}
+
+// =====================================================================
+// Atomic multi-statement execute — exercises the full MCP handler
+// path including validation, the transaction wrapper, the search-path
+// guard, and the response envelope. The engine-level primitive is
+// already covered in transaction_tests.rs; these tests guard the glue.
+// =====================================================================
+
+/// Multi-statement upsert via the MCP `execute` tool: both statements
+/// commit together, the response carries `per_statement` entries and a
+/// summed `affected_rows`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_execute_multi_statement_upsert_commits_atomically() -> TestResult {
+    let h = TestHarness::start(false, false).await?;
+
+    let r = call_tool(
+        &h.client,
+        "execute",
+        serde_json::json!({
+            "sql": ["CREATE TABLE settings (key TEXT NOT NULL, value TEXT NOT NULL)"]
+        }),
+    )
+    .await?;
+    assert!(!is_error(&r), "create table failed: {:?}", first_text(&r));
+
+    // Atomic upsert. INSERT lands because the row is missing.
+    let r = call_tool(
+        &h.client,
+        "execute",
+        serde_json::json!({
+            "sql": [
+                "UPDATE settings SET value = 'dark' WHERE key = 'theme'",
+                "INSERT INTO settings (key, value) SELECT 'theme', 'dark' \
+                   WHERE NOT EXISTS (SELECT 1 FROM settings WHERE key = 'theme')"
+            ]
+        }),
+    )
+    .await?;
+    assert!(!is_error(&r), "upsert failed: {:?}", first_text(&r));
+    let body = all_text(&r);
+    assert!(
+        body.contains("\"statements\": 2") || body.contains("\"statements\":2"),
+        "response must report 2 statements; got: {body}"
+    );
+    assert!(
+        body.contains("\"operation\": \"transaction\"")
+            || body.contains("\"operation\":\"transaction\""),
+        "response stats must report a transaction; got: {body}"
+    );
+
+    let q = call_tool(
+        &h.client,
+        "query",
+        serde_json::json!({
+            "sql": "SELECT value FROM settings WHERE key = 'theme'"
+        }),
+    )
+    .await?;
+    let body = all_text(&q);
+    assert!(body.contains("dark"), "row not committed: {body}");
+
+    h.shutdown().await
+}
+
+/// Mid-batch failure rolls back through the MCP handler. The error
+/// response names the failing statement index, and the table is
+/// observable as empty after the error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_execute_multi_statement_rolls_back_on_failure() -> TestResult {
+    let h = TestHarness::start(false, false).await?;
+
+    let r = call_tool(
+        &h.client,
+        "execute",
+        serde_json::json!({
+            "sql": ["CREATE TABLE t (id INT NOT NULL)"]
+        }),
+    )
+    .await?;
+    assert!(!is_error(&r), "create table failed: {:?}", first_text(&r));
+
+    // The second INSERT violates NOT NULL — entire batch must roll back.
+    let r = call_tool(
+        &h.client,
+        "execute",
+        serde_json::json!({
+            "sql": [
+                "INSERT INTO t (id) VALUES (1)",
+                "INSERT INTO t (id) VALUES (NULL)"
+            ]
+        }),
+    )
+    .await?;
+    assert!(is_error(&r), "expected rollback error, got success");
+    let body = all_text(&r);
+    assert!(
+        body.contains("statement 2 of 2 failed"),
+        "error must name failing index; got: {body}"
+    );
+
+    let q = call_tool(
+        &h.client,
+        "query",
+        serde_json::json!({"sql": "SELECT COUNT(*) AS n FROM t"}),
+    )
+    .await?;
+    let body = all_text(&q);
+    assert!(
+        body.contains("\"n\":0") || body.contains("\"n\": 0"),
+        "first INSERT must have rolled back; got: {body}"
+    );
+
+    h.shutdown().await
+}
+
+/// Validation rejects DDL+DML mixing before any SQL is sent to hyperd.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_execute_rejects_ddl_dml_mix() -> TestResult {
+    let h = TestHarness::start(false, false).await?;
+    let r = call_tool(
+        &h.client,
+        "execute",
+        serde_json::json!({
+            "sql": ["CREATE TABLE x (i INT)", "INSERT INTO x VALUES (1)"]
+        }),
+    )
+    .await?;
+    assert!(is_error(&r), "DDL+DML mix must be rejected up front");
+    let body = all_text(&r);
+    assert!(
+        body.to_lowercase().contains("ddl") && body.to_lowercase().contains("dml"),
+        "error must explain the rule; got: {body}"
+    );
+    h.shutdown().await
+}
+
+/// Single-element batch keeps auto-commit behavior; response reports
+/// `operation: "command"` so callers can still distinguish singletons
+/// from transactions when needed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_execute_singleton_uses_auto_commit_path() -> TestResult {
+    let h = TestHarness::start(false, false).await?;
+    let r = call_tool(
+        &h.client,
+        "execute",
+        serde_json::json!({"sql": ["CREATE TABLE t (i INT)"]}),
+    )
+    .await?;
+    assert!(!is_error(&r), "create failed: {:?}", first_text(&r));
+    let body = all_text(&r);
+    assert!(
+        body.contains("\"operation\": \"command\"") || body.contains("\"operation\":\"command\""),
+        "singleton must report operation=command; got: {body}"
+    );
+    assert!(
+        body.contains("\"statements\": 1") || body.contains("\"statements\":1"),
+        "singleton must report statements=1; got: {body}"
+    );
     h.shutdown().await
 }

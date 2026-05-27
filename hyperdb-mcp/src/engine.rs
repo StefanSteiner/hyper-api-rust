@@ -1706,21 +1706,63 @@ fn translate_table_missing(err: McpError, table_name: &str) -> McpError {
 /// rather than the sole security boundary.
 #[must_use]
 pub fn is_read_only_sql(sql: &str) -> bool {
+    matches!(classify_statement(sql), StatementKind::ReadOnly)
+}
+
+/// Coarse classification of a single SQL statement, comment-aware.
+///
+/// Used by the atomic-batch `execute` tool to enforce the rule "a batch
+/// must be either all-DDL singletons or all-DML; mixing the two aborts
+/// the transaction with SQLSTATE 0A000". The first-keyword heuristic
+/// matches what `is_read_only_sql` already trusts elsewhere in the
+/// codebase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatementKind {
+    /// `SELECT` / `WITH` / `EXPLAIN` / `SHOW` / `VALUES`.
+    ReadOnly,
+    /// `CREATE` / `DROP` / `ALTER` / `TRUNCATE` / `RENAME` — Hyper auto-commits.
+    Ddl,
+    /// `INSERT` / `UPDATE` / `DELETE` / `COPY` / `MERGE` — transactional.
+    Dml,
+    /// `BEGIN` / `START` / `COMMIT` / `END` / `ROLLBACK` / `ABORT` /
+    /// `SAVEPOINT` / `RELEASE`. Rejected inside a batch because the
+    /// `execute` tool already manages the transaction; an explicit
+    /// COMMIT mid-batch would defeat atomicity.
+    TransactionControl,
+    /// Empty/comment-only input or an unrecognized first keyword. Treated
+    /// as opaque by the batch validator (passed through to Hyper).
+    Other,
+}
+
+/// Coarse-classify the first SQL statement in `sql` after stripping
+/// leading whitespace and line/block comments.
+///
+/// First-keyword only: a `WITH x AS (DELETE …) SELECT …` CTE is
+/// classified as `ReadOnly` even though it mutates. Hyper itself
+/// rejects data-modifying CTEs, so this is a defense-in-depth heuristic
+/// rather than the only barrier.
+#[must_use]
+pub fn classify_statement(sql: &str) -> StatementKind {
     let stripped = strip_leading_sql_comments(sql);
     let first_token: String = stripped
         .chars()
         .take_while(|c| c.is_alphabetic())
         .flat_map(char::to_uppercase)
         .collect();
-    matches!(
-        first_token.as_str(),
-        "SELECT" | "WITH" | "EXPLAIN" | "SHOW" | "VALUES"
-    )
+    match first_token.as_str() {
+        "SELECT" | "WITH" | "EXPLAIN" | "SHOW" | "VALUES" => StatementKind::ReadOnly,
+        "CREATE" | "DROP" | "ALTER" | "TRUNCATE" | "RENAME" => StatementKind::Ddl,
+        "INSERT" | "UPDATE" | "DELETE" | "COPY" | "MERGE" => StatementKind::Dml,
+        "BEGIN" | "START" | "COMMIT" | "END" | "ROLLBACK" | "ABORT" | "SAVEPOINT" | "RELEASE" => {
+            StatementKind::TransactionControl
+        }
+        _ => StatementKind::Other,
+    }
 }
 
 /// Strips leading whitespace, line comments (`--`), and block comments (`/* */`)
 /// from SQL text. Handles nested block comments.
-fn strip_leading_sql_comments(sql: &str) -> &str {
+pub(crate) fn strip_leading_sql_comments(sql: &str) -> &str {
     let mut s = sql;
     loop {
         s = s.trim_start();
@@ -1842,5 +1884,66 @@ fn home_dir() -> Option<PathBuf> {
         Some(combined)
     } else {
         std::env::var_os("HOME").map(PathBuf::from)
+    }
+}
+
+#[cfg(test)]
+mod statement_helper_tests {
+    use super::*;
+
+    #[test]
+    fn classify_statement_recognizes_each_kind() {
+        assert_eq!(classify_statement("SELECT 1"), StatementKind::ReadOnly);
+        assert_eq!(
+            classify_statement("with x as (..) select * from x"),
+            StatementKind::ReadOnly
+        );
+        assert_eq!(
+            classify_statement("CREATE TABLE t (i INT)"),
+            StatementKind::Ddl
+        );
+        assert_eq!(classify_statement("drop table t"), StatementKind::Ddl);
+        assert_eq!(
+            classify_statement("INSERT INTO t VALUES (1)"),
+            StatementKind::Dml
+        );
+        assert_eq!(classify_statement("update t set i = 2"), StatementKind::Dml);
+        assert_eq!(classify_statement("delete from t"), StatementKind::Dml);
+        assert_eq!(classify_statement(""), StatementKind::Other);
+    }
+
+    #[test]
+    fn classify_statement_recognizes_transaction_control() {
+        for kw in [
+            "BEGIN",
+            "Begin transaction",
+            "START TRANSACTION",
+            "COMMIT",
+            "Commit work",
+            "END",
+            "ROLLBACK",
+            "Rollback to savepoint sp1",
+            "ABORT",
+            "SAVEPOINT sp1",
+            "RELEASE SAVEPOINT sp1",
+        ] {
+            assert_eq!(
+                classify_statement(kw),
+                StatementKind::TransactionControl,
+                "expected TransactionControl for `{kw}`"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_statement_strips_comments() {
+        assert_eq!(
+            classify_statement("/* harmless */ DROP TABLE t"),
+            StatementKind::Ddl
+        );
+        assert_eq!(
+            classify_statement("-- pretend to be readonly\nINSERT INTO t VALUES (1)"),
+            StatementKind::Dml
+        );
     }
 }
