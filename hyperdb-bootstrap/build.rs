@@ -37,8 +37,20 @@ fn main() {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "unknown".to_string());
+    // Exclude Cargo.lock from the dirty check — release-please bumps
+    // workspace versions in Cargo.toml but not Cargo.lock, so cargo
+    // rewrites the lockfile in-place at CI build time on the release
+    // tag, which would otherwise stamp a `-dirty` marker on every
+    // released binary. See the matching block in
+    // `hyperdb-mcp/build.rs` for the full rationale.
     let dirty = Command::new("git")
-        .args(["status", "--porcelain", "-uno"])
+        .args([
+            "status",
+            "--porcelain",
+            "-uno",
+            "--",
+            ":(exclude,top)Cargo.lock",
+        ])
         .output()
         .ok()
         .filter(|o| o.status.success())

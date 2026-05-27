@@ -29,6 +29,9 @@
 //! Falls back to `unknown` on any failure (no git binary, not a repo,
 //! detached state, etc.) so the crate still builds for consumers who
 //! obtained the source as a tarball.
+//!
+//! `Cargo.lock` is excluded from the dirty check via a git pathspec —
+//! see the inline comment by the `git status` invocation for why.
 
 use std::process::Command;
 
@@ -56,8 +59,33 @@ fn main() {
     // Otherwise uncommitted `.cursor/` configs or IDE scratch files would
     // permanently mark every build dirty even though the source tree
     // itself matches HEAD.
+    //
+    // We also exclude `Cargo.lock` from the dirty check via a pathspec.
+    // Rationale: release-please bumps `[workspace.package].version` in
+    // `Cargo.toml` but does NOT update `Cargo.lock`. When CI checks
+    // out the release tag and runs `cargo build --release`, cargo
+    // silently reconciles the lockfile in-place, dirtying the
+    // worktree. Without the exclude, every release binary gets
+    // stamped `<hash>-dirty-<timestamp>` even though the source is
+    // pristine. Cargo.lock churn at build time is not a logical
+    // source change and shouldn't trip the marker. Any *other*
+    // modified tracked file (including a deliberately-edited
+    // Cargo.lock alongside a code change) still trips it because
+    // `git status --porcelain` will list it.
+    //
+    // `:(exclude,top)` is git's portable long-form pathspec magic:
+    // `top` anchors at the repo root (so a hypothetical sub-crate
+    // sample lockfile wouldn't match) and `exclude` inverts. Both
+    // magic words are supported on every git version GitHub Actions
+    // runners ship (≥ 2.39).
     let dirty = Command::new("git")
-        .args(["status", "--porcelain", "-uno"])
+        .args([
+            "status",
+            "--porcelain",
+            "-uno",
+            "--",
+            ":(exclude,top)Cargo.lock",
+        ])
         .output()
         .ok()
         .filter(|o| o.status.success())
