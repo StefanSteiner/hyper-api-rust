@@ -13,9 +13,7 @@
 
 use crate::attach::{self, AttachRegistry, AttachRequest, AttachSource, LOCAL_ALIAS};
 use crate::chart::{render_chart, ChartFormat, ChartOptions, ChartType};
-use crate::engine::{
-    classify_statement, first_statement_only, is_read_only_sql, Engine, StatementKind,
-};
+use crate::engine::{classify_statement, is_read_only_sql, Engine, StatementKind};
 use crate::error::{ErrorCode, McpError};
 use crate::export::{export_to_file, ExportOptions};
 use crate::ingest::{
@@ -4255,17 +4253,24 @@ Full SQL reference: https://developer.salesforce.com/docs/data/data-cloud-query-
 /// Rules:
 /// 1. Non-empty array.
 /// 2. Each element non-empty and not comment-only after stripping comments.
-/// 3. Each element contains exactly one statement (uses `first_statement_only`).
-/// 4. No element is read-only (steer LLMs to the `query` tool).
+/// 3. No element is read-only (steer LLMs to the `query` tool).
+/// 4. No element is an explicit transaction-control statement
+///    (BEGIN / COMMIT / ROLLBACK / SAVEPOINT) — the wrapper manages
+///    the transaction.
 /// 5. No batch mixes DDL with DML — Hyper aborts mixed transactions with
 ///    SQLSTATE `0A000`.
 /// 6. Multi-element all-DDL batches are rejected because Hyper auto-commits
 ///    `CREATE` / `DROP` / `ALTER` even inside a transaction, so the
 ///    "atomic" promise would be a lie.
 ///
-/// Single-element batches and `Other`-classified statements (everything not
-/// in the explicit DDL/DML/read-only sets) are passed through untouched —
-/// Hyper itself is the final authority on syntax.
+/// `Other`-classified statements (everything not in the explicit
+/// DDL / DML / read-only / transaction-control sets) are passed
+/// through untouched — Hyper itself is the final authority on syntax,
+/// and that includes the "Multi-part queries" / SQLSTATE `0A000`
+/// error if a caller smuggles a `;`-separated multi-statement string
+/// into a single array element. The `error.rs` mapping rewrites that
+/// into an actionable "split into separate array elements" suggestion
+/// for the LLM.
 fn validate_execute_batch(stmts: &[String]) -> Result<(), McpError> {
     use crate::engine::strip_leading_sql_comments;
 
@@ -4288,14 +4293,14 @@ fn validate_execute_batch(stmts: &[String]) -> Result<(), McpError> {
             )
             .with_suggestion("Remove the empty element or replace it with a real statement."));
         }
-        // Classification first — this is comment-aware and only inspects
-        // the leading keyword, so it returns a meaningful answer even
-        // for multi-statement input. We want the read-only / DDL-mix
-        // / transaction-control errors to fire BEFORE the
-        // "exactly-one-statement" error, otherwise an LLM that passed
-        // `"SELECT 1; SELECT 2"` is told to split into separate array
-        // elements first, and only on the retry learns it should have
-        // used the `query` tool.
+        // Classification is comment-aware and only inspects the leading
+        // keyword, so it returns a meaningful answer even for input
+        // that happens to be multi-statement. We don't try to detect
+        // multi-statement input client-side — Hyper's own
+        // "Multi-part queries" / SQLSTATE 0A000 error is mapped at
+        // [error.rs:130-134] to a clear "split into separate array
+        // elements" suggestion, so the LLM gets the same actionable
+        // hint after one round-trip.
         match classify_statement(stmt) {
             StatementKind::ReadOnly => {
                 return Err(McpError::new(
@@ -4330,13 +4335,6 @@ fn validate_execute_batch(stmts: &[String]) -> Result<(), McpError> {
             StatementKind::Dml => has_data_mutation = true,
             StatementKind::Other => {}
         }
-        first_statement_only(stmt).map_err(|e| {
-            McpError::new(e.code, format!("`sql[{idx}]`: {}", e.message)).with_suggestion(
-                e.suggestion.unwrap_or_else(|| {
-                    "Split semicolon-separated statements into separate array elements.".to_string()
-                }),
-            )
-        })?;
     }
 
     if has_schema_change && has_data_mutation {
@@ -4632,15 +4630,6 @@ mod validate_execute_batch_tests {
         assert!(err.message.contains("sql[0]"));
         let err = validate_execute_batch(&s(&["INSERT INTO t VALUES (1)", "/* */"])).unwrap_err();
         assert!(err.message.contains("sql[1]"));
-    }
-
-    #[test]
-    fn rejects_inner_multi_statement() {
-        let err =
-            validate_execute_batch(&s(&["INSERT INTO t VALUES (1); INSERT INTO t VALUES (2)"]))
-                .unwrap_err();
-        assert_eq!(err.code, ErrorCode::InvalidArgument);
-        assert!(err.message.contains("exactly one statement"));
     }
 
     #[test]

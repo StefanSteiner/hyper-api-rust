@@ -389,7 +389,6 @@ execute(sql: [
 
 Validation rules enforced before any SQL hits the server:
 - Array must be non-empty; no element may be empty / whitespace-only / comment-only.
-- Each element must contain exactly one statement (embedded `;`-separated multi-statements are rejected — split into separate array elements).
 - No element may be read-only — use `query` for SELECT/WITH/EXPLAIN.
 - DDL and DML cannot be mixed in one batch (Hyper aborts mixed transactions with SQLSTATE 0A000).
 - Multi-element all-DDL batches are rejected because Hyper auto-commits CREATE/DROP/ALTER even inside a transaction; issue each DDL in its own `execute` call.
