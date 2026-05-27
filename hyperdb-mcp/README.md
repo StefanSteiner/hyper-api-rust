@@ -373,11 +373,26 @@ query(sql: 'SELECT c.name, SUM(o.amount) FROM orders o JOIN customers c ON o.cus
 
 #### `execute`
 
-Execute a **mutating** SQL statement: `CREATE TABLE`, `INSERT`, `UPDATE`, `DELETE`, `DROP TABLE`, `ALTER`, `COPY`, etc. Returns the affected row count. Disabled in read-only mode.
+Execute one or more **mutating** SQL statements as an atomic batch: `CREATE TABLE`, `INSERT`, `UPDATE`, `DELETE`, `DROP TABLE`, `ALTER`, `COPY`, etc. `sql` is an array of statements; multi-element batches run inside a transaction (all commit or all roll back). Single-element batches auto-commit, same as a one-off statement. Returns the per-statement affected row counts plus a total. Disabled in read-only mode.
 
 ```
-execute(sql: 'CREATE TABLE archived_orders AS SELECT * FROM orders WHERE year < 2024')
+// Single statement (auto-commit)
+execute(sql: ['CREATE TABLE archived_orders AS SELECT * FROM orders WHERE year < 2024'])
+
+// Atomic upsert — both run or neither runs
+execute(sql: [
+  "UPDATE settings SET value = 'dark' WHERE key = 'theme'",
+  "INSERT INTO settings (key, value) SELECT 'theme', 'dark' \
+     WHERE NOT EXISTS (SELECT 1 FROM settings WHERE key = 'theme')"
+])
 ```
+
+Validation rules enforced before any SQL hits the server:
+- Array must be non-empty; no element may be empty / whitespace-only / comment-only.
+- Each element must contain exactly one statement (embedded `;`-separated multi-statements are rejected — split into separate array elements).
+- No element may be read-only — use `query` for SELECT/WITH/EXPLAIN.
+- DDL and DML cannot be mixed in one batch (Hyper aborts mixed transactions with SQLSTATE 0A000).
+- Multi-element all-DDL batches are rejected because Hyper auto-commits CREATE/DROP/ALTER even inside a transaction; issue each DDL in its own `execute` call.
 
 #### `describe`
 
@@ -743,21 +758,28 @@ Hyper uses the Salesforce Data Cloud SQL dialect (PostgreSQL-compatible with ext
 
 ### Upserts (INSERT or UPDATE)
 
-Hyper does **not** support `ON CONFLICT` or `INSERT ... ON DUPLICATE KEY`. Use a two-statement pattern instead:
+Hyper does **not** support `ON CONFLICT` or `INSERT ... ON DUPLICATE KEY`. Use the `execute` tool's atomic batch shape instead:
 
-```sql
--- Update existing row (no-op if it doesn't exist)
-UPDATE settings SET value = 'dark' WHERE key = 'theme';
-
--- Insert only if the row doesn't already exist
-INSERT INTO settings (key, value)
-  SELECT 'theme', 'dark'
-  WHERE NOT EXISTS (SELECT 1 FROM settings WHERE key = 'theme');
+```
+execute(sql: [
+  "UPDATE settings SET value = 'dark' WHERE key = 'theme'",
+  "INSERT INTO settings (key, value) SELECT 'theme', 'dark' \
+     WHERE NOT EXISTS (SELECT 1 FROM settings WHERE key = 'theme')"
+])
 ```
 
-Hyper supports transactions (`BEGIN` / `COMMIT` / `ROLLBACK`) at the API level, but the MCP `execute` tool runs one statement per call and each call auto-commits. The pattern is still race-safe because `hyperd` serializes statements on the same database — no interleaving between the UPDATE and INSERT. Call `execute` twice (one UPDATE, one INSERT).
+Both statements run inside a single Hyper transaction — they commit together or both roll back. No race window between them.
 
 > **Tip:** For file-based upserts (merging updated data from a CSV/JSON file into an existing table), use `load_file` with `mode: "merge"` and a `merge_key` instead of writing manual SQL — it handles the UPDATE/INSERT logic automatically and also auto-adds new columns.
+
+### Transactions
+
+The Hyper Rust API supports `BEGIN` / `COMMIT` / `ROLLBACK` plus an RAII `Transaction` guard (see [`docs/TRANSACTIONS.md`](../docs/TRANSACTIONS.md)). The MCP `execute` tool surfaces this as the `sql` array shape: pass multiple statements and they run atomically.
+
+Hyper-specific limits worth remembering when batching:
+- **DDL after DML in the same transaction is rejected** with SQLSTATE 0A000. The `execute` tool catches this up front — mixing CREATE/DROP/ALTER with INSERT/UPDATE/DELETE in one batch is rejected with an actionable error.
+- **DDL is auto-committed** even inside a transaction. `execute` rejects multi-element all-DDL batches because the "atomic" promise can't be honored — issue each DDL call as its own one-element array.
+- **After any error inside a transaction**, the connection enters aborted state and only ROLLBACK is accepted next. The `execute` tool handles this for you — on any per-statement failure the wrapper issues ROLLBACK before surfacing the error.
 
 Full reference: [Data Cloud SQL Reference](https://developer.salesforce.com/docs/data/data-cloud-query-guide/references/dc-sql-reference/data-cloud-sql-context.html)
 

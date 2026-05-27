@@ -96,8 +96,9 @@ watcher targets the alias; call `unwatch_directory` first.
 
 ### Query
 - `query` — run a read-only SELECT / WITH / EXPLAIN / SHOW / VALUES.
-- `execute` — run DDL / DML (CREATE, INSERT, UPDATE, DELETE, DROP,
-  ALTER, COPY). Disabled in read-only mode.
+- `execute` — run one or more DDL/DML statements as an atomic batch.
+  `sql` is an array; multi-element batches run inside a transaction
+  (all commit or all roll back). Disabled in read-only mode.
 - `query_data` — ingest inline JSON or CSV and run one SQL query in a
   single call (table is temporary).
 - `query_file` — same as `query_data` but reads from a file path. The
@@ -216,19 +217,21 @@ differences from standard PostgreSQL:
 - **`TOP N`** is accepted alongside `LIMIT`.
 - **No AI scalar functions** (`AI_CLASSIFY`, `AI_SENTIMENT`, etc. — those
   are Data Cloud federation features, not Hyper).
-- **No `ON CONFLICT` / `INSERT ... ON DUPLICATE KEY`** — Hyper does not
-  support upsert syntax. Use a two-statement pattern instead:
+- **No `ON CONFLICT` / `INSERT ... ON DUPLICATE KEY`.** Pass an array of
+  statements to `execute` and they run atomically inside a transaction:
   ```
-  UPDATE target SET col = val WHERE key = 'x';
-  INSERT INTO target (key, col)
-    SELECT 'x', val
-    WHERE NOT EXISTS (SELECT 1 FROM target WHERE key = 'x');
+  execute({ \"sql\": [
+    \"UPDATE settings SET value = 'dark' WHERE key = 'theme'\",
+    \"INSERT INTO settings (key, value) SELECT 'theme', 'dark'
+       WHERE NOT EXISTS (SELECT 1 FROM settings WHERE key = 'theme')\"
+  ]})
   ```
-  Hyper supports transactions (`BEGIN` / `COMMIT` / `ROLLBACK`), but
-  the MCP `execute` tool runs one statement per call and each call
-  auto-commits. The pattern is still race-safe because `hyperd`
-  serializes statements on the same database. Call `execute` twice
-  (one UPDATE, one INSERT).
+  Single-element arrays auto-commit (same as the legacy single-statement
+  shape). Mixing DDL with DML in one batch is rejected — Hyper aborts
+  such transactions with SQLSTATE 0A000. Issue DDL in its own `execute`
+  call. Do NOT include `BEGIN` / `COMMIT` / `ROLLBACK` / `SAVEPOINT` in
+  batch elements — the tool manages the transaction for you and these
+  are rejected up front.
 
 Full reference: https://developer.salesforce.com/docs/data/data-cloud-query-guide/references/dc-sql-reference
 
@@ -279,14 +282,18 @@ load_file({
   \"merge_key\": \"job_id\"
 })
 
-// Upsert (ON CONFLICT is not supported — use UPDATE + INSERT WHERE NOT EXISTS)
+// Single-statement execute (auto-commit, same as before)
 execute({
-  \"sql\": \"UPDATE settings SET value = 'dark' WHERE key = 'theme'\",
-  \"database\": \"persistent\"
+  \"sql\": [\"DELETE FROM events WHERE created_at < CURRENT_DATE - INTERVAL '90' DAY\"]
 })
+
+// Atomic upsert — both statements commit together or both roll back
 execute({
-  \"sql\": \"INSERT INTO settings (key, value) SELECT 'theme', 'dark' \
-           WHERE NOT EXISTS (SELECT 1 FROM settings WHERE key = 'theme')\",
+  \"sql\": [
+    \"UPDATE settings SET value = 'dark' WHERE key = 'theme'\",
+    \"INSERT INTO settings (key, value) SELECT 'theme', 'dark' \
+       WHERE NOT EXISTS (SELECT 1 FROM settings WHERE key = 'theme')\"
+  ],
   \"database\": \"persistent\"
 })
 
