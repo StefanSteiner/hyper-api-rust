@@ -162,6 +162,7 @@ mod process;
 mod query_result;
 pub(crate) mod query_stats;
 mod result;
+mod row_accessor;
 mod server_version;
 mod table_definition;
 mod transaction;
@@ -199,6 +200,12 @@ pub use names::{
 pub use process::{HyperProcess, ListenMode, Parameters, TransportMode};
 pub use query_stats::{LogFileStatsProvider, QueryStats, QueryStatsProvider};
 pub use result::{FromRow, ResultColumn, ResultSchema, Row, RowIterator, RowValue, Rowset};
+pub use row_accessor::RowAccessor;
+
+// Re-export the `#[derive(FromRow)]` proc-macro from the companion
+// crate so callers don't need to add `hyperdb-api-derive` as a direct
+// dependency. Same pattern as serde / thiserror.
+pub use hyperdb_api_derive::FromRow;
 pub use server_version::ServerVersion;
 pub use table_definition::{ColumnDefinition, Persistence, TableDefinition};
 pub use transaction::Transaction;
