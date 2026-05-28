@@ -119,12 +119,13 @@ jobs:
 
       # `cargo metadata --format-version=1` forces a lockfile
       # reconciliation pass against the current Cargo.tomls. Empirically
-      # validated on this workspace: it flips exactly the 7 workspace-
+      # validated on this workspace: it flips exactly the 8 workspace-
       # member version rows (hyperdb-api, hyperdb-api-core,
-      # hyperdb-api-node, hyperdb-api-salesforce, hyperdb-bootstrap,
-      # hyperdb-mcp, sea-query-hyperdb) and touches no external dep
-      # rows. The "Verify lockfile diff is workspace-only" sentinel
-      # below catches it if a future cargo version diverges.
+      # hyperdb-api-derive, hyperdb-api-node, hyperdb-api-salesforce,
+      # hyperdb-bootstrap, hyperdb-mcp, sea-query-hyperdb) and touches
+      # no external dep rows. The "Verify lockfile diff is workspace-
+      # only" sentinel below catches it if a future cargo version
+      # diverges.
       #
       # Why not `cargo generate-lockfile`: it does a full re-resolve
       # and bumps unrelated transitive deps to their latest semver

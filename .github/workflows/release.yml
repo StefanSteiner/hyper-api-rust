@@ -207,7 +207,18 @@ jobs:
             # window for small crates.
             sleep 45
           }
+          # Publish order is dependency-topological:
+          # - hyperdb-api-salesforce, hyperdb-api-derive: leaves (no
+          #   workspace deps).
+          # - hyperdb-api-core: depends on hyperdb-api-salesforce
+          #   (optional, via salesforce-auth feature).
+          # - hyperdb-api: depends on hyperdb-api-core AND
+          #   hyperdb-api-derive (=X.Y.Z strict pin → derive must be
+          #   on the index when hyperdb-api builds).
+          # - hyperdb-mcp, hyperdb-bootstrap, sea-query-hyperdb: depend
+          #   on hyperdb-api / hyperdb-api-core; publish last.
           publish hyperdb-api-salesforce
+          publish hyperdb-api-derive
           publish hyperdb-api-core
           publish hyperdb-api
           publish hyperdb-mcp

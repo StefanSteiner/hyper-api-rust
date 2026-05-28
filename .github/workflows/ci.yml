@@ -201,7 +201,7 @@ jobs:
     # Catches Cargo.toml metadata regressions (missing license, bad
     # include paths, etc.) on the subset of crates that have no
     # workspace deps — those are the only ones `cargo publish --dry-run`
-    # can check before anything's on crates.io. The other 4 crates
+    # can check before anything's on crates.io. The other crates
     # (hyperdb-api-core, hyperdb-api-salesforce, hyperdb-api, hyperdb-mcp)
     # resolve their path+version deps against the live index, which can't
     # succeed until those deps are themselves published. (Note:
@@ -223,8 +223,9 @@ jobs:
           cache-key: publish-dry-run
           rustflags: ""
       - run: |
-          cargo publish -p hyperdb-bootstrap   --dry-run
-          cargo publish -p sea-query-hyperdb   --dry-run
+          cargo publish -p hyperdb-bootstrap     --dry-run
+          cargo publish -p sea-query-hyperdb     --dry-run
+          cargo publish -p hyperdb-api-derive    --dry-run
 
   deny:
     # Enforces license allowlist, advisory ignore list, and banned-source
