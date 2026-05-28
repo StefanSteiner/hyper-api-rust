@@ -139,7 +139,7 @@ fn column_name_for(field: &Field, default: &syn::Ident) -> syn::Result<String> {
                 Ok(())
             } else {
                 Err(meta.error(format!(
-                    "unrecognized hyperdb attribute `{}`; expected `rename = \"...\"`",
+                    "unrecognized hyperdb attribute `{}`; supported attributes: rename",
                     meta.path
                         .get_ident()
                         .map_or_else(|| "?".to_string(), ToString::to_string)

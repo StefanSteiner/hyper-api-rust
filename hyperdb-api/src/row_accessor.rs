@@ -79,15 +79,6 @@ impl<'a> RowAccessor<'a> {
         map
     }
 
-    /// Returns the underlying [`Row`].
-    ///
-    /// Useful for callers that need access to row methods not exposed
-    /// through this accessor (e.g. positional `Row::get`).
-    #[must_use]
-    pub fn row(&self) -> &Row {
-        self.row
-    }
-
     /// Returns the named column's value, decoded as `T`.
     ///
     /// # Errors
@@ -171,8 +162,10 @@ impl<'a> RowAccessor<'a> {
     ///
     /// - [`Error::ColumnIndexOutOfBounds`] if `idx` is past the row's
     ///   column count.
-    /// - [`Error::Conversion`] if the cell is `NULL` or cannot be
-    ///   decoded as `T`. (Wraps [`Row::try_get`].)
+    /// - [`Error::Column`] with [`ColumnErrorKind::Null`] if the cell
+    ///   is SQL `NULL`. The synthesized name is `col[{idx}]`.
+    /// - [`Error::Column`] with [`ColumnErrorKind::TypeMismatch`] if
+    ///   the cell value cannot be decoded as `T`. Same synthesized name.
     pub fn position<T: RowValue>(&self, idx: usize) -> Result<T> {
         if idx >= self.row.column_count() {
             return Err(Error::column_index_out_of_bounds(
@@ -180,10 +173,26 @@ impl<'a> RowAccessor<'a> {
                 self.row.column_count(),
             ));
         }
-        // Reuse Row::try_get's NULL/decode-error path. Synthesize a
-        // column-name label for the error message.
-        let label = format!("col[{idx}]");
-        self.row.try_get::<T>(idx, &label)
+        // Mirror the `get`/`get_opt` error shape so callers can match
+        // on `Error::Column { kind, .. }` uniformly across named and
+        // positional access. Synthesize a name for the error label.
+        if let Some(v) = self.row.get::<T>(idx) {
+            Ok(v)
+        } else if self.row.is_null(idx) {
+            Err(Error::column(format!("col[{idx}]"), ColumnErrorKind::Null))
+        } else {
+            let actual = self
+                .row
+                .sql_type(idx)
+                .map_or_else(|| "<unknown>".to_string(), |t| format!("{t:?}"));
+            Err(Error::column(
+                format!("col[{idx}]"),
+                ColumnErrorKind::TypeMismatch {
+                    expected: std::any::type_name::<T>().to_string(),
+                    actual,
+                },
+            ))
+        }
     }
 }
 
@@ -309,5 +318,25 @@ mod tests {
 
         let id: i32 = accessor.position(0).expect("position 0");
         assert_eq!(id, 42);
+    }
+
+    #[test]
+    fn position_null_errors_with_kind_null() {
+        // NULL at a positional access path should surface as
+        // Error::Column { kind: Null }, mirroring the named `get`
+        // error shape rather than the older Error::Conversion form.
+        let (row, schema) = user_row(Some(1), None);
+        let indices = RowAccessor::build_indices(&schema);
+        let accessor = RowAccessor::new(&row, &indices);
+
+        // Column 1 is `name`, which is NULL.
+        let err = accessor.position::<String>(1).unwrap_err();
+        match err {
+            Error::Column { name, kind } => {
+                assert_eq!(name, "col[1]");
+                assert!(matches!(kind, ColumnErrorKind::Null));
+            }
+            other => panic!("expected Error::Column {{ kind: Null }}, got {other:?}"),
+        }
     }
 }
