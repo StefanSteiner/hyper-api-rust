@@ -407,6 +407,36 @@ fn test_derive_from_row_with_rename() {
 }
 
 #[test]
+fn test_derive_from_row_with_index() {
+    // Verify `#[hyperdb(index = N)]` uses positional access. Useful
+    // for queries with computed/unnamed columns where the column has
+    // no stable name (e.g. `SELECT id, COUNT(*) FROM ...`).
+    #[derive(Debug, PartialEq, FromRow)]
+    struct PositionalRow {
+        #[hyperdb(index = 0)]
+        id: i32,
+        #[hyperdb(index = 1)]
+        total: Option<i64>,
+    }
+
+    let test = TestConnection::new().expect("Failed to create test connection");
+    test.execute_command("CREATE TABLE positional_test (id INT NOT NULL, value INT)")
+        .expect("create");
+    test.execute_command("INSERT INTO positional_test VALUES (1, 10), (1, 20), (2, 30)")
+        .expect("insert");
+
+    // COUNT(*) produces an unnamed/computed column — name-based lookup
+    // would be brittle, but positional access works.
+    let row: PositionalRow = test
+        .connection
+        .fetch_one_as("SELECT id, COUNT(*) FROM positional_test WHERE id = 1 GROUP BY id")
+        .expect("fetch_one_as PositionalRow");
+
+    assert_eq!(row.id, 1);
+    assert_eq!(row.total, Some(2));
+}
+
+#[test]
 fn test_derive_from_row_missing_column_errors() {
     // Asking for a column that isn't in the SELECT list should
     // surface as Error::Column { kind: Missing }.

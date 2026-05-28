@@ -30,21 +30,36 @@
 //!
 //! - `#[hyperdb(rename = "...")]` on a field uses the given column
 //!   name instead of the field name.
-//! - Field types of `Option<T>` use [`RowAccessor::get_opt`]
-//!   (NULL → `None`); other field types use [`RowAccessor::get`]
-//!   (NULL → error).
+//! - `#[hyperdb(index = N)]` on a field uses positional access
+//!   ([`RowAccessor::position`] / [`RowAccessor::position_opt`]) at
+//!   column index `N` instead of name-based lookup. Mutually exclusive
+//!   with `rename`.
+//! - Field types of `Option<T>` use [`RowAccessor::get_opt`] /
+//!   [`RowAccessor::position_opt`] (NULL → `None`); other field types
+//!   use [`RowAccessor::get`] / [`RowAccessor::position`] (NULL →
+//!   error).
 //!
 //! [`hyperdb_api::FromRow`]: https://docs.rs/hyperdb-api
 //! [`RowAccessor::get_opt`]: https://docs.rs/hyperdb-api
 //! [`RowAccessor::get`]: https://docs.rs/hyperdb-api
+//! [`RowAccessor::position`]: https://docs.rs/hyperdb-api
+//! [`RowAccessor::position_opt`]: https://docs.rs/hyperdb-api
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{
-    parse_macro_input, Data, DataStruct, DeriveInput, Field, Fields, GenericArgument, LitStr,
-    PathArguments, Type, TypePath,
+    parse_macro_input, spanned::Spanned, Data, DataStruct, DeriveInput, Field, Fields,
+    GenericArgument, LitInt, LitStr, PathArguments, Type, TypePath,
 };
+
+/// How a field maps to a column. Either by name (the default or
+/// `#[hyperdb(rename = "...")]`) or by ordinal position
+/// (`#[hyperdb(index = N)]`).
+enum FieldSource {
+    Name(String),
+    Index(usize),
+}
 
 /// Derives `hyperdb_api::FromRow` for a struct.
 ///
@@ -106,51 +121,73 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     })
 }
 
-/// Generates `field_name: row.get("col")?` (or `get_opt` for `Option<T>` fields).
+/// Generates `field_name: row.get("col")?` (or `get_opt`/`position`/`position_opt`
+/// for `Option<T>` fields and/or `#[hyperdb(index = N)]`).
 fn field_assignment(field: &Field) -> syn::Result<TokenStream2> {
     let ident = field
         .ident
         .as_ref()
         .ok_or_else(|| syn::Error::new_spanned(field, "tuple-struct fields are not supported"))?;
-    let column_name = column_name_for(field, ident)?;
-    let column_lit = LitStr::new(&column_name, ident.span());
+    let source = field_source_for(field, ident)?;
+    let is_opt = is_option_type(&field.ty);
 
-    let getter = if is_option_type(&field.ty) {
-        quote!(row.get_opt(#column_lit)?)
-    } else {
-        quote!(row.get(#column_lit)?)
+    let getter = match (source, is_opt) {
+        (FieldSource::Name(name), true) => {
+            let lit = LitStr::new(&name, ident.span());
+            quote!(row.get_opt(#lit)?)
+        }
+        (FieldSource::Name(name), false) => {
+            let lit = LitStr::new(&name, ident.span());
+            quote!(row.get(#lit)?)
+        }
+        (FieldSource::Index(idx), true) => quote!(row.position_opt(#idx)?),
+        (FieldSource::Index(idx), false) => quote!(row.position(#idx)?),
     };
 
     Ok(quote! { #ident: #getter })
 }
 
-/// Reads `#[hyperdb(rename = "...")]` from a field's attributes; falls back
-/// to the field's identifier as the column name.
-fn column_name_for(field: &Field, default: &syn::Ident) -> syn::Result<String> {
+/// Reads `#[hyperdb(rename = "...")]` or `#[hyperdb(index = N)]` from a field's
+/// attributes. Falls back to a name-based source using the field's identifier.
+/// `rename` and `index` are mutually exclusive.
+fn field_source_for(field: &Field, default: &syn::Ident) -> syn::Result<FieldSource> {
+    let mut rename: Option<(String, proc_macro2::Span)> = None;
+    let mut index: Option<(usize, proc_macro2::Span)> = None;
+
     for attr in &field.attrs {
         if !attr.path().is_ident("hyperdb") {
             continue;
         }
-        let mut rename: Option<String> = None;
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("rename") {
                 let s: LitStr = meta.value()?.parse()?;
-                rename = Some(s.value());
+                rename = Some((s.value(), meta.path.span()));
+                Ok(())
+            } else if meta.path.is_ident("index") {
+                let n: LitInt = meta.value()?.parse()?;
+                let parsed: usize = n.base10_parse()?;
+                index = Some((parsed, meta.path.span()));
                 Ok(())
             } else {
                 Err(meta.error(format!(
-                    "unrecognized hyperdb attribute `{}`; supported attributes: rename",
+                    "unrecognized hyperdb attribute `{}`; supported attributes: rename, index",
                     meta.path
                         .get_ident()
                         .map_or_else(|| "?".to_string(), ToString::to_string)
                 )))
             }
         })?;
-        if let Some(name) = rename {
-            return Ok(name);
-        }
     }
-    Ok(default.to_string())
+
+    match (rename, index) {
+        (Some(_), Some((_, idx_span))) => Err(syn::Error::new(
+            idx_span,
+            "`#[hyperdb(rename = ...)]` and `#[hyperdb(index = N)]` are mutually exclusive",
+        )),
+        (Some((name, _)), None) => Ok(FieldSource::Name(name)),
+        (None, Some((idx, _))) => Ok(FieldSource::Index(idx)),
+        (None, None) => Ok(FieldSource::Name(default.to_string())),
+    }
 }
 
 /// Detects `Option<T>` (any path ending in `Option<T>`).

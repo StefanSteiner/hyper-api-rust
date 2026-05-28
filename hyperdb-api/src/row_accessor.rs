@@ -194,6 +194,45 @@ impl<'a> RowAccessor<'a> {
             ))
         }
     }
+
+    /// Positional optional access: returns `Option<T>` for the cell at
+    /// `idx`. SQL `NULL` becomes `None`; out-of-bounds and type
+    /// mismatches still error. Mirrors [`get_opt`](Self::get_opt) for
+    /// positional access.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::ColumnIndexOutOfBounds`] if `idx` is past the row's
+    ///   column count.
+    /// - [`Error::Column`] with [`ColumnErrorKind::TypeMismatch`] if
+    ///   the cell is non-NULL but cannot be decoded as `T`. The
+    ///   synthesized name is `col[{idx}]`.
+    pub fn position_opt<T: RowValue>(&self, idx: usize) -> Result<Option<T>> {
+        if idx >= self.row.column_count() {
+            return Err(Error::column_index_out_of_bounds(
+                idx,
+                self.row.column_count(),
+            ));
+        }
+        if self.row.is_null(idx) {
+            return Ok(None);
+        }
+        if let Some(v) = self.row.get::<T>(idx) {
+            Ok(Some(v))
+        } else {
+            let actual = self
+                .row
+                .sql_type(idx)
+                .map_or_else(|| "<unknown>".to_string(), |t| format!("{t:?}"));
+            Err(Error::column(
+                format!("col[{idx}]"),
+                ColumnErrorKind::TypeMismatch {
+                    expected: std::any::type_name::<T>().to_string(),
+                    actual,
+                },
+            ))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -318,6 +357,44 @@ mod tests {
 
         let id: i32 = accessor.position(0).expect("position 0");
         assert_eq!(id, 42);
+    }
+
+    #[test]
+    fn position_opt_null_returns_none() {
+        let (row, schema) = user_row(Some(1), None);
+        let indices = RowAccessor::build_indices(&schema);
+        let accessor = RowAccessor::new(&row, &indices);
+
+        let v: Option<String> = accessor.position_opt(1).expect("position_opt for NULL");
+        assert_eq!(v, None);
+    }
+
+    #[test]
+    fn position_opt_value_returns_some() {
+        let (row, schema) = user_row(Some(42), Some("alice"));
+        let indices = RowAccessor::build_indices(&schema);
+        let accessor = RowAccessor::new(&row, &indices);
+
+        let id: Option<i32> = accessor.position_opt(0).expect("position_opt id");
+        let name: Option<String> = accessor.position_opt(1).expect("position_opt name");
+        assert_eq!(id, Some(42));
+        assert_eq!(name, Some("alice".to_string()));
+    }
+
+    #[test]
+    fn position_opt_out_of_range_errors_with_index_oob() {
+        let (row, schema) = user_row(Some(1), Some("alice"));
+        let indices = RowAccessor::build_indices(&schema);
+        let accessor = RowAccessor::new(&row, &indices);
+
+        let err = accessor.position_opt::<i32>(5).unwrap_err();
+        match err {
+            Error::ColumnIndexOutOfBounds { idx, column_count } => {
+                assert_eq!(idx, 5);
+                assert_eq!(column_count, 2);
+            }
+            other => panic!("expected Error::ColumnIndexOutOfBounds, got {other:?}"),
+        }
     }
 
     #[test]

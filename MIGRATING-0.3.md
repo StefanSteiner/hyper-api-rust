@@ -262,7 +262,7 @@ The `FromRow` trait was redesigned around a new [`RowAccessor`] type and a new [
 
 ### What's new
 
-- **`#[derive(FromRow)]`** generates the `impl FromRow` for you. Field names match column names by default; `#[hyperdb(rename = "...")]` on a field overrides. `Option<T>` fields use `get_opt` (NULL → `None`); other fields use `get` (NULL → error).
+- **`#[derive(FromRow)]`** generates the `impl FromRow` for you. Field names match column names by default; `#[hyperdb(rename = "...")]` overrides the column name; `#[hyperdb(index = N)]` switches to positional access at column `N`. `Option<T>` fields use `get_opt` / `position_opt` (NULL → `None`); other fields use `get` / `position` (NULL → error). `rename` and `index` are mutually exclusive.
 
   ```rust
   use hyperdb_api::FromRow;
@@ -274,13 +274,23 @@ The `FromRow` trait was redesigned around a new [`RowAccessor`] type and a new [
       #[hyperdb(rename = "email_address")]
       email: Option<String>,
   }
+
+  // Useful for queries with computed/unnamed columns, e.g.
+  // `SELECT id, COUNT(*) FROM ... GROUP BY id`.
+  #[derive(FromRow)]
+  struct Aggregate {
+      #[hyperdb(index = 0)]
+      id: i32,
+      #[hyperdb(index = 1)]
+      total: Option<i64>,
+  }
   ```
 
 - **`RowAccessor<'a>`** is the parameter type of the new `FromRow::from_row`. It exposes:
   - `get<T>(name: &str) -> Result<T>` — required field; missing/NULL/type-mismatch return `Error::Column`.
   - `get_opt<T>(name: &str) -> Result<Option<T>>` — optional field; NULL becomes `None`.
-  - `position<T>(idx: usize) -> Result<T>` — positional escape hatch.
-  - `row()` — access to the underlying `Row` for callers that need other methods.
+  - `position<T>(idx: usize) -> Result<T>` — positional access; out-of-range returns `Error::ColumnIndexOutOfBounds`.
+  - `position_opt<T>(idx: usize) -> Result<Option<T>>` — positional access; NULL becomes `None`.
 
 - **`Row::get_by_name<T>(name)`** does the same name-based lookup but on a single `Row` (no cached lookup map). Convenient for hand-coded paths that don't go through `FromRow`. Doc warns that it's a linear scan; recommends `#[derive(FromRow)]` or `fetch_*_as` for hot paths.
 
