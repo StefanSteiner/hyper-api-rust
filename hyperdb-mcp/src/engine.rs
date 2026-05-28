@@ -719,6 +719,17 @@ impl Engine {
     /// Does not introduce new panic sites. If `f` panics, the transaction
     /// is rolled back (best-effort) and the original panic is re-raised
     /// via [`std::panic::resume_unwind`], preserving the panic payload.
+    // The deprecated `begin_transaction`/`commit`/`rollback` raw
+    // methods on `Connection` are required here because this helper
+    // takes `&self` (and so cannot use the RAII guard, which needs
+    // `&mut self`). Migrating requires reshaping `Engine`'s locking
+    // model — see issue #72 for two implementation paths (wrap
+    // connection in a `Mutex` vs. introduce an `EngineTransaction`
+    // guard) and the 8 closure call sites that need updating.
+    #[allow(
+        deprecated,
+        reason = "Engine borrows &self; the RAII guard requires &mut. Migration tracked in issue #72."
+    )]
     pub fn execute_in_transaction<F, T>(&self, f: F) -> Result<T, McpError>
     where
         F: FnOnce(&Engine) -> Result<T, McpError>,

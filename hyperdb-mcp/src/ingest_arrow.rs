@@ -371,7 +371,7 @@ pub fn ingest_parquet_file(
 ///   path resolution, schema inference, transaction/ingest, and row
 ///   counting failures.
 pub async fn ingest_parquet_file_async(
-    conn: &AsyncConnection,
+    conn: &mut AsyncConnection,
     path: &str,
     opts: &IngestOptions,
 ) -> Result<IngestResult, McpError> {
@@ -402,33 +402,36 @@ pub async fn ingest_parquet_file_async(
         opts.target_db.as_deref(),
     );
 
-    conn.begin_transaction().await.map_err(McpError::from)?;
+    let txn = conn.transaction().await.map_err(McpError::from)?;
     let result: Result<u64, McpError> = async {
         if is_replace {
             let qualified = crate::ingest::qualified_table(opts);
-            conn.execute_command(&format!("DROP TABLE IF EXISTS {qualified}"))
+            txn.execute_command(&format!("DROP TABLE IF EXISTS {qualified}"))
                 .await
                 .map_err(McpError::from)?;
         }
-        conn.execute_command(&sql).await.map_err(McpError::from)
+        txn.execute_command(&sql).await.map_err(McpError::from)
     }
     .await;
 
     let affected = match result {
         Ok(n) => {
-            conn.commit().await.map_err(McpError::from)?;
+            txn.commit().await.map_err(McpError::from)?;
             n
         }
         Err(e) => {
-            if let Err(rb) = conn.rollback().await {
+            if let Err(rb) = txn.rollback().await {
                 tracing::warn!("rollback after error failed: {}", rb);
             }
             return Err(e);
         }
     };
 
-    // See sync path: COUNT(*) must run outside the transaction to avoid a
-    // post-CTAS wire-state quirk that returns a truncated count.
+    // The transaction was committed above (or the function returned on
+    // error). This COUNT(*) runs on the bare connection — outside any
+    // transaction — to mirror the sync path's source-of-truth behavior
+    // and avoid any post-CTAS wire-state quirks that the sync path
+    // documents.
     let row_count = if is_replace {
         count_rows_async(conn, &opts.table).await?
     } else {
@@ -662,7 +665,7 @@ pub fn ingest_arrow_ipc_file(
 /// - Propagates transaction errors from the async `CREATE TABLE` and
 ///   from [`hyperdb_api::AsyncArrowInserter`] operations.
 pub async fn ingest_arrow_ipc_file_async(
-    conn: &AsyncConnection,
+    conn: &mut AsyncConnection,
     path: &str,
     opts: &IngestOptions,
 ) -> Result<IngestResult, McpError> {
@@ -691,10 +694,10 @@ pub async fn ingest_arrow_ipc_file_async(
     let is_replace = opts.mode != "append";
     let table_def = crate::schema::build_table_def(&opts.table, &columns)?;
 
-    conn.begin_transaction().await.map_err(McpError::from)?;
+    let txn = conn.transaction().await.map_err(McpError::from)?;
     let result: Result<u64, McpError> = async {
         crate::ingest::create_table_async(
-            conn,
+            txn.connection(),
             &opts.table,
             &columns,
             is_replace,
@@ -706,8 +709,8 @@ pub async fn ingest_arrow_ipc_file_async(
         // search path. When targeting a non-primary DB, qualify the
         // TableDefinition with that database. (Same trick the sync
         // Arrow IPC path uses via scoped_search_path.)
-        let mut inserter =
-            hyperdb_api::AsyncArrowInserter::new(conn, &table_def).map_err(McpError::from)?;
+        let mut inserter = hyperdb_api::AsyncArrowInserter::new(txn.connection(), &table_def)
+            .map_err(McpError::from)?;
         inserter
             .insert_data(&ipc_stream)
             .await
@@ -718,11 +721,11 @@ pub async fn ingest_arrow_ipc_file_async(
 
     let row_count = match result {
         Ok(n) => {
-            conn.commit().await.map_err(McpError::from)?;
+            txn.commit().await.map_err(McpError::from)?;
             n
         }
         Err(e) => {
-            if let Err(rb) = conn.rollback().await {
+            if let Err(rb) = txn.rollback().await {
                 tracing::warn!("rollback after error failed: {}", rb);
             }
             return Err(e);

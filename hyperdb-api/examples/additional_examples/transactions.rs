@@ -4,16 +4,27 @@
 //! Example: Transactions
 //!
 //! Demonstrates the transaction API:
-//! - Raw transaction methods (`begin_transaction`, `commit`, `rollback`)
-//! - RAII `Transaction` guard with explicit commit and rollback
+//! - **Recommended:** RAII `Transaction` guard with explicit commit and rollback
 //! - Querying within transactions to see uncommitted data
 //! - Multiple operations (INSERT, UPDATE, DELETE) in a single transaction
 //! - Multi-table atomic rollback (referential integrity across tables)
 //! - Multi-table reconnect semantics: only committed cross-table data is visible after reconnect
 //! - Auto-rollback safety net when the guard is dropped without commit
 //! - DDL inside transactions and known restrictions
+//! - Legacy raw transaction methods (`begin_transaction`, `commit`,
+//!   `rollback`) — included for completeness only; deprecated and
+//!   slated for removal. New code should use the RAII guard.
 //!
 //!   cargo run -p hyperdb-api --example transactions
+
+// The `example_raw_transaction` and `example_raw_error_recovery`
+// helpers below intentionally exercise the deprecated raw transaction
+// API for documentation purposes. New code should use the RAII guard
+// shown in `example_transaction_guard` instead.
+#![allow(
+    deprecated,
+    reason = "example intentionally demonstrates the deprecated raw transaction API alongside the RAII guard"
+)]
 
 use hyperdb_api::{
     Catalog, Connection, CreateMode, HyperProcess, Parameters, Result, SqlType, TableDefinition,

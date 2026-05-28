@@ -1014,37 +1014,90 @@ impl AsyncConnection {
     // Transaction Control
     // =========================================================================
 
+    // -------------------------------------------------------------------
+    // Raw transaction control (internal)
+    // -------------------------------------------------------------------
+    //
+    // The `*_raw` methods below are `pub(crate)` and form the canonical
+    // implementation of session-level transaction control. The RAII
+    // guard at `crate::AsyncTransaction` and any internal helper that
+    // genuinely needs `&self` (rather than the guard's `&mut self`)
+    // delegate to these.
+    //
+    // The matching `pub` methods (`begin_transaction`, `commit`,
+    // `rollback`) are thin `#[doc(hidden)] #[deprecated]` wrappers
+    // retained only so any pre-existing downstream caller sees a
+    // compiler warning rather than a hard break. They will be deleted
+    // in a future release; the `_raw` methods stay.
+
+    /// Issues `BEGIN TRANSACTION`. Crate-internal use only.
+    pub(crate) async fn begin_transaction_raw(&self) -> Result<()> {
+        self.execute_command("BEGIN TRANSACTION").await?;
+        Ok(())
+    }
+
+    /// Issues `COMMIT`. Crate-internal use only.
+    pub(crate) async fn commit_raw(&self) -> Result<()> {
+        self.execute_command("COMMIT").await?;
+        Ok(())
+    }
+
+    /// Issues `ROLLBACK`. Crate-internal use only.
+    pub(crate) async fn rollback_raw(&self) -> Result<()> {
+        self.execute_command("ROLLBACK").await?;
+        Ok(())
+    }
+
     /// Begins an explicit transaction (async).
+    ///
+    /// **Prefer [`transaction()`](Self::transaction)** — the RAII guard
+    /// auto-rolls back on drop and cannot leak a half-open transaction
+    /// across error paths. Hidden from generated rustdoc and
+    /// deprecated; slated for removal in a future release.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Server`] if the server rejects `BEGIN TRANSACTION`
     /// (e.g. a transaction is already open on this session).
+    #[doc(hidden)]
+    #[deprecated(
+        note = "Use `AsyncConnection::transaction()` for an RAII guard. This method will be \
+                removed in a future release."
+    )]
     pub async fn begin_transaction(&self) -> Result<()> {
-        self.execute_command("BEGIN TRANSACTION").await?;
-        Ok(())
+        self.begin_transaction_raw().await
     }
 
     /// Commits the current transaction (async).
     ///
+    /// **Prefer [`AsyncTransaction::commit`](crate::AsyncTransaction::commit)**
+    /// on the RAII guard returned by [`transaction()`](Self::transaction).
+    /// Hidden from generated rustdoc and deprecated; slated for removal.
+    ///
     /// # Errors
     ///
-    /// Returns [`Error::Server`] if the server rejects `COMMIT` (e.g. no
-    /// transaction is currently open).
+    /// Returns [`Error::Server`] if the server rejects `COMMIT`.
+    #[doc(hidden)]
+    #[deprecated(note = "Use `AsyncTransaction::commit()` on the RAII guard from \
+                `AsyncConnection::transaction()`. This method will be removed in a future release.")]
     pub async fn commit(&self) -> Result<()> {
-        self.execute_command("COMMIT").await?;
-        Ok(())
+        self.commit_raw().await
     }
 
     /// Rolls back the current transaction (async).
     ///
+    /// **Prefer [`AsyncTransaction::rollback`](crate::AsyncTransaction::rollback)**
+    /// on the RAII guard returned by [`transaction()`](Self::transaction).
+    /// Hidden from generated rustdoc and deprecated; slated for removal.
+    ///
     /// # Errors
     ///
-    /// Returns [`Error::Server`] if the server rejects `ROLLBACK` (e.g. no
-    /// transaction is currently open).
+    /// Returns [`Error::Server`] if the server rejects `ROLLBACK`.
+    #[doc(hidden)]
+    #[deprecated(note = "Use `AsyncTransaction::rollback()` on the RAII guard from \
+                `AsyncConnection::transaction()`. This method will be removed in a future release.")]
     pub async fn rollback(&self) -> Result<()> {
-        self.execute_command("ROLLBACK").await?;
-        Ok(())
+        self.rollback_raw().await
     }
 
     /// Starts a transaction with an async RAII guard (async).

@@ -177,6 +177,72 @@ if let Error::Server { sqlstate: Some(code), detail, hint, .. } = &err {
 
 ---
 
+## #69 — Transaction API consolidation
+
+The raw transaction methods on `Connection` and `AsyncConnection` are now deprecated and hidden from rustdoc. The RAII guard at `Connection::transaction()` / `AsyncConnection::transaction()` is the recommended (and only documented) way to drive transactions.
+
+### What's deprecated
+
+```rust
+Connection::begin_transaction(&self)        // -> #[doc(hidden)] #[deprecated]
+Connection::commit(&self)                   // -> #[doc(hidden)] #[deprecated]
+Connection::rollback(&self)                 // -> #[doc(hidden)] #[deprecated]
+AsyncConnection::begin_transaction(&self)   // -> #[doc(hidden)] #[deprecated]
+AsyncConnection::commit(&self)              // -> #[doc(hidden)] #[deprecated]
+AsyncConnection::rollback(&self)            // -> #[doc(hidden)] #[deprecated]
+```
+
+These methods still exist and still work — your build will see compiler warnings rather than errors. They will be deleted in a future release; new code must use the RAII guard.
+
+### Migration recipe
+
+```rust
+// Before
+conn.begin_transaction()?;
+conn.execute_command("INSERT INTO t VALUES (1)")?;
+conn.commit()?;
+
+// After (sync)
+let txn = conn.transaction()?;          // requires &mut conn
+txn.execute_command("INSERT INTO t VALUES (1)")?;
+txn.commit()?;
+```
+
+For the async equivalent, the body of the function holding `conn` will need to take `&mut AsyncConnection` instead of `&AsyncConnection`. Where you previously had:
+
+```rust
+pub async fn ingest(conn: &AsyncConnection, ...) -> Result<(), McpError> {
+    conn.begin_transaction().await?;
+    ...
+    conn.commit().await?;
+}
+```
+
+write:
+
+```rust
+pub async fn ingest(conn: &mut AsyncConnection, ...) -> Result<(), McpError> {
+    let txn = conn.transaction().await?;
+    txn.execute_command("...").await?;
+    txn.commit().await?;
+}
+```
+
+Callers that hold a pooled connection (`deadpool::managed::Object<ConnectionManager>`) need `let mut conn = pool.get().await?;` and `&mut conn` at the call site.
+
+### What didn't change
+
+- `Connection::transaction(&mut self) -> Result<Transaction<'_>>` — kept as the canonical entry point.
+- `Transaction::commit(self)` and `Transaction::rollback(self)` — kept; consume `self` to prevent double-commit.
+- The `Drop for Transaction` auto-rollback safety net — kept.
+- `AsyncTransaction` semantics, including the warning-only `Drop` (Rust has no async `Drop`) — kept.
+
+### MCP follow-up
+
+The MCP server's `Engine::execute_in_transaction` helper takes `&self` and so cannot use the RAII guard. It retains the deprecated raw methods with a function-level `#[allow(deprecated, reason = "...")]` annotation. Migrating it requires reshaping `Engine`'s locking model. Two structural paths and an acceptance-criteria checklist are written up in [issue #72](https://github.com/tableau/hyper-api-rust/issues/72).
+
+---
+
 ## #70 (continued) — Ergonomic constructors across all workspace error types
 
 The same ergonomic-constructor pattern was applied to every error type in the workspace that user code might construct, so call sites no longer need `.to_string()` ceremony for string-literal arguments.

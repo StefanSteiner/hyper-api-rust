@@ -1872,7 +1872,7 @@ impl HyperMcpServer {
 
                         // Check out a connection from the pool. Held only
                         // for the duration of this one ingest, then released.
-                        let conn = match pool.get().await {
+                        let mut conn = match pool.get().await {
                             Ok(c) => c,
                             Err(e) => {
                                 out.err = Some((
@@ -1914,7 +1914,7 @@ impl HyperMcpServer {
                                         return (idx, out);
                                     }
                                 };
-                            crate::ingest::ingest_json_async(&conn, &array_text, &opts)
+                            crate::ingest::ingest_json_async(&mut conn, &array_text, &opts)
                                 .await
                                 .map(|mut r| {
                                     r.stats.operation = "load_file".into();
@@ -1926,16 +1926,16 @@ impl HyperMcpServer {
                         } else {
                             match detect_file_format(std::path::Path::new(&entry.path)) {
                                 InferredFileFormat::Parquet => {
-                                    ingest_parquet_file_async(&conn, &entry.path, &opts).await
+                                    ingest_parquet_file_async(&mut conn, &entry.path, &opts).await
                                 }
                                 InferredFileFormat::ArrowIpc => {
-                                    ingest_arrow_ipc_file_async(&conn, &entry.path, &opts).await
+                                    ingest_arrow_ipc_file_async(&mut conn, &entry.path, &opts).await
                                 }
                                 InferredFileFormat::Json => {
-                                    ingest_json_file_async(&conn, &entry.path, &opts).await
+                                    ingest_json_file_async(&mut conn, &entry.path, &opts).await
                                 }
                                 InferredFileFormat::Csv => {
-                                    ingest_csv_file_async(&conn, &entry.path, &opts).await
+                                    ingest_csv_file_async(&mut conn, &entry.path, &opts).await
                                 }
                             }
                         };

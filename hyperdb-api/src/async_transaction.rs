@@ -37,7 +37,11 @@ pub struct AsyncTransaction<'conn> {
 impl<'conn> AsyncTransaction<'conn> {
     /// Creates a new async transaction by issuing `BEGIN TRANSACTION`.
     pub(crate) async fn new(connection: &'conn mut AsyncConnection) -> Result<Self> {
-        connection.begin_transaction().await?;
+        // Use the crate-internal `_raw` family. The matching `pub`
+        // methods on `AsyncConnection` are `#[deprecated]` for
+        // downstream consumers; this guard is the recommended
+        // replacement.
+        connection.begin_transaction_raw().await?;
         Ok(Self {
             connection,
             completed: false,
@@ -48,22 +52,22 @@ impl<'conn> AsyncTransaction<'conn> {
     ///
     /// # Errors
     ///
-    /// Forwards the error from [`AsyncConnection::commit`]. The transaction
+    /// Forwards the error from the server's `COMMIT`. The transaction
     /// is marked completed regardless, so the drop guard will not warn.
     pub async fn commit(mut self) -> Result<()> {
         self.completed = true;
-        self.connection.commit().await
+        self.connection.commit_raw().await
     }
 
     /// Rolls back the transaction explicitly.
     ///
     /// # Errors
     ///
-    /// Forwards the error from [`AsyncConnection::rollback`]. The
+    /// Forwards the error from the server's `ROLLBACK`. The
     /// transaction is marked completed regardless.
     pub async fn rollback(mut self) -> Result<()> {
         self.completed = true;
-        self.connection.rollback().await
+        self.connection.rollback_raw().await
     }
 
     /// Returns a reference to the underlying async connection.

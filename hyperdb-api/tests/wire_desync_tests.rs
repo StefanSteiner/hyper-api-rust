@@ -12,6 +12,14 @@
 //! These tests provoke a server-side error and then immediately run a
 //! variety of follow-up operations (simple query, command, transaction,
 //! prepared statement, COPY) to verify the connection stays in sync.
+//!
+//! Several tests exercise the deprecated raw `begin_transaction` /
+//! `commit` / `rollback` methods on `Connection` to lock in their wire
+//! behavior; the deprecation warning is suppressed file-wide.
+#![allow(
+    deprecated,
+    reason = "regression tests intentionally exercise the deprecated raw transaction API"
+)]
 
 mod common;
 

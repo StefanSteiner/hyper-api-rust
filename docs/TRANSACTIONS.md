@@ -1,30 +1,16 @@
 # Transaction Support
 
-This document describes the transaction API in the Hyper Rust API, covering ACID semantics (A, C, I guaranteed; D not provided by this API), raw `Connection` methods, the RAII `Transaction` / `AsyncTransaction` guards, behavioral notes, and the test inventory.
+This document describes the transaction API in the Hyper Rust API, covering ACID semantics (A, C, I guaranteed; D not provided by this API), the RAII `Transaction` / `AsyncTransaction` guards, behavioral notes, and the test inventory.
 
 ## Overview
 
 Hyper transactions in the Rust API guarantee **A**tomicity, **C**onsistency, and **I**solation. **Durability is not provided by this API.** Committed data is held in the server's memory; the database becomes durable only when it is closed, unloaded, detached, or released — at which point its data is flushed to disk. An unexpected process termination (crash, SIGKILL) before that flush can lose committed transactions.
 
-The API provides two levels of transaction control:
+The recommended way to drive transactions is the **RAII guard** (`Transaction<'conn>` / `AsyncTransaction<'conn>`), which auto-rolls back on drop and uses Rust's borrow checker to make several classes of misuse compile errors.
 
-1. **Raw methods** on `Connection` / `AsyncConnection` — thin wrappers around SQL commands
-2. **RAII guards** (`Transaction<'conn>` / `AsyncTransaction<'conn>`) — auto-rollback on drop
-
-All transaction APIs are always available with no feature flags required.
+> Older raw `Connection::begin_transaction` / `commit` / `rollback` methods exist but are **deprecated** as of v0.3.0 and hidden from generated rustdoc. They will be removed in a future release; new code must use the RAII guard. See "Deprecated raw methods" at the bottom of this doc for the migration recipe.
 
 ## API Reference
-
-### Raw Connection Methods
-
-Available on both `Connection` (sync) and `AsyncConnection` (async, with `.await`):
-
-```rust
-// Transaction control
-conn.begin_transaction()?;
-conn.commit()?;
-conn.rollback()?;
-```
 
 ### RAII Transaction Guard (Sync)
 
@@ -117,33 +103,53 @@ txn.commit().await?;
 
 ### Transactions
 
-- **Nested BEGIN:** Calling `begin_transaction()` inside an active transaction produces a Hyper WARNING notice, not an error. The second BEGIN is ignored.
-- **ROLLBACK outside transaction:** Calling `rollback()` with no active transaction produces a WARNING, not an error.
-- **Error in transaction:** After a SQL error inside a transaction, the entire transaction enters an aborted state (SQLSTATE `25P02`). You must issue `ROLLBACK` before using the connection for anything else.
-- **DDL after DML:** Executing DDL (e.g., `CREATE TABLE`) after DML (e.g., `INSERT`) in the same transaction produces error `0A000`. DDL-only transactions work fine.
+- **Error in transaction:** After a SQL error inside a transaction, the entire transaction enters an aborted state (SQLSTATE `25P02`). You must drop or rollback the guard before using the connection for anything else; the next `txn.execute_command(...)` would error.
+- **DDL after DML:** Executing DDL (e.g. `CREATE TABLE`) after DML (e.g. `INSERT`) in the same transaction produces error `0A000`. DDL-only transactions work fine.
+- **Nested transactions:** Hyper does not support nested transactions. Issuing `BEGIN` while a transaction is open produces a WARNING; the second BEGIN is ignored. The RAII guard's `&mut self` borrow already prevents this in safe Rust code.
 
 ## What Works
 
-- BEGIN / COMMIT / ROLLBACK via raw methods and via SQL strings
 - RAII `Transaction` guard with auto-rollback on drop (sync)
 - RAII `AsyncTransaction` guard (async, with warning-only drop)
+- DDL inside transactions (subject to the DDL-after-DML restriction)
+- Multi-table atomic rollback
 
 ## What Doesn't Work / Limitations
 
-- **Async Drop rollback:** `AsyncTransaction` cannot issue ROLLBACK in Drop due to Rust's sync-only Drop trait. It only prints a warning.
-- **Error recovery within transactions:** After a SQL error inside a transaction, the transaction is fully aborted (SQLSTATE `25P02`). You must ROLLBACK — you cannot continue executing statements.
+- **Async Drop rollback:** `AsyncTransaction` cannot issue ROLLBACK in Drop due to Rust's sync-only Drop trait. It only prints a warning. Always explicitly commit or rollback async transactions before drop.
+- **Error recovery within transactions:** After a SQL error inside a transaction, the transaction is fully aborted (SQLSTATE `25P02`). You must rollback — you cannot continue executing statements.
 - **`information_schema.tables`:** Does not exist in Hyper. Cannot be used to check table existence.
+
+## Deprecated raw methods
+
+The methods `Connection::begin_transaction` / `commit` / `rollback` (and the matching `AsyncConnection` versions) are **deprecated** as of v0.3.0. They are hidden from generated rustdoc, marked `#[deprecated]` so any caller receives a compiler warning, and slated for removal in a future release.
+
+Migration recipe:
+
+```rust
+// Before — deprecated
+conn.begin_transaction()?;
+conn.execute_command("INSERT INTO t VALUES (1, 'hello')")?;
+conn.commit()?;
+
+// After — RAII guard
+let txn = conn.transaction()?;          // requires &mut conn
+txn.execute_command("INSERT INTO t VALUES (1, 'hello')")?;
+txn.commit()?;
+```
+
+The `&mut conn` requirement is intentional — it's the borrow-checker mechanism that makes the safety story compile-enforced. If your code currently holds the connection through a non-mutable reference (e.g. inside an `&self` method on a wrapper struct), you may need to reshape the wrapper's locking model. The MCP server's `engine.rs::execute_in_transaction` is one such caller; it retains the deprecated raw methods until [issue #72](https://github.com/tableau/hyper-api-rust/issues/72) restructures `Engine`'s lock model.
 
 ## Test Inventory
 
 ### transaction_tests.rs
 
-Basic transaction behavior.
+Basic transaction behavior. The `test_raw_*` tests pin behavior of the deprecated raw methods until they are removed.
 
 | Test | Description |
 |------|-------------|
-| `test_raw_begin_commit_methods` | Raw `begin_transaction()` / `commit()` methods |
-| `test_raw_begin_rollback_methods` | Raw `begin_transaction()` / `rollback()` methods |
+| `test_raw_begin_commit_methods` | **(deprecated API)** Raw `begin_transaction()` / `commit()` methods |
+| `test_raw_begin_rollback_methods` | **(deprecated API)** Raw `begin_transaction()` / `rollback()` methods |
 | `test_begin_commit` | BEGIN + INSERT + COMMIT via SQL strings |
 | `test_begin_rollback` | BEGIN + INSERT + ROLLBACK via SQL strings |
 | `test_transaction_guard_commit` | RAII guard: `txn.execute_command()` + `txn.commit()` |
