@@ -36,7 +36,10 @@ pub struct Transaction<'conn> {
 impl<'conn> Transaction<'conn> {
     /// Creates a new transaction by issuing `BEGIN TRANSACTION`.
     pub(crate) fn new(connection: &'conn mut Connection) -> Result<Self> {
-        connection.begin_transaction()?;
+        // Use the crate-internal `_raw` family. The matching `pub`
+        // methods on `Connection` are `#[deprecated]` for downstream
+        // consumers; this guard is the recommended replacement.
+        connection.begin_transaction_raw()?;
         Ok(Self {
             connection,
             completed: false,
@@ -47,23 +50,23 @@ impl<'conn> Transaction<'conn> {
     ///
     /// # Errors
     ///
-    /// Returns the error from [`Connection::commit`]. The transaction is
+    /// Returns the error from the server's `COMMIT`. The transaction is
     /// marked completed regardless, so the drop guard will not re-issue a
     /// rollback.
     pub fn commit(mut self) -> Result<()> {
         self.completed = true;
-        self.connection.commit()
+        self.connection.commit_raw()
     }
 
     /// Rolls back the transaction explicitly.
     ///
     /// # Errors
     ///
-    /// Returns the error from [`Connection::rollback`]. The transaction is
-    /// marked completed regardless.
+    /// Returns the error from the server's `ROLLBACK`. The transaction
+    /// is marked completed regardless.
     pub fn rollback(mut self) -> Result<()> {
         self.completed = true;
-        self.connection.rollback()
+        self.connection.rollback_raw()
     }
 
     /// Returns a reference to the underlying connection.
@@ -162,7 +165,7 @@ impl Drop for Transaction<'_> {
         if !self.completed {
             // Best-effort rollback; ignore errors during drop.
             // Hyper produces a WARNING (not error) if no active transaction.
-            let _ = self.connection.rollback();
+            let _ = self.connection.rollback_raw();
         }
     }
 }

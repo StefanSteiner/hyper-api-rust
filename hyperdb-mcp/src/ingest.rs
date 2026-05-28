@@ -922,7 +922,7 @@ pub fn ingest_csv_file(
 ///   from the async connection. A rollback failure after an inner
 ///   error is logged but does not override the original error.
 pub async fn ingest_csv_file_async(
-    conn: &AsyncConnection,
+    conn: &mut AsyncConnection,
     path: &str,
     opts: &IngestOptions,
 ) -> Result<IngestResult, McpError> {
@@ -969,28 +969,26 @@ pub async fn ingest_csv_file_async(
 
     let is_replace = opts.mode != "append";
 
-    conn.begin_transaction().await.map_err(McpError::from)?;
+    let txn = conn.transaction().await.map_err(McpError::from)?;
     let inner: Result<u64, McpError> = async {
         create_table_async(
-            conn,
+            txn.connection(),
             &opts.table,
             &columns,
             is_replace,
             opts.target_db.as_deref(),
         )
         .await?;
-        conn.execute_command(&copy_sql)
-            .await
-            .map_err(McpError::from)
+        txn.execute_command(&copy_sql).await.map_err(McpError::from)
     }
     .await;
     let row_count = match inner {
         Ok(n) => {
-            conn.commit().await.map_err(McpError::from)?;
+            txn.commit().await.map_err(McpError::from)?;
             n
         }
         Err(e) => {
-            if let Err(rb) = conn.rollback().await {
+            if let Err(rb) = txn.rollback().await {
                 tracing::warn!("rollback after error failed: {}", rb);
             }
             return Err(e);
@@ -1095,7 +1093,7 @@ pub fn ingest_json_file(
 ///   connection. Rollback failures after an inner error are logged
 ///   but do not shadow the original error.
 pub async fn ingest_json_async(
-    conn: &AsyncConnection,
+    conn: &mut AsyncConnection,
     json_str: &str,
     opts: &IngestOptions,
 ) -> Result<IngestResult, McpError> {
@@ -1119,10 +1117,10 @@ pub async fn ingest_json_async(
     let is_replace = opts.mode != "append";
     let qualified = qualified_table(opts);
 
-    conn.begin_transaction().await.map_err(McpError::from)?;
+    let txn = conn.transaction().await.map_err(McpError::from)?;
     let inner: Result<u64, McpError> = async {
         create_table_async(
-            conn,
+            txn.connection(),
             &opts.table,
             &columns,
             is_replace,
@@ -1149,7 +1147,7 @@ pub async fn ingest_json_async(
                 col_names.join(", "),
                 values.join(", ")
             );
-            conn.execute_command(&sql).await.map_err(McpError::from)?;
+            txn.execute_command(&sql).await.map_err(McpError::from)?;
             row_count += 1;
         }
         Ok(row_count)
@@ -1158,11 +1156,11 @@ pub async fn ingest_json_async(
 
     let row_count = match inner {
         Ok(n) => {
-            conn.commit().await.map_err(McpError::from)?;
+            txn.commit().await.map_err(McpError::from)?;
             n
         }
         Err(e) => {
-            if let Err(rb) = conn.rollback().await {
+            if let Err(rb) = txn.rollback().await {
                 tracing::warn!("rollback after error failed: {}", rb);
             }
             return Err(e);
@@ -1203,7 +1201,7 @@ pub async fn ingest_json_async(
 /// - Propagates errors from [`normalize_json_or_jsonl`] and from
 ///   [`ingest_json_async`].
 pub async fn ingest_json_file_async(
-    conn: &AsyncConnection,
+    conn: &mut AsyncConnection,
     path: &str,
     opts: &IngestOptions,
 ) -> Result<IngestResult, McpError> {
@@ -1238,7 +1236,10 @@ pub async fn ingest_json_file_async(
 /// Shared helper: `CREATE TABLE` (optionally dropping first) on an async
 /// connection. Mirrors [`Engine::create_table`] exactly so the async
 /// ingest paths produce identical tables to the sync ones. Callers that
-/// need atomicity should wrap this in `begin_transaction` / `commit`.
+/// need atomicity should call this from inside an
+/// [`AsyncConnection::transaction`](hyperdb_api::AsyncConnection::transaction)
+/// guard and pass `txn.connection()` here, then commit the guard on
+/// success.
 pub(crate) async fn create_table_async(
     conn: &AsyncConnection,
     table_name: &str,

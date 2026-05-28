@@ -737,7 +737,7 @@ async fn ingest_one_ready_file(
     ready_path: &Path,
     data_path: &Path,
 ) -> Result<u64, McpError> {
-    let conn = pool.get().await.map_err(|e| {
+    let mut conn = pool.get().await.map_err(|e| {
         McpError::new(
             ErrorCode::InternalError,
             format!("Failed to check out connection: {e}"),
@@ -759,10 +759,12 @@ async fn ingest_one_ready_file(
         .to_str()
         .ok_or_else(|| McpError::new(ErrorCode::InternalError, "Non-UTF-8 path"))?;
     let res = match detect_file_format(data_path) {
-        InferredFileFormat::Parquet => ingest_parquet_file_async(&conn, data_str, &opts).await,
-        InferredFileFormat::ArrowIpc => ingest_arrow_ipc_file_async(&conn, data_str, &opts).await,
-        InferredFileFormat::Json => ingest_json_file_async(&conn, data_str, &opts).await,
-        InferredFileFormat::Csv => ingest_csv_file_async(&conn, data_str, &opts).await,
+        InferredFileFormat::Parquet => ingest_parquet_file_async(&mut conn, data_str, &opts).await,
+        InferredFileFormat::ArrowIpc => {
+            ingest_arrow_ipc_file_async(&mut conn, data_str, &opts).await
+        }
+        InferredFileFormat::Json => ingest_json_file_async(&mut conn, data_str, &opts).await,
+        InferredFileFormat::Csv => ingest_csv_file_async(&mut conn, data_str, &opts).await,
     }?;
     let _ = ready_path; // silence the unused-variable lint; the path is used by the caller
     Ok(res.rows)

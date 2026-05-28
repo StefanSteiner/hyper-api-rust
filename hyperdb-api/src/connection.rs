@@ -1879,52 +1879,95 @@ impl Connection {
     // Transaction Control
     // =========================================================================
 
+    // -------------------------------------------------------------------
+    // Raw transaction control (internal)
+    // -------------------------------------------------------------------
+    //
+    // The `*_raw` methods below are `pub(crate)` and form the canonical
+    // implementation of session-level transaction control. The RAII
+    // guard at `crate::Transaction` and any internal helper that
+    // genuinely needs `&self` (rather than the guard's `&mut self`)
+    // delegate to these.
+    //
+    // The matching `pub` methods (`begin_transaction`, `commit`,
+    // `rollback`) are thin `#[doc(hidden)] #[deprecated]` wrappers
+    // retained only so any pre-existing downstream caller sees a
+    // compiler warning rather than a hard break. They will be deleted
+    // in a future release; the `_raw` methods stay.
+
+    /// Issues `BEGIN TRANSACTION`. Crate-internal use only.
+    pub(crate) fn begin_transaction_raw(&self) -> Result<()> {
+        self.execute_command("BEGIN TRANSACTION")?;
+        Ok(())
+    }
+
+    /// Issues `COMMIT`. Crate-internal use only.
+    pub(crate) fn commit_raw(&self) -> Result<()> {
+        self.execute_command("COMMIT")?;
+        Ok(())
+    }
+
+    /// Issues `ROLLBACK`. Crate-internal use only.
+    pub(crate) fn rollback_raw(&self) -> Result<()> {
+        self.execute_command("ROLLBACK")?;
+        Ok(())
+    }
+
     /// Begins an explicit transaction.
     ///
-    /// For an RAII guard that auto-rolls back on drop, use [`transaction()`](Self::transaction) instead.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use hyperdb_api::{Connection, CreateMode, Result};
-    /// # fn main() -> Result<()> {
-    /// # let conn = Connection::connect("localhost:7483", "test.hyper", CreateMode::DoNotCreate)?;
-    /// conn.begin_transaction()?;
-    /// conn.execute_command("INSERT INTO users VALUES (1, 'Alice')")?;
-    /// conn.commit()?;
-    /// # Ok(())
-    /// # }
-    /// ```
+    /// **Prefer [`transaction()`](Self::transaction)** — the RAII guard
+    /// auto-rolls back on drop and cannot leak a half-open transaction
+    /// across error paths. This method is hidden from generated
+    /// rustdoc and marked deprecated; it will be removed in a future
+    /// release.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Server`] if the server rejects `BEGIN TRANSACTION`
     /// (e.g. a transaction is already open on this session).
+    #[doc(hidden)]
+    #[deprecated(
+        note = "Use `Connection::transaction()` for an RAII guard. This method will be removed \
+                in a future release."
+    )]
     pub fn begin_transaction(&self) -> Result<()> {
-        self.execute_command("BEGIN TRANSACTION")?;
-        Ok(())
+        self.begin_transaction_raw()
     }
 
     /// Commits the current transaction.
     ///
+    /// **Prefer [`Transaction::commit`](crate::Transaction::commit)** on
+    /// the RAII guard returned by [`transaction()`](Self::transaction).
+    /// Hidden from generated rustdoc and deprecated; slated for removal.
+    ///
     /// # Errors
     ///
-    /// Returns [`Error::Server`] if the server rejects `COMMIT` — most
-    /// commonly because no transaction is currently open.
+    /// Returns [`Error::Server`] if the server rejects `COMMIT`.
+    #[doc(hidden)]
+    #[deprecated(
+        note = "Use `Transaction::commit()` on the RAII guard from `Connection::transaction()`. \
+                This method will be removed in a future release."
+    )]
     pub fn commit(&self) -> Result<()> {
-        self.execute_command("COMMIT")?;
-        Ok(())
+        self.commit_raw()
     }
 
     /// Rolls back the current transaction.
     ///
+    /// **Prefer [`Transaction::rollback`](crate::Transaction::rollback)**
+    /// on the RAII guard returned by [`transaction()`](Self::transaction).
+    /// Hidden from generated rustdoc and deprecated; slated for removal.
+    ///
     /// # Errors
     ///
-    /// Returns [`Error::Server`] if the server rejects `ROLLBACK` — most
-    /// commonly because no transaction is currently open.
+    /// Returns [`Error::Server`] if the server rejects `ROLLBACK`.
+    #[doc(hidden)]
+    #[deprecated(
+        note = "Use `Transaction::rollback()` on the RAII guard from `Connection::transaction()`. \
+                This method will be removed in a future release."
+    )]
     pub fn rollback(&self) -> Result<()> {
-        self.execute_command("ROLLBACK")?;
-        Ok(())
+        self.rollback_raw()
     }
 
     /// Starts a transaction and returns an RAII guard that auto-rolls back on drop.

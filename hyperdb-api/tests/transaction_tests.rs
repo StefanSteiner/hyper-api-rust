@@ -3,7 +3,14 @@
 
 //! Tests for transaction support (BEGIN/COMMIT/ROLLBACK).
 //!
-//! These tests verify basic transaction behavior.
+//! These tests verify basic transaction behavior. Several tests
+//! intentionally exercise the deprecated raw `begin_transaction` /
+//! `commit` / `rollback` methods on `Connection` to lock in their
+//! behavior; the deprecation warning is suppressed file-wide.
+#![allow(
+    deprecated,
+    reason = "tests intentionally exercise the deprecated raw transaction API"
+)]
 
 mod common;
 use common::TestConnection;

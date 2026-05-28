@@ -548,7 +548,7 @@ async fn load_files_runs_parallel_parquet_ingests() {
         let pool = Arc::clone(&pool);
         let table = table.to_string();
         async move {
-            let conn = pool.get().await.unwrap();
+            let mut conn = pool.get().await.unwrap();
             let opts = IngestOptions {
                 table,
                 mode: "replace".into(),
@@ -556,7 +556,7 @@ async fn load_files_runs_parallel_parquet_ingests() {
                 merge_key: None,
                 target_db: None,
             };
-            ingest_parquet_file_async(&conn, &path, &opts)
+            ingest_parquet_file_async(&mut conn, &path, &opts)
                 .await
                 .unwrap()
         }
