@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.3.0](https://github.com/tableau/hyper-api-rust/compare/v0.2.3...v0.3.0) (2026-05-29)
+
+This release aggregates a coordinated set of breaking and additive API changes that landed across four PRs during the v0.3.0 bundle window. See [MIGRATING-0.3.md](./MIGRATING-0.3.md) for complete migration recipes covering every change.
+
+### ⚠ BREAKING CHANGES
+
+* **Flat `Error` enum.** The public `hyperdb_api::Error` is now a flat canonical structure per the [Microsoft Pragmatic Rust Guidelines](https://microsoft.github.io/rust-guidelines/) — no `Box<dyn StdError>` cause channel, no `kind()` method, no `Other` catch-all variant. `Error::new` and `Error::with_cause` are deleted in favor of domain-specific snake_case constructors (`Error::connection`, `Error::server`, `Error::conversion`, etc.). The `ErrorKind` re-export from `hyperdb_api` is removed. ([#70](https://github.com/tableau/hyper-api-rust/issues/70), [#71](https://github.com/tableau/hyper-api-rust/pull/71))
+* **Transaction API consolidation.** `Connection::begin_transaction` / `commit` / `rollback` (and the async equivalents) are deprecated and `#[doc(hidden)]`. Use the RAII guard at `Connection::transaction()` / `AsyncConnection::transaction()` instead. ([#69](https://github.com/tableau/hyper-api-rust/issues/69), [#73](https://github.com/tableau/hyper-api-rust/pull/73))
+* **`FromRow` modernization.** `FromRow::from_row(&Row)` becomes `FromRow::from_row(RowAccessor<'_>)`. The blanket 1/2/3/4-tuple `FromRow` impls are deleted — define a struct with `#[derive(FromRow)]` instead. New `RowAccessor` carries a per-query cached column-name → index lookup; new `Row::get_by_name` for one-off named access. ([#61](https://github.com/tableau/hyper-api-rust/issues/61), [#62](https://github.com/tableau/hyper-api-rust/issues/62), [#74](https://github.com/tableau/hyper-api-rust/pull/74))
+* **Structured SQLSTATE on `Cancelled` / `Closed` / `Connection`.** `Error::Cancelled` and `Error::Closed` change from tuple to struct variants carrying `sqlstate: Option<String>`. `Error::Connection` gains the same field. `Error::sqlstate()` now returns `Some(...)` for these variants when the server provided a code (previously Server-only). New `Error::InvalidOperation` variant separates caller-API misuse from library invariant violations. ([#76](https://github.com/tableau/hyper-api-rust/pull/76))
+
+### Features
+
+* `#[derive(FromRow)]` proc-macro with `#[hyperdb(rename = "...")]` and `#[hyperdb(index = N)]` attributes, lives in the new re-exported `hyperdb-api-derive` crate ([#74](https://github.com/tableau/hyper-api-rust/pull/74))
+* `RowAccessor` accessors: `get` / `get_opt` (name-based) and `position` / `position_opt` (index-based) ([#74](https://github.com/tableau/hyper-api-rust/pull/74))
+* Ergonomic snake_case constructors workspace-wide for every error variant — `&str`, `String`, `format!(...)` accepted without `.to_string()` ceremony ([#71](https://github.com/tableau/hyper-api-rust/pull/71))
+* Typed `io::Error` sources preserved on `HyperProcess` lifecycle errors ([#76](https://github.com/tableau/hyper-api-rust/pull/76))
+* stabilize v0.3.0 public API bundle ([#77](https://github.com/tableau/hyper-api-rust/issues/77)) ([ac39b2c](https://github.com/tableau/hyper-api-rust/commit/ac39b2cc0ef77ecfbe3abcff965c985635e10fdf))
+
+### Deferred
+
+* Internal `client::Error` flatten — deferred to v0.3.x as [#75](https://github.com/tableau/hyper-api-rust/issues/75) (internal type, zero external consumers; scope grew on second look).
 ## [0.2.3](https://github.com/tableau/hyper-api-rust/compare/v0.2.2...v0.2.3) (2026-05-27)
 
 
