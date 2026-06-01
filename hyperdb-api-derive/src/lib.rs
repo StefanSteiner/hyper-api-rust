@@ -45,6 +45,8 @@
 //! [`RowAccessor::position`]: https://docs.rs/hyperdb-api
 //! [`RowAccessor::position_opt`]: https://docs.rs/hyperdb-api
 
+mod table_derive;
+
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
@@ -59,6 +61,193 @@ use syn::{
 enum FieldSource {
     Name(String),
     Index(usize),
+}
+
+/// Derives `hyperdb_api::Table` for a struct.
+///
+/// Generates `impl Table` with `NAME` and `CREATE_SQL` consts. When the
+/// `compile-time` cargo feature is enabled and `#[hyperdb(register)]` is
+/// present, also registers the table with the compile-time validator.
+///
+/// # Attributes (struct level)
+///
+/// - `#[hyperdb(table = "name")]` — override the SQL table name (default:
+///   lower_snake_case of the struct ident).
+/// - `#[hyperdb(register)]` — register for compile-time `query_as!` validation.
+///
+/// # Attributes (field level)
+///
+/// - `#[hyperdb(primary_key)]` — marks the column as NOT NULL (always true
+///   for non-`Option` fields, but documents intent).
+/// - `#[hyperdb(rename = "col")]` — use a different SQL column name.
+#[proc_macro_derive(Table, attributes(hyperdb))]
+pub fn table_derive(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    match table_derive::expand(&input) {
+        Ok(ts) => ts.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// Compile-time validated typed query macro.
+///
+/// Syntax: `query_as!(Type, "SQL")` or `query_as!(Type, "SQL", arg1, arg2, …)`
+///
+/// Returns a [`hyperdb_api::QueryAs<Type>`] builder. `Type` must implement
+/// [`hyperdb_api::FromRow`] and must be registered via
+/// `#[derive(Table)] #[hyperdb(register)]`.
+///
+/// With the `compile-time` cargo feature enabled, validates at build time that
+/// the SQL is syntactically valid, all referenced tables are registered, and
+/// all struct fields appear in the projected columns.
+///
+/// # Module ordering constraint (`compile-time` feature)
+///
+/// Registration happens at proc-macro expansion time in the proc-macro host
+/// process. Rust expands macros in the order modules are declared in `mod`
+/// statements (top-to-bottom in `lib.rs`/`main.rs`). If `derive(Table)` and
+/// `query_as!` are in different modules, the module containing `derive(Table)`
+/// structs **must be declared (via `mod`) before** the module containing
+/// `query_as!` calls, otherwise a false `StructNotRegistered` compile error
+/// is emitted.
+///
+/// Within a single file, struct-level derives always expand before
+/// function-body macros, so ordering within a file is not a concern.
+#[proc_macro]
+pub fn query_as(input: TokenStream) -> TokenStream {
+    match expand_query_as(&input.into()) {
+        Ok(ts) => ts.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+fn expand_query_as(input: &TokenStream2) -> syn::Result<TokenStream2> {
+    use syn::{parse::Parser, punctuated::Punctuated, Expr, Token};
+
+    // Parse: Type, "sql_literal" [, expr, expr, ...]
+    let parser = Punctuated::<Expr, Token![,]>::parse_terminated;
+    let args = parser.parse2(input.clone())?;
+    let mut iter = args.iter();
+
+    let ty_expr = iter.next().ok_or_else(|| {
+        syn::Error::new_spanned(
+            input,
+            "query_as! expects at least two arguments: query_as!(Type, \"SQL\")",
+        )
+    })?;
+
+    // Re-parse the first token as a type (not an expression).
+    let ty: Type = syn::parse2(quote!(#ty_expr))?;
+
+    let sql_expr = iter.next().ok_or_else(|| {
+        syn::Error::new_spanned(
+            ty_expr,
+            "query_as! expects a SQL string literal as the second argument",
+        )
+    })?;
+
+    // Remaining args are the bind parameters.
+    let rest: Vec<&Expr> = iter.collect();
+
+    // Compile-time validation: runs inside the proc-macro host at expansion time.
+    // The `compile-time` feature gates this — without it the macro is a
+    // pure pass-through with zero overhead. The variables are extracted inside
+    // the cfg block to avoid unused-variable warnings in the feature-off build.
+    #[cfg(feature = "compile-time")]
+    {
+        let struct_name = last_type_ident(&ty).map(ToString::to_string);
+        let sql_lit: Option<LitStr> = syn::parse2(quote!(#sql_expr)).ok();
+        if let (Some(struct_name), Some(sql_lit)) = (struct_name, sql_lit) {
+            let sql_str = sql_lit.value();
+            if let Err(e) = hyperdb_compile_check::validate_query_as(&struct_name, &sql_str) {
+                let msg = e.to_diagnostic();
+                return Ok(quote! {
+                    ::std::compile_error!(#msg)
+                });
+            }
+        }
+    }
+
+    Ok(quote! {
+        ::hyperdb_api::QueryAs::<#ty>::new(#sql_expr, &[#(&#rest),*])
+    })
+}
+
+/// Extract the last path segment ident from a type path (e.g. `User` from `crate::User`).
+/// Only needed when `compile-time` feature is enabled (used for registry lookup).
+#[cfg(feature = "compile-time")]
+fn last_type_ident(ty: &Type) -> Option<&syn::Ident> {
+    let Type::Path(syn::TypePath { path, qself: None }) = ty else {
+        return None;
+    };
+    path.segments.last().map(|s| &s.ident)
+}
+
+/// Validated single-column query macro.
+///
+/// Syntax: `query_scalar!(Type, "SQL")` or `query_scalar!(Type, "SQL", arg1, …)`
+///
+/// Returns a [`hyperdb_api::QueryScalar<Type>`] builder. `Type` must implement
+/// [`hyperdb_api::RowValue`]. No `derive(Table)` is required — scalars project
+/// a single column and don't map to a struct.
+///
+/// With the `compile-time` feature enabled, validates at build time that the
+/// SQL returns exactly one column.
+#[proc_macro]
+pub fn query_scalar(input: TokenStream) -> TokenStream {
+    match expand_query_scalar(&input.into()) {
+        Ok(ts) => ts.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+fn expand_query_scalar(input: &TokenStream2) -> syn::Result<TokenStream2> {
+    use syn::{parse::Parser, punctuated::Punctuated, Expr, Token};
+
+    let parser = Punctuated::<Expr, Token![,]>::parse_terminated;
+    let args = parser.parse2(input.clone())?;
+    let mut iter = args.iter();
+
+    let ty_expr = iter.next().ok_or_else(|| {
+        syn::Error::new_spanned(
+            input,
+            "query_scalar! expects at least two arguments: query_scalar!(Type, \"SQL\")",
+        )
+    })?;
+
+    let ty: Type = syn::parse2(quote!(#ty_expr))?;
+
+    let sql_expr = iter.next().ok_or_else(|| {
+        syn::Error::new_spanned(
+            ty_expr,
+            "query_scalar! expects a SQL string literal as the second argument",
+        )
+    })?;
+
+    let rest: Vec<&Expr> = iter.collect();
+
+    // Compile-time validation: verify the SQL returns exactly one column.
+    #[cfg(feature = "compile-time")]
+    {
+        let sql_lit: Option<LitStr> = syn::parse2(quote!(#sql_expr)).ok();
+        if let Some(sql_lit) = sql_lit {
+            let sql_str = sql_lit.value();
+            // Validate SQL structure (syntax + table existence) using a dummy
+            // struct name that won't be in the registry — we only care about
+            // one-column check, not struct-field matching.
+            match hyperdb_compile_check::validate_scalar_sql(&sql_str) {
+                Ok(()) => {}
+                Err(e) => {
+                    let msg = e.to_diagnostic();
+                    return Ok(quote! { ::std::compile_error!(#msg) });
+                }
+            }
+        }
+    }
+
+    Ok(quote! {
+        ::hyperdb_api::QueryScalar::<#ty>::new(#sql_expr, &[#(&#rest),*])
+    })
 }
 
 /// Derives `hyperdb_api::FromRow` for a struct.
@@ -167,6 +356,9 @@ fn field_source_for(field: &Field, default: &syn::Ident) -> syn::Result<FieldSou
                 let n: LitInt = meta.value()?.parse()?;
                 let parsed: usize = n.base10_parse()?;
                 index = Some((parsed, meta.path.span()));
+                Ok(())
+            } else if meta.path.is_ident("primary_key") {
+                // Table-derive attribute; silently ignored by FromRow.
                 Ok(())
             } else {
                 Err(meta.error(format!(
