@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.0](https://github.com/tableau/hyper-api-rust/compare/v0.3.1...v0.4.0) (2026-06-02)
+
+
+### Features
+
+* streaming FromRow mapping (stream_as) — constant-memory struct-mapped queries ([#91](https://github.com/tableau/hyper-api-rust/issues/91)) ([#94](https://github.com/tableau/hyper-api-rust/issues/94)) ([3327fc0](https://github.com/tableau/hyper-api-rust/commit/3327fc0fd8d61faaa55b8d5ae2922ff7284348c5))
+* opt-in compile-time SQL validation — `query_as!` / `query_scalar!` validate SQL against `#[derive(Table)]` structs at build time, with VS Code diagnostics ([#93](https://github.com/tableau/hyper-api-rust/issues/93)) ([73f9b0f](https://github.com/tableau/hyper-api-rust/commit/73f9b0f))
+
+
+### Bug Fixes
+
+* **release:** wrap hyperdb-compile-check pin in release-please markers ([#97](https://github.com/tableau/hyper-api-rust/issues/97)) ([1f07015](https://github.com/tableau/hyper-api-rust/commit/1f07015d9c26cd85fe1f722b8ef5d7c52464cd8c))
+
 ## [0.3.1](https://github.com/tableau/hyper-api-rust/compare/v0.3.0...v0.3.1) (2026-05-29)
 
 Patch release that fixes two related but distinct bugs surfaced by [#84](https://github.com/tableau/hyper-api-rust/issues/84) — wrong NUMERIC values in MCP query results and Node bindings.
