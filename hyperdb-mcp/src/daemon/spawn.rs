@@ -190,10 +190,21 @@ fn maybe_take_over(info: DaemonInfo, _scan: PortScan) -> io::Result<DaemonInfo> 
             // same argument as the FreePort path — `spawn_detached` is
             // fire-and-forget (it does not itself bind the port; the spawned
             // daemon's `HealthListener::bind` is the real single-instance lock).
-            // The OS grants the bind to exactly one daemon; the loser exits
-            // without writing the discovery file, and `wait_for_daemon` (which
-            // polls `discover()`) converges on whichever daemon won. No
-            // duplicate daemon survives and no AddrInUse surfaces to the client.
+            // The OS grants the bind to exactly one daemon; the loser exits at
+            // step 1 of `run_daemon` (before spawning hyperd or writing the
+            // discovery file), and `wait_for_daemon` (which polls `discover()`)
+            // converges on whichever daemon won. No duplicate daemon survives
+            // and no AddrInUse surfaces to the client.
+            //
+            // Defensive narrowing of that window: if a concurrent takeover has
+            // already published a fresh, identity-verified daemon on this port,
+            // adopt it instead of spawning — this avoids returning the stale
+            // `info` (old endpoint) we were carrying and skips a redundant spawn.
+            if let Some(fresh) = discovery::discover() {
+                if fresh.health_port == info.health_port {
+                    return Ok(fresh);
+                }
+            }
             spawn_detached(info.health_port)?;
             return wait_for_daemon();
         }

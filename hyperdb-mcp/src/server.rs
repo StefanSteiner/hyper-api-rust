@@ -1281,7 +1281,11 @@ impl HyperMcpServer {
             .lock()
             .is_ok_and(|guard| guard.elapsed() >= HEARTBEAT_INTERVAL);
         if should_send {
-            // Get the daemon's health port from the engine (the discovered port, not a re-resolve).
+            // Use the daemon's discovered health port (recorded on the engine at
+            // connect time), NOT `resolve_port()`: with port scanning the daemon
+            // may have bound a non-base port (e.g. 7492 when 7485 was taken), and
+            // re-resolving would return the base port — the heartbeat would then
+            // target the wrong address and silently fail to keep the daemon warm.
             // Skip if local mode (no daemon) or if the engine lock is poisoned.
             let port = self
                 .engine
