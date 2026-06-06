@@ -8,13 +8,12 @@
 //! daemon, validating liveness via a TCP health check before trusting it.
 
 use std::io;
-use std::net::TcpStream;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use super::DEFAULT_DAEMON_PORT;
+use super::{DAEMON_PORT_SCAN_SPAN, DEFAULT_DAEMON_BASE_PORT};
 
 /// Information written by the daemon so clients can discover and connect.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,21 +98,47 @@ pub fn remove_discovery_file() {
     }
 }
 
-/// Check if the daemon is alive by attempting a TCP connection to its health port.
+/// Check if the daemon is alive by sending PING and verifying the identifying token.
+/// No longer accepts a bare TCP connect (prevents collisions with foreign services).
 fn is_daemon_alive(port: u16) -> bool {
-    TcpStream::connect_timeout(
-        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
-        Duration::from_secs(2),
-    )
-    .is_ok()
+    super::health::ping_identified(port, Duration::from_millis(300), Duration::from_millis(300))
+        .is_some()
 }
 
-/// Resolve the daemon health port from environment or default.
-pub fn resolve_port() -> u16 {
-    std::env::var(super::ENV_DAEMON_PORT)
+/// Port scan configuration: a base port and the number of ports to scan.
+/// When `span == 1`, the port is pinned (no scan). Used by the later
+/// port-scanning stage to discover or spawn a daemon across a range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PortScan {
+    pub base: u16,
+    pub span: u16,
+}
+
+/// Resolve the daemon health port scan configuration from environment or default.
+/// If `HYPERDB_DAEMON_PORT` is set and valid, returns a pinned scan (span=1) at
+/// that exact port. Otherwise, returns the default base port with the full scan span.
+pub fn resolve_port_scan() -> PortScan {
+    if let Some(port) = std::env::var(super::ENV_DAEMON_PORT)
         .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_DAEMON_PORT)
+        .and_then(|v| v.parse::<u16>().ok())
+    {
+        PortScan {
+            base: port,
+            span: 1,
+        }
+    } else {
+        PortScan {
+            base: DEFAULT_DAEMON_BASE_PORT,
+            span: DAEMON_PORT_SCAN_SPAN,
+        }
+    }
+}
+
+/// Resolve the daemon health port from environment or default. Back-compat
+/// wrapper for single-port callers; returns the base port from [`resolve_port_scan`].
+/// New code that needs scan-aware logic should call [`resolve_port_scan`] directly.
+pub fn resolve_port() -> u16 {
+    resolve_port_scan().base
 }
 
 /// Cross-platform home directory resolution.

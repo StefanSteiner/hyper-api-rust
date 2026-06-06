@@ -183,6 +183,10 @@ pub struct Engine {
     hyper: Option<HyperProcess>,
     /// Stored endpoint for daemon mode (the daemon advertises this).
     daemon_endpoint: Option<String>,
+    /// The daemon's health port, if connected via daemon mode. `None` in local mode.
+    /// Used by the server's heartbeat logic to target the correct port (not a re-resolve,
+    /// which would break when scanning is enabled).
+    daemon_health_port: Option<u16>,
     connection: Connection,
     /// The primary database for this session. Lives in a temp dir and is
     /// deleted on `Drop`.
@@ -337,6 +341,7 @@ impl Engine {
         Ok(Self {
             hyper: Some(hyper),
             daemon_endpoint: None,
+            daemon_health_port: None,
             connection,
             ephemeral_path,
             persistent_path,
@@ -412,6 +417,7 @@ impl Engine {
         Ok(Some(Self {
             hyper: None,
             daemon_endpoint: Some(info.hyperd_endpoint),
+            daemon_health_port: Some(info.health_port),
             connection,
             ephemeral_path: ephemeral_path.to_path_buf(),
             persistent_path,
@@ -449,6 +455,12 @@ impl Engine {
             .require_endpoint()
             .map(std::string::ToString::to_string)
             .map_err(|e| McpError::new(ErrorCode::InternalError, e.to_string()))
+    }
+
+    /// The daemon's health port, if this engine is connected via daemon mode.
+    /// Returns `None` in local mode (when this engine owns a private `HyperProcess`).
+    pub fn daemon_health_port(&self) -> Option<u16> {
+        self.daemon_health_port
     }
 
     /// Absolute path to the ephemeral primary `.hyper` file on disk.

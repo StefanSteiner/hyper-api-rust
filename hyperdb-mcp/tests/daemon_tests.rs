@@ -9,10 +9,11 @@
 //! are process-global, these tests MUST run sequentially. We enforce this via a
 //! shared mutex — every test that touches env vars acquires `ENV_LOCK` first.
 
+use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use hyperdb_mcp::daemon::discovery::{self, DaemonInfo};
+use hyperdb_mcp::daemon::discovery::{self, DaemonInfo, PortScan};
 use hyperdb_mcp::daemon::health::{self, DaemonState, HealthListener};
 use tempfile::TempDir;
 
@@ -181,7 +182,7 @@ fn health_protocol_ping_pong() {
     let (port, _handle, _state) = start_health_listener();
 
     let response = health::send_command(port, "PING").unwrap();
-    assert_eq!(response.trim(), "PONG");
+    assert!(response.trim().starts_with("PONG hyperdb-mcp "));
 }
 
 #[test]
@@ -253,7 +254,7 @@ fn health_protocol_multi_command_session() {
     let (port, _handle, _state) = start_health_listener();
 
     let response1 = health::send_command(port, "PING").unwrap();
-    assert_eq!(response1.trim(), "PONG");
+    assert!(response1.trim().starts_with("PONG hyperdb-mcp "));
 
     let response2 = health::send_command(port, "STATUS").unwrap();
     let parsed: serde_json::Value = serde_json::from_str(response2.trim()).unwrap();
@@ -261,6 +262,100 @@ fn health_protocol_multi_command_session() {
 
     let response3 = health::send_command(port, "HEARTBEAT").unwrap();
     assert_eq!(response3.trim(), "OK");
+}
+
+#[test]
+fn health_protocol_ping_identity_accept() {
+    let (port, _handle, _state) = start_health_listener();
+
+    let version =
+        health::ping_identified(port, Duration::from_millis(300), Duration::from_millis(300))
+            .expect("should return Some for a valid hyperdb-mcp daemon");
+    assert_eq!(version, hyperdb_mcp::version::MCP_VERSION);
+}
+
+#[test]
+fn health_protocol_ping_identity_reject_foreign() {
+    use std::io::Write;
+
+    // Bind a raw listener that returns a bare "PONG\n" without the identifying token
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let _ = stream.write_all(b"PONG\n");
+        }
+    });
+
+    // Give the thread a moment to start accepting
+    std::thread::sleep(Duration::from_millis(50));
+
+    let result =
+        health::ping_identified(port, Duration::from_millis(300), Duration::from_millis(300));
+    assert_eq!(result, None, "should reject foreign PONG without token");
+}
+
+#[test]
+fn health_protocol_ping_identity_reject_token_lookalike() {
+    use std::io::Write;
+
+    // A foreign service whose token *starts with* "hyperdb-mcp" must NOT pass.
+    // Guards against a naive `starts_with("PONG hyperdb-mcp")` prefix check.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let _ = stream.write_all(b"PONG hyperdb-mcpEVIL 9.9.9\n");
+        }
+    });
+
+    std::thread::sleep(Duration::from_millis(50));
+
+    let result =
+        health::ping_identified(port, Duration::from_millis(300), Duration::from_millis(300));
+    assert_eq!(
+        result, None,
+        "must reject a token that only shares a prefix"
+    );
+}
+
+#[test]
+fn health_protocol_ping_identity_reject_refused() {
+    // Bind a listener to get a port, then drop it so the port is closed
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    // Brief sleep to reduce the race (the OS may not have fully released the port)
+    std::thread::sleep(Duration::from_millis(10));
+
+    let result =
+        health::ping_identified(port, Duration::from_millis(300), Duration::from_millis(300));
+    assert_eq!(result, None, "should return None for connection refused");
+}
+
+#[test]
+fn resolve_port_scan_pins_when_env_set() {
+    let _lock = acquire_env_lock();
+    let _guard = EnvGuard::set("HYPERDB_DAEMON_PORT", "9001");
+    assert_eq!(
+        discovery::resolve_port_scan(),
+        PortScan {
+            base: 9001,
+            span: 1
+        }
+    );
+}
+
+#[test]
+fn resolve_port_scan_scans_when_env_unset() {
+    let _lock = acquire_env_lock();
+    let _guard = EnvGuard::remove("HYPERDB_DAEMON_PORT");
+    let scan = discovery::resolve_port_scan();
+    assert_eq!(scan.base, hyperdb_mcp::daemon::DEFAULT_DAEMON_BASE_PORT);
+    assert_eq!(scan.span, hyperdb_mcp::daemon::DAEMON_PORT_SCAN_SPAN);
 }
 
 // ─── Unit tests: idle timeout logic (no env vars) ─────────────────────────────
@@ -455,7 +550,7 @@ fn resolve_port_uses_default_when_env_unset() {
     let _guard = EnvGuard::remove("HYPERDB_DAEMON_PORT");
     assert_eq!(
         discovery::resolve_port(),
-        hyperdb_mcp::daemon::DEFAULT_DAEMON_PORT
+        hyperdb_mcp::daemon::DEFAULT_DAEMON_BASE_PORT
     );
 }
 
@@ -531,7 +626,7 @@ fn daemon_mode_two_engines_share_same_hyperd() {
     );
     // Verify the daemon is the one we started (health port reachable)
     let status = health::send_command(daemon.info.health_port, "PING").unwrap();
-    assert_eq!(status.trim(), "PONG");
+    assert!(status.trim().starts_with("PONG hyperdb-mcp "));
 
     engine1.execute_command("CREATE TABLE foo (x INT)").unwrap();
     engine1
@@ -595,7 +690,7 @@ fn daemon_mode_persistent_engine_data_is_queryable() {
     assert_eq!(rows[1]["name"], "beta");
 
     let resp = health::send_command(daemon.info.health_port, "PING").unwrap();
-    assert_eq!(resp.trim(), "PONG");
+    assert!(resp.trim().starts_with("PONG hyperdb-mcp "));
 }
 
 #[cfg(unix)]

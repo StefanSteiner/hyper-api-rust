@@ -111,7 +111,7 @@ enum Commands {
         action: Option<DaemonAction>,
 
         /// TCP port for health listener and single-instance lock
-        #[arg(long, default_value_t = daemon::DEFAULT_DAEMON_PORT)]
+        #[arg(long, default_value_t = daemon::DEFAULT_DAEMON_BASE_PORT)]
         port: u16,
 
         /// Idle timeout in seconds before the daemon shuts down

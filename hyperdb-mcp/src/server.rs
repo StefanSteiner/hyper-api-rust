@@ -1281,10 +1281,18 @@ impl HyperMcpServer {
             .lock()
             .is_ok_and(|guard| guard.elapsed() >= HEARTBEAT_INTERVAL);
         if should_send {
-            let port = crate::daemon::discovery::resolve_port();
-            let _ = crate::daemon::health::send_command(port, "HEARTBEAT");
-            if let Ok(mut guard) = self.last_heartbeat.lock() {
-                *guard = std::time::Instant::now();
+            // Get the daemon's health port from the engine (the discovered port, not a re-resolve).
+            // Skip if local mode (no daemon) or if the engine lock is poisoned.
+            let port = self
+                .engine
+                .lock()
+                .ok()
+                .and_then(|guard| guard.as_ref().and_then(Engine::daemon_health_port));
+            if let Some(port) = port {
+                let _ = crate::daemon::health::send_command(port, "HEARTBEAT");
+                if let Ok(mut guard) = self.last_heartbeat.lock() {
+                    *guard = std::time::Instant::now();
+                }
             }
         }
     }
