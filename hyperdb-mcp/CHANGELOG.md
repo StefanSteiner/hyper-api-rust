@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- The `status` tool now reports an `engine` block with the backing `hyperd`
+  connection: `mode` (`daemon` or `local`), `hyperd_endpoint` (the libpq
+  endpoint queries run against), and `daemon_health_port` (the shared daemon's
+  control/lock port, `null` in local mode).
 - **Single-instance `hyperd` daemon** — by default, all MCP clients now
   share one `hyperd` process per user instead of each spawning their own.
   Multiple AI clients (Claude Code, Cursor, VS Code Copilot, etc.) can

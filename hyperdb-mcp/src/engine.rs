@@ -1436,6 +1436,18 @@ impl Engine {
             Value::String(p.to_string_lossy().into_owned())
         });
 
+        // Connection details for the backing `hyperd`. In daemon mode the
+        // endpoint and health port come from the shared daemon's discovery
+        // file; in local mode (`--no-daemon`) this engine owns a private
+        // `hyperd` and there is no health port. `hyperd_endpoint()` only errors
+        // if no endpoint is available at all, which `is_running` already
+        // reflects — surface it as null rather than failing the whole status.
+        let in_daemon_mode = self.daemon_endpoint.is_some();
+        let endpoint_value = self.hyperd_endpoint().map_or(Value::Null, Value::String);
+        let health_port_value = self
+            .daemon_health_port
+            .map_or(Value::Null, |p| Value::Number(p.into()));
+
         Ok(json!({
             "hyperd_running": self.is_running(),
             "ephemeral_path": self.ephemeral_path.to_string_lossy(),
@@ -1444,6 +1456,14 @@ impl Engine {
             "table_count": table_count,
             "total_rows": total_rows,
             "disk_usage_bytes": disk_bytes,
+            // Where this engine is talking to hyperd. `hyperd_endpoint` is the
+            // libpq endpoint queries run against; `daemon_health_port` is the
+            // shared daemon's control/lock port (null in local mode).
+            "engine": {
+                "mode": if in_daemon_mode { "daemon" } else { "local" },
+                "hyperd_endpoint": endpoint_value,
+                "daemon_health_port": health_port_value,
+            },
             // The MCP server and the `hyperdb-api` crate it's built on live in
             // the same Cargo workspace and ship from the same commit, so a
             // single version string identifies both. Label it by the

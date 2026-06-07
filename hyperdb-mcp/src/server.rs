@@ -2880,9 +2880,10 @@ impl HyperMcpServer {
     }
 
     /// Returns plugin health, workspace info, table count, total rows, disk
-    /// usage, and the list of active directory watchers with their stats.
+    /// usage, the backing `hyperd` connection (mode, endpoint, daemon health
+    /// port), and the list of active directory watchers with their stats.
     #[tool(
-        description = "Returns plugin health, workspace info, table count, total rows, disk usage, and active directory watchers."
+        description = "Returns plugin health, workspace info, table count, total rows, disk usage, the backing hyperd connection (engine.mode, engine.hyperd_endpoint, engine.daemon_health_port), and active directory watchers."
     )]
     fn status(&self) -> Result<CallToolResult, rmcp::ErrorData> {
         let result = self.with_engine(super::engine::Engine::status);
