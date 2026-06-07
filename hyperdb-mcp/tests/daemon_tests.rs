@@ -9,10 +9,11 @@
 //! are process-global, these tests MUST run sequentially. We enforce this via a
 //! shared mutex — every test that touches env vars acquires `ENV_LOCK` first.
 
+use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use hyperdb_mcp::daemon::discovery::{self, DaemonInfo};
+use hyperdb_mcp::daemon::discovery::{self, DaemonInfo, PortScan};
 use hyperdb_mcp::daemon::health::{self, DaemonState, HealthListener};
 use tempfile::TempDir;
 
@@ -158,6 +159,59 @@ fn restart_history_prunes_entries_older_than_window() {
     );
 }
 
+// ─── Unit tests: DaemonConfig (require ENV_LOCK) ─────────────────────────────
+
+#[test]
+fn daemon_config_from_args_none_when_unset() {
+    let _lock = acquire_env_lock();
+    let _guard = EnvGuard::remove("HYPERDB_DAEMON_IDLE_TIMEOUT");
+
+    let config = hyperdb_mcp::daemon::run::DaemonConfig::from_args(0, None);
+    assert!(
+        config.idle_timeout.is_none(),
+        "idle_timeout should be None when neither flag nor env is set"
+    );
+}
+
+#[test]
+fn daemon_config_from_args_some_when_flag() {
+    let _lock = acquire_env_lock();
+    let _guard = EnvGuard::remove("HYPERDB_DAEMON_IDLE_TIMEOUT");
+
+    let config = hyperdb_mcp::daemon::run::DaemonConfig::from_args(0, Some(120));
+    assert_eq!(
+        config.idle_timeout,
+        Some(Duration::from_secs(120)),
+        "idle_timeout should match the provided flag value"
+    );
+}
+
+#[test]
+fn daemon_config_from_args_some_when_env() {
+    let _lock = acquire_env_lock();
+    let _guard = EnvGuard::set("HYPERDB_DAEMON_IDLE_TIMEOUT", "90");
+
+    let config = hyperdb_mcp::daemon::run::DaemonConfig::from_args(0, None);
+    assert_eq!(
+        config.idle_timeout,
+        Some(Duration::from_secs(90)),
+        "idle_timeout should match the env var value when no flag is provided"
+    );
+}
+
+#[test]
+fn daemon_config_from_args_flag_takes_precedence() {
+    let _lock = acquire_env_lock();
+    let _guard = EnvGuard::set("HYPERDB_DAEMON_IDLE_TIMEOUT", "90");
+
+    let config = hyperdb_mcp::daemon::run::DaemonConfig::from_args(0, Some(120));
+    assert_eq!(
+        config.idle_timeout,
+        Some(Duration::from_secs(120)),
+        "flag value should take precedence over env var"
+    );
+}
+
 // ─── Unit tests: Health protocol (no env vars, safe to run in parallel) ───────
 
 #[test]
@@ -181,7 +235,7 @@ fn health_protocol_ping_pong() {
     let (port, _handle, _state) = start_health_listener();
 
     let response = health::send_command(port, "PING").unwrap();
-    assert_eq!(response.trim(), "PONG");
+    assert!(response.trim().starts_with("PONG hyperdb-mcp "));
 }
 
 #[test]
@@ -253,7 +307,7 @@ fn health_protocol_multi_command_session() {
     let (port, _handle, _state) = start_health_listener();
 
     let response1 = health::send_command(port, "PING").unwrap();
-    assert_eq!(response1.trim(), "PONG");
+    assert!(response1.trim().starts_with("PONG hyperdb-mcp "));
 
     let response2 = health::send_command(port, "STATUS").unwrap();
     let parsed: serde_json::Value = serde_json::from_str(response2.trim()).unwrap();
@@ -261,6 +315,100 @@ fn health_protocol_multi_command_session() {
 
     let response3 = health::send_command(port, "HEARTBEAT").unwrap();
     assert_eq!(response3.trim(), "OK");
+}
+
+#[test]
+fn health_protocol_ping_identity_accept() {
+    let (port, _handle, _state) = start_health_listener();
+
+    let version =
+        health::ping_identified(port, Duration::from_millis(300), Duration::from_millis(300))
+            .expect("should return Some for a valid hyperdb-mcp daemon");
+    assert_eq!(version, hyperdb_mcp::version::MCP_VERSION);
+}
+
+#[test]
+fn health_protocol_ping_identity_reject_foreign() {
+    use std::io::Write;
+
+    // Bind a raw listener that returns a bare "PONG\n" without the identifying token
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let _ = stream.write_all(b"PONG\n");
+        }
+    });
+
+    // Give the thread a moment to start accepting
+    std::thread::sleep(Duration::from_millis(50));
+
+    let result =
+        health::ping_identified(port, Duration::from_millis(300), Duration::from_millis(300));
+    assert_eq!(result, None, "should reject foreign PONG without token");
+}
+
+#[test]
+fn health_protocol_ping_identity_reject_token_lookalike() {
+    use std::io::Write;
+
+    // A foreign service whose token *starts with* "hyperdb-mcp" must NOT pass.
+    // Guards against a naive `starts_with("PONG hyperdb-mcp")` prefix check.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let _ = stream.write_all(b"PONG hyperdb-mcpEVIL 9.9.9\n");
+        }
+    });
+
+    std::thread::sleep(Duration::from_millis(50));
+
+    let result =
+        health::ping_identified(port, Duration::from_millis(300), Duration::from_millis(300));
+    assert_eq!(
+        result, None,
+        "must reject a token that only shares a prefix"
+    );
+}
+
+#[test]
+fn health_protocol_ping_identity_reject_refused() {
+    // Bind a listener to get a port, then drop it so the port is closed
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    // Brief sleep to reduce the race (the OS may not have fully released the port)
+    std::thread::sleep(Duration::from_millis(10));
+
+    let result =
+        health::ping_identified(port, Duration::from_millis(300), Duration::from_millis(300));
+    assert_eq!(result, None, "should return None for connection refused");
+}
+
+#[test]
+fn resolve_port_scan_pins_when_env_set() {
+    let _lock = acquire_env_lock();
+    let _guard = EnvGuard::set("HYPERDB_DAEMON_PORT", "9001");
+    assert_eq!(
+        discovery::resolve_port_scan(),
+        PortScan {
+            base: 9001,
+            span: 1
+        }
+    );
+}
+
+#[test]
+fn resolve_port_scan_scans_when_env_unset() {
+    let _lock = acquire_env_lock();
+    let _guard = EnvGuard::remove("HYPERDB_DAEMON_PORT");
+    let scan = discovery::resolve_port_scan();
+    assert_eq!(scan.base, hyperdb_mcp::daemon::DEFAULT_DAEMON_BASE_PORT);
+    assert_eq!(scan.span, hyperdb_mcp::daemon::DAEMON_PORT_SCAN_SPAN);
 }
 
 // ─── Unit tests: idle timeout logic (no env vars) ─────────────────────────────
@@ -455,8 +603,132 @@ fn resolve_port_uses_default_when_env_unset() {
     let _guard = EnvGuard::remove("HYPERDB_DAEMON_PORT");
     assert_eq!(
         discovery::resolve_port(),
-        hyperdb_mcp::daemon::DEFAULT_DAEMON_PORT
+        hyperdb_mcp::daemon::DEFAULT_DAEMON_BASE_PORT
     );
+}
+
+// ─── Unit tests: Port scanning (require ENV_LOCK + sandbox OFF) ──────────────
+
+#[test]
+fn scan_finds_our_daemon_via_status() {
+    let _lock = acquire_env_lock();
+    let (port, _handle, _state) = start_health_listener();
+
+    let scan = PortScan {
+        base: port,
+        span: 1,
+    };
+    match discovery::scan_for_daemon(scan) {
+        discovery::ScanOutcome::Found(info) => {
+            assert_eq!(info.hyperd_endpoint, "127.0.0.1:54321");
+        }
+        other => panic!("expected Found, got {other:?}"),
+    }
+}
+
+#[test]
+fn scan_skips_camped_returns_free() {
+    let _lock = acquire_env_lock();
+
+    // Find a camped port `base` whose immediate successor `base + 1` is free,
+    // so the scan range is exactly the two adjacent ports {base, base+1}.
+    //
+    // We deliberately keep the range to two ports rather than scanning the
+    // (potentially wide) gap between two arbitrary OS-assigned ports: other
+    // tests' `start_health_listener` helpers leak real identity-answering
+    // `HealthListener`s on random high ports for the lifetime of the test
+    // process, and a wide scan can land on one and return `Found` instead of
+    // `FreePort`. With a 2-port window, a leaked listener would have to occupy
+    // exactly `base+1` — which we confirm is free immediately before scanning.
+    let (camped_listener, base) = loop {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        if port < u16::MAX {
+            // `base + 1` is free iff we can bind it right now. Drop the probe
+            // so the port is released for the scan to find as `Refused`.
+            if let Ok(probe) = TcpListener::bind(("127.0.0.1", port + 1)) {
+                drop(probe);
+                break (listener, port);
+            }
+        }
+        // `base+1` was occupied (or base == u16::MAX) — retry with a fresh port.
+        drop(listener);
+    };
+    let expected_free = base + 1;
+
+    // Spawn a thread that keeps the camped listener alive and accepts
+    // connections, answering with non-protocol garbage so the identity check
+    // classifies it as `Camped`, not `OurDaemon`.
+    std::thread::spawn(move || loop {
+        if let Ok((mut stream, _)) = camped_listener.accept() {
+            use std::io::Write;
+            let _ = stream.write_all(b"NOPE\n");
+        }
+    });
+
+    // Give the thread a moment to start accepting.
+    std::thread::sleep(Duration::from_millis(50));
+
+    // Scan exactly {base (camped), base+1 (free)}.
+    let scan = PortScan { base, span: 2 };
+
+    match discovery::scan_for_daemon(scan) {
+        discovery::ScanOutcome::FreePort(port) => {
+            assert_eq!(
+                port, expected_free,
+                "scan should skip the camped base port and return base+1"
+            );
+        }
+        other => panic!("expected FreePort, got {other:?}"),
+    }
+}
+
+#[test]
+fn scan_all_refused_returns_freeport_base() {
+    // Pick a high port that's almost certainly free.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = listener.local_addr().unwrap().port();
+    drop(listener); // Release the port so it's free again.
+
+    std::thread::sleep(Duration::from_millis(10));
+
+    // Span of 1: probe only the single known-free `base` port. A wider span
+    // would risk colliding with a leaked health listener from another parallel
+    // test (they bind random high ports and leak for the test-process lifetime),
+    // which would be reported as `Found` rather than `FreePort`.
+    let scan = PortScan { base, span: 1 };
+    match discovery::scan_for_daemon(scan) {
+        discovery::ScanOutcome::FreePort(port) => {
+            assert_eq!(port, base, "should return the first free port (base)");
+        }
+        other => panic!("expected FreePort(base), got {other:?}"),
+    }
+}
+
+#[test]
+fn probe_refused_when_closed() {
+    // Bind a listener to get a port, then drop it so the port is closed.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    std::thread::sleep(Duration::from_millis(10));
+
+    // Access the private probe_port via the public scan_for_daemon wrapper.
+    // We know that if the scan returns FreePort, then probe_port returned Refused.
+    let scan = PortScan {
+        base: port,
+        span: 1,
+    };
+    match discovery::scan_for_daemon(scan) {
+        discovery::ScanOutcome::FreePort(p) => {
+            assert_eq!(
+                p, port,
+                "probe_port should have returned Refused for closed port"
+            );
+        }
+        other => panic!("expected FreePort (Refused), got {other:?}"),
+    }
 }
 
 #[test]
@@ -479,6 +751,56 @@ fn discover_finds_live_daemon() {
     let discovered = discovery::discover().expect("should discover live daemon");
     assert_eq!(discovered.pid, 12345);
     assert_eq!(discovered.health_port, port);
+}
+
+// ─── Unit tests: Version takeover decision (no env vars, safe parallel) ─────────
+
+#[test]
+fn takeover_decision_newer_client_takes_over() {
+    assert!(
+        hyperdb_mcp::daemon::spawn::client_should_take_over("0.5.0", "0.4.0"),
+        "0.5.0 client should take over 0.4.0 daemon"
+    );
+}
+
+#[test]
+fn takeover_decision_equal_version_reuses() {
+    assert!(
+        !hyperdb_mcp::daemon::spawn::client_should_take_over("0.4.0", "0.4.0"),
+        "equal versions should reuse daemon"
+    );
+}
+
+#[test]
+fn takeover_decision_older_client_reuses() {
+    assert!(
+        !hyperdb_mcp::daemon::spawn::client_should_take_over("0.4.0", "0.5.0"),
+        "older client should reuse newer daemon"
+    );
+}
+
+#[test]
+fn takeover_decision_client_unparseable_reuses() {
+    assert!(
+        !hyperdb_mcp::daemon::spawn::client_should_take_over("garbage", "0.4.0"),
+        "unparseable client version should reuse daemon"
+    );
+}
+
+#[test]
+fn takeover_decision_daemon_unparseable_reuses() {
+    assert!(
+        !hyperdb_mcp::daemon::spawn::client_should_take_over("0.4.0", "garbage"),
+        "unparseable daemon version should reuse daemon"
+    );
+}
+
+#[test]
+fn takeover_decision_both_unparseable_reuses() {
+    assert!(
+        !hyperdb_mcp::daemon::spawn::client_should_take_over("garbage", "junk"),
+        "both unparseable should reuse daemon"
+    );
 }
 
 // ─── Integration tests: full daemon lifecycle with real hyperd ─────────────────
@@ -531,7 +853,7 @@ fn daemon_mode_two_engines_share_same_hyperd() {
     );
     // Verify the daemon is the one we started (health port reachable)
     let status = health::send_command(daemon.info.health_port, "PING").unwrap();
-    assert_eq!(status.trim(), "PONG");
+    assert!(status.trim().starts_with("PONG hyperdb-mcp "));
 
     engine1.execute_command("CREATE TABLE foo (x INT)").unwrap();
     engine1
@@ -595,7 +917,7 @@ fn daemon_mode_persistent_engine_data_is_queryable() {
     assert_eq!(rows[1]["name"], "beta");
 
     let resp = health::send_command(daemon.info.health_port, "PING").unwrap();
-    assert_eq!(resp.trim(), "PONG");
+    assert!(resp.trim().starts_with("PONG hyperdb-mcp "));
 }
 
 #[cfg(unix)]
@@ -793,7 +1115,7 @@ impl TestDaemon {
             rt.block_on(async {
                 let config = hyperdb_mcp::daemon::run::DaemonConfig {
                     port: 0,
-                    idle_timeout: Duration::from_secs(300),
+                    idle_timeout: Some(Duration::from_secs(300)),
                 };
                 hyperdb_mcp::daemon::run::run_daemon(config)
                     .await

@@ -1281,10 +1281,22 @@ impl HyperMcpServer {
             .lock()
             .is_ok_and(|guard| guard.elapsed() >= HEARTBEAT_INTERVAL);
         if should_send {
-            let port = crate::daemon::discovery::resolve_port();
-            let _ = crate::daemon::health::send_command(port, "HEARTBEAT");
-            if let Ok(mut guard) = self.last_heartbeat.lock() {
-                *guard = std::time::Instant::now();
+            // Use the daemon's discovered health port (recorded on the engine at
+            // connect time), NOT `resolve_port()`: with port scanning the daemon
+            // may have bound a non-base port (e.g. 7492 when 7485 was taken), and
+            // re-resolving would return the base port — the heartbeat would then
+            // target the wrong address and silently fail to keep the daemon warm.
+            // Skip if local mode (no daemon) or if the engine lock is poisoned.
+            let port = self
+                .engine
+                .lock()
+                .ok()
+                .and_then(|guard| guard.as_ref().and_then(Engine::daemon_health_port));
+            if let Some(port) = port {
+                let _ = crate::daemon::health::send_command(port, "HEARTBEAT");
+                if let Ok(mut guard) = self.last_heartbeat.lock() {
+                    *guard = std::time::Instant::now();
+                }
             }
         }
     }
@@ -2868,9 +2880,10 @@ impl HyperMcpServer {
     }
 
     /// Returns plugin health, workspace info, table count, total rows, disk
-    /// usage, and the list of active directory watchers with their stats.
+    /// usage, the backing `hyperd` connection (mode, endpoint, daemon health
+    /// port), and the list of active directory watchers with their stats.
     #[tool(
-        description = "Returns plugin health, workspace info, table count, total rows, disk usage, and active directory watchers."
+        description = "Returns plugin health, workspace info, table count, total rows, disk usage, the backing hyperd connection (engine.mode, engine.hyperd_endpoint, engine.daemon_health_port), and active directory watchers."
     )]
     fn status(&self) -> Result<CallToolResult, rmcp::ErrorData> {
         let result = self.with_engine(super::engine::Engine::status);

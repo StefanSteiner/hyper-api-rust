@@ -183,6 +183,10 @@ pub struct Engine {
     hyper: Option<HyperProcess>,
     /// Stored endpoint for daemon mode (the daemon advertises this).
     daemon_endpoint: Option<String>,
+    /// The daemon's health port, if connected via daemon mode. `None` in local mode.
+    /// Used by the server's heartbeat logic to target the correct port (not a re-resolve,
+    /// which would break when scanning is enabled).
+    daemon_health_port: Option<u16>,
     connection: Connection,
     /// The primary database for this session. Lives in a temp dir and is
     /// deleted on `Drop`.
@@ -337,6 +341,7 @@ impl Engine {
         Ok(Self {
             hyper: Some(hyper),
             daemon_endpoint: None,
+            daemon_health_port: None,
             connection,
             ephemeral_path,
             persistent_path,
@@ -369,8 +374,7 @@ impl Engine {
         persistent_path: Option<PathBuf>,
         log_dir: &Path,
     ) -> Result<Option<Self>, McpError> {
-        let port = daemon::discovery::resolve_port();
-        let info = match daemon::spawn::ensure_daemon(port) {
+        let info = match daemon::spawn::ensure_daemon(daemon::discovery::resolve_port_scan()) {
             Ok(info) => info,
             Err(e) => {
                 tracing::debug!(error = %e, "daemon unavailable, falling back to local mode");
@@ -412,6 +416,7 @@ impl Engine {
         Ok(Some(Self {
             hyper: None,
             daemon_endpoint: Some(info.hyperd_endpoint),
+            daemon_health_port: Some(info.health_port),
             connection,
             ephemeral_path: ephemeral_path.to_path_buf(),
             persistent_path,
@@ -449,6 +454,12 @@ impl Engine {
             .require_endpoint()
             .map(std::string::ToString::to_string)
             .map_err(|e| McpError::new(ErrorCode::InternalError, e.to_string()))
+    }
+
+    /// The daemon's health port, if this engine is connected via daemon mode.
+    /// Returns `None` in local mode (when this engine owns a private `HyperProcess`).
+    pub fn daemon_health_port(&self) -> Option<u16> {
+        self.daemon_health_port
     }
 
     /// Absolute path to the ephemeral primary `.hyper` file on disk.
@@ -1425,6 +1436,18 @@ impl Engine {
             Value::String(p.to_string_lossy().into_owned())
         });
 
+        // Connection details for the backing `hyperd`. In daemon mode the
+        // endpoint and health port come from the shared daemon's discovery
+        // file; in local mode (`--no-daemon`) this engine owns a private
+        // `hyperd` and there is no health port. `hyperd_endpoint()` only errors
+        // if no endpoint is available at all, which `is_running` already
+        // reflects — surface it as null rather than failing the whole status.
+        let in_daemon_mode = self.daemon_endpoint.is_some();
+        let endpoint_value = self.hyperd_endpoint().map_or(Value::Null, Value::String);
+        let health_port_value = self
+            .daemon_health_port
+            .map_or(Value::Null, |p| Value::Number(p.into()));
+
         Ok(json!({
             "hyperd_running": self.is_running(),
             "ephemeral_path": self.ephemeral_path.to_string_lossy(),
@@ -1433,6 +1456,14 @@ impl Engine {
             "table_count": table_count,
             "total_rows": total_rows,
             "disk_usage_bytes": disk_bytes,
+            // Where this engine is talking to hyperd. `hyperd_endpoint` is the
+            // libpq endpoint queries run against; `daemon_health_port` is the
+            // shared daemon's control/lock port (null in local mode).
+            "engine": {
+                "mode": if in_daemon_mode { "daemon" } else { "local" },
+                "hyperd_endpoint": endpoint_value,
+                "daemon_health_port": health_port_value,
+            },
             // The MCP server and the `hyperdb-api` crate it's built on live in
             // the same Cargo workspace and ship from the same commit, so a
             // single version string identifies both. Label it by the

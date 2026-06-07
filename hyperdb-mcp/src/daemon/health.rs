@@ -8,7 +8,8 @@
 //! 2. **Liveness probe + heartbeat** — clients connect and send simple text commands.
 //!
 //! Protocol (line-based, newline-terminated):
-//! - `PING\n` → `PONG\n` (liveness check)
+//! - `PING\n` → `PONG hyperdb-mcp <version>\n` (liveness check; the identifying
+//!   token proves it's a hyperdb-mcp daemon, not a foreign process on the same port)
 //! - `HEARTBEAT\n` → `OK\n` (resets idle timer)
 //! - `STOP\n` → `STOPPING\n` (triggers graceful shutdown)
 //! - `STATUS\n` → JSON line with daemon info (reports the *current* hyperd
@@ -25,6 +26,15 @@ use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
 use super::discovery::DaemonInfo;
+
+/// Identifying token included in PONG responses. Used to verify that a bound
+/// port is owned by a hyperdb-mcp daemon (not a foreign service).
+pub const PONG_TOKEN: &str = "hyperdb-mcp";
+
+/// Construct the PONG response with the identifying token and version.
+fn pong_response() -> String {
+    format!("PONG {PONG_TOKEN} {}\n", crate::version::MCP_VERSION)
+}
 
 /// Handle to the health listener, used to check binding success and manage lifecycle.
 #[derive(Debug)]
@@ -164,7 +174,7 @@ fn handle_client(stream: TcpStream, state: &DaemonState, info: &Mutex<DaemonInfo
             Ok(_) => {
                 let cmd = line.trim();
                 let response = match cmd {
-                    "PING" => "PONG\n".to_string(),
+                    "PING" => pong_response(),
                     "HEARTBEAT" => {
                         state.touch();
                         "OK\n".to_string()
@@ -251,4 +261,32 @@ pub fn send_command_with_timeout(
     let mut response = String::new();
     reader.read_line(&mut response)?;
     Ok(response)
+}
+
+/// Send PING and verify the response contains the identifying token. Returns
+/// `Some(version)` if the responding daemon is a hyperdb-mcp daemon (the version
+/// string is the daemon's `MCP_VERSION`), or `None` if connection fails, the
+/// response lacks the expected token, or read times out. An empty version string
+/// (`Some(String::new())`) is returned if the PONG prefix matches but no version
+/// token is present (graceful degradation for forward/backward compat).
+///
+/// This is the primitive for liveness checks now that bare TCP connect is
+/// insufficient (a foreign service on the same port would cause collisions).
+pub fn ping_identified(
+    port: u16,
+    connect_timeout: Duration,
+    read_timeout: Duration,
+) -> Option<String> {
+    let response = send_command_with_timeout(port, "PING", connect_timeout, read_timeout).ok()?;
+    // Validate by exact tokens, not a string prefix: a prefix check on
+    // "PONG hyperdb-mcp" would also match a foreign reply like
+    // "PONG hyperdb-mcpEVIL 1.0.0". Require the first two whitespace-separated
+    // tokens to be exactly "PONG" and the token, so only our daemon passes.
+    let mut tokens = response.split_whitespace();
+    if tokens.next() != Some("PONG") || tokens.next() != Some(PONG_TOKEN) {
+        return None;
+    }
+    // The 3rd token is the daemon's version; absent ⇒ accept with empty
+    // version (future-proofing for a token-only reply).
+    Some(tokens.next().unwrap_or("").to_string())
 }

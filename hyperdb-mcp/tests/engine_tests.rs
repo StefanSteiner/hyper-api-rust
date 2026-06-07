@@ -159,6 +159,21 @@ fn engine_status() {
         version.contains(".r"),
         "hyper_rust_api_version should carry .r<hash>: {version}"
     );
+
+    // Engine connection block. This is a `--no-daemon` engine (TestEngine uses
+    // `Engine::new_no_daemon`), so mode is "local", there's a private hyperd
+    // endpoint, and no daemon health port.
+    let engine_info = &status["engine"];
+    assert_eq!(engine_info["mode"], "local");
+    assert!(
+        engine_info["hyperd_endpoint"].is_string(),
+        "local engine should report a private hyperd endpoint, got {:?}",
+        engine_info["hyperd_endpoint"]
+    );
+    assert!(
+        engine_info["daemon_health_port"].is_null(),
+        "local engine has no daemon health port"
+    );
 }
 
 /// Regression test: calling `create_table` twice in append mode must be
