@@ -332,7 +332,8 @@ impl Client {
     #[cfg(windows)]
     pub fn connect_named_pipe(pipe_path: &str, config: &Config) -> Result<Self> {
         use std::fs::OpenOptions;
-        use std::time::{Duration, Instant};
+        // `Duration` is imported at module scope; only `Instant` is needed here.
+        use std::time::Instant;
 
         info!(
             target: "hyperdb_api",
