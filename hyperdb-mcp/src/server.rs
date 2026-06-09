@@ -1296,6 +1296,72 @@ impl HyperMcpServer {
         }
     }
 
+    /// Build a degraded `status` response that answers instantly without the
+    /// engine lock. Used when `try_lock` fails because another tool call holds
+    /// the mutex — so diagnostics never hang behind a stalled data-plane op.
+    ///
+    /// Includes everything answerable from `self` fields + a fast daemon-health
+    /// check (read `daemon.json` + one PING to the known health port, max
+    /// ~300ms). Omits `table_count`, `total_rows`, `disk_usage_bytes`,
+    /// `ephemeral_path`, and `logs` (which require the engine / SQL against
+    /// hyperd).
+    ///
+    /// Clients should check `engine_busy: true` and retry `status` later if
+    /// they need the full stats, or wait for the in-progress operation to finish.
+    fn status_degraded(&self) -> Value {
+        // Use discover() — NOT find_running_daemon(). discover() reads the
+        // daemon.json file + one PING to the known health port (~1ms if alive,
+        // 300ms timeout if dead). find_running_daemon() adds a 16-port scan on
+        // failure (up to 4.8s), which would defeat the "instant response" goal.
+        let (hyperd_running, engine_block) = if let Some(info) =
+            crate::daemon::discovery::discover()
+        {
+            (
+                true,
+                json!({
+                    "mode": "daemon",
+                    "hyperd_endpoint": info.hyperd_endpoint,
+                    "daemon_health_port": info.health_port,
+                }),
+            )
+        } else if self.no_daemon {
+            // Local mode; can't determine hyperd state without the engine.
+            (
+                false,
+                json!({ "mode": "local", "hyperd_endpoint": null, "daemon_health_port": null }),
+            )
+        } else {
+            (
+                false,
+                json!({ "mode": "daemon", "hyperd_endpoint": null, "daemon_health_port": null }),
+            )
+        };
+
+        let persistent_path = self
+            .workspace_path
+            .as_ref()
+            .map_or(Value::Null, |p| Value::String(p.clone()));
+
+        let attachments: Vec<Value> = self
+            .attachments
+            .list()
+            .iter()
+            .map(super::attach::AttachedDb::to_json)
+            .collect();
+
+        json!({
+            "engine_busy": true,
+            "hyperd_running": hyperd_running,
+            "persistent_path": persistent_path,
+            "has_persistent": self.workspace_path.is_some(),
+            "engine": engine_block,
+            "hyper_rust_api_version": crate::version::mcp_version_string(),
+            "watchers": self.watchers.to_json(),
+            "read_only": self.read_only,
+            "attachments": attachments,
+        })
+    }
+
     /// Run a closure that accesses the saved-query store.
     ///
     /// Some store variants (notably
@@ -2881,11 +2947,30 @@ impl HyperMcpServer {
         description = "Returns plugin health, workspace info, table count, total rows, disk usage, the backing hyperd connection (engine.mode, engine.hyperd_endpoint, engine.daemon_health_port), and active directory watchers."
     )]
     fn status(&self) -> Result<CallToolResult, rmcp::ErrorData> {
-        let result = self.with_engine(super::engine::Engine::status);
+        // Use try_lock so `status` never hangs behind a stalled/slow data-plane
+        // operation on the same session (issue #118). If the engine lock is held
+        // by another tool call, return a degraded-but-instant response with the
+        // metadata available without the engine (daemon health, paths, watchers).
+        let Ok(guard) = self.engine.try_lock() else {
+            // Engine is locked by another tool call — return a degraded
+            // response rather than blocking. The caller sees `engine_busy:
+            // true` and knows table/disk stats are unavailable this call.
+            return Self::ok_content(self.status_degraded());
+        };
+        let Some(engine) = guard.as_ref() else {
+            // Engine not yet initialized (first call after server start, or
+            // after a ConnectionLost drop). Return the degraded response rather
+            // than an error — the first data-plane call will init the engine,
+            // and subsequent `status` calls will get the full response.
+            return Self::ok_content(self.status_degraded());
+        };
+        self.ensure_catalog_ready(engine);
+        let result = engine.status();
 
         match result {
             Ok(mut val) => {
                 if let Some(obj) = val.as_object_mut() {
+                    obj.insert("engine_busy".into(), json!(false));
                     obj.insert("watchers".into(), self.watchers.to_json());
                     obj.insert("read_only".into(), json!(self.read_only));
                     let attachments: Vec<Value> = self
