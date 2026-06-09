@@ -1238,8 +1238,10 @@ impl HyperMcpServer {
         self.ensure_catalog_ready(engine);
         // In daemon mode, send a heartbeat so the daemon knows we're still active.
         // Debounced to avoid per-call TCP overhead (only sends if >60s since last).
+        // Pass the health port from the engine we already hold — calling
+        // self.engine.lock() here would deadlock (we already hold that mutex).
         if !self.no_daemon {
-            self.maybe_send_heartbeat();
+            self.maybe_send_heartbeat(engine.daemon_health_port());
         }
         let result = f(engine);
         if let Err(e) = &result {
@@ -1274,25 +1276,18 @@ impl HyperMcpServer {
     /// Best-effort heartbeat to keep the daemon alive while this client is active.
     /// Debounced: only sends if more than 60 seconds have elapsed since the last heartbeat,
     /// avoiding a new TCP connection on every tool call.
-    fn maybe_send_heartbeat(&self) {
+    ///
+    /// Accepts the daemon health port directly (from the caller's already-held
+    /// engine reference) to avoid re-locking `self.engine` — which would deadlock
+    /// since `with_engine` holds that mutex when calling us.
+    fn maybe_send_heartbeat(&self, daemon_health_port: Option<u16>) {
         const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
         let should_send = self
             .last_heartbeat
             .lock()
             .is_ok_and(|guard| guard.elapsed() >= HEARTBEAT_INTERVAL);
         if should_send {
-            // Use the daemon's discovered health port (recorded on the engine at
-            // connect time), NOT `resolve_port()`: with port scanning the daemon
-            // may have bound a non-base port (e.g. 7492 when 7485 was taken), and
-            // re-resolving would return the base port — the heartbeat would then
-            // target the wrong address and silently fail to keep the daemon warm.
-            // Skip if local mode (no daemon) or if the engine lock is poisoned.
-            let port = self
-                .engine
-                .lock()
-                .ok()
-                .and_then(|guard| guard.as_ref().and_then(Engine::daemon_health_port));
-            if let Some(port) = port {
+            if let Some(port) = daemon_health_port {
                 let _ = crate::daemon::health::send_command(port, "HEARTBEAT");
                 if let Ok(mut guard) = self.last_heartbeat.lock() {
                     *guard = std::time::Instant::now();
