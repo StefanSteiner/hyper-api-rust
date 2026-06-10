@@ -668,22 +668,119 @@ pub fn reconcile_in(engine: &Engine, target_db: Option<&str>) -> Result<(), McpE
         .collect();
     let live_tables: std::collections::HashSet<String> = tables.iter().cloned().collect();
 
-    for entry in &catalog_entries {
-        if !live_tables.contains(&entry.table_name) {
+    // Detect renames: a catalog entry whose table disappeared + a live table
+    // with no catalog entry + matching row count ⇒ likely a RENAME rather
+    // than a DROP+CREATE. Rename the catalog row in place so all prose
+    // metadata (source_url, purpose, notes, etc.) is preserved.
+    let disappeared: Vec<&CatalogEntry> = catalog_entries
+        .iter()
+        .filter(|e| !live_tables.contains(&e.table_name))
+        .collect();
+    let new_tables: Vec<&String> = tables
+        .iter()
+        .filter(|t| !catalog_names.contains(*t))
+        .collect();
+
+    // Build a set of renamed pairs by matching on row count. A match is only
+    // accepted when exactly one disappeared entry shares a row count with
+    // exactly one new table — ambiguous multi-matches fall through to the
+    // normal delete+stub path (safe: we lose metadata rather than mis-assign).
+    let mut renamed_old: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut renamed_new: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    if !disappeared.is_empty() && !new_tables.is_empty() {
+        // Collect row counts for new tables (cheap: one COUNT per table).
+        let new_with_counts: Vec<(&String, Option<i64>)> = new_tables
+            .iter()
+            .map(|t| (*t, row_count_of_in(engine, t, target_db).ok()))
+            .collect();
+
+        // For a match to be accepted, BOTH sides must be unambiguous:
+        // - exactly one disappeared entry has this row count, AND
+        // - exactly one new table has this row count.
+        // This prevents false-positive metadata assignment when multiple
+        // tables share the same row count (e.g. two empty tables).
+        // Additionally, require the row count to be `Some` — `None == None`
+        // would match entries that were never counted with tables whose
+        // count query failed, producing a meaningless coincidence.
+        for entry in &disappeared {
+            let Some(entry_rc) = entry.row_count else {
+                continue;
+            };
+            // How many disappeared entries share this row count?
+            let disappeared_with_same_rc = disappeared
+                .iter()
+                .filter(|e| e.row_count == Some(entry_rc))
+                .count();
+            if disappeared_with_same_rc != 1 {
+                continue;
+            }
+            // How many new tables share this row count?
+            let candidates: Vec<&&String> = new_with_counts
+                .iter()
+                .filter(|(t, rc)| *rc == Some(entry_rc) && !renamed_new.contains(t.as_str()))
+                .map(|(t, _)| t)
+                .collect();
+            if candidates.len() == 1 {
+                let new_name = candidates[0];
+                if rename_catalog_entry(engine, &entry.table_name, new_name, target_db).is_ok() {
+                    renamed_old.insert(entry.table_name.clone());
+                    renamed_new.insert((*new_name).clone());
+                }
+            }
+        }
+    }
+
+    // Delete remaining disappeared entries (those NOT matched as renames).
+    for entry in &disappeared {
+        if !renamed_old.contains(&entry.table_name) {
             delete_for_in(engine, &entry.table_name, target_db)?;
         }
     }
 
-    for table in &tables {
-        let row_count = row_count_of_in(engine, table, target_db).ok();
-        if catalog_names.contains(table) {
-            refresh_row_count_in(engine, table, row_count, target_db)?;
-        } else {
+    // Stub remaining new tables (those NOT matched as rename targets).
+    for table in &new_tables {
+        if !renamed_new.contains(table.as_str()) {
+            let row_count = row_count_of_in(engine, table, target_db).ok();
             upsert_stub_in(
                 engine, table, "unknown", None, row_count, false, target_db, None,
             )?;
         }
     }
+
+    // Refresh row counts for tables that already had catalog entries.
+    for table in &tables {
+        if catalog_names.contains(table) {
+            let row_count = row_count_of_in(engine, table, target_db).ok();
+            refresh_row_count_in(engine, table, row_count, target_db)?;
+        }
+    }
+    Ok(())
+}
+
+/// Rename a catalog entry's `table_name` in place, preserving all metadata.
+fn rename_catalog_entry(
+    engine: &Engine,
+    old_name: &str,
+    new_name: &str,
+    target_db: Option<&str>,
+) -> Result<(), McpError> {
+    let Some(qualified) = qualified_catalog_in(engine, target_db) else {
+        return Ok(());
+    };
+    // Only update table_name — a rename is not a data refresh, so loaded_at
+    // and last_refreshed_at must stay anchored to the original load time.
+    let sql = format!(
+        "UPDATE {qualified} SET table_name = {new} WHERE table_name = {old}",
+        new = sql_literal(new_name),
+        old = sql_literal(old_name),
+    );
+    engine.execute_command(&sql)?;
+    tracing::debug!(
+        old_name,
+        new_name,
+        "catalog entry renamed (metadata preserved)"
+    );
     Ok(())
 }
 
