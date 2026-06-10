@@ -37,24 +37,61 @@ fn test_json_param() {
     );
 }
 
-/// Test Interval parameter.
+/// Test Interval parameter — verifies the binary encoding decodes to the
+/// correct value server-side by rendering the bound param as text.
 #[test]
 fn test_interval_param() {
     let test = TestConnection::new().expect("Failed to create test connection");
 
     let interval = Interval::new(2, 5, 0); // 2 months, 5 days, 0 microseconds
+                                           // CAST the bound interval param to text so we can assert the VALUE, not
+                                           // just non-null — this proves the [us BE][days BE][months BE] encoding
+                                           // was interpreted correctly (Interval doesn't yet implement RowValue, so
+                                           // we can't read it back as a typed Interval).
     let result = test
         .connection
-        .query_params("SELECT $1 AS v", &[&interval as &dyn ToSqlParam])
+        .query_params(
+            "SELECT CAST($1 AS text) AS v",
+            &[&interval as &dyn ToSqlParam],
+        )
         .expect("query_params failed");
 
     let rows = result.collect_rows().expect("collect_rows failed");
     assert_eq!(rows.len(), 1, "Expected exactly one row");
 
-    // Verify the query succeeded and returned a non-null value
-    // (Full Interval RowValue support is out of scope for this commit)
-    let returned: Option<String> = rows[0].get(0);
-    assert!(returned.is_some(), "Expected non-NULL Interval value");
+    let returned: String = rows[0].get(0).expect("Expected non-NULL Interval value");
+    // Hyper renders intervals in ISO-8601 duration form: "P2M5D" (Period,
+    // 2 Months, 5 Days). Asserting the exact rendering proves the
+    // [us BE][days BE][months BE] field encoding decoded correctly — a
+    // swapped or mis-scaled field would produce a different string.
+    assert_eq!(
+        returned, "P2M5D",
+        "interval should decode to 2 months + 5 days (ISO-8601), got: {returned}"
+    );
+}
+
+/// Test Option<Numeric> (nullable param via the blanket Option impl).
+#[test]
+fn test_option_numeric_param() {
+    let test = TestConnection::new().expect("Failed to create test connection");
+
+    // Some(scale=0) binds the value; None binds SQL NULL.
+    let some_n: Option<Numeric> = Some(Numeric::new(7, 0));
+    let none_n: Option<Numeric> = None;
+
+    let rows = test
+        .connection
+        .query_params(
+            "SELECT $1 AS a, $2 AS b",
+            &[&some_n as &dyn ToSqlParam, &none_n as &dyn ToSqlParam],
+        )
+        .expect("query_params failed")
+        .collect_rows()
+        .expect("collect_rows failed");
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get::<i64>(0), Some(7), "Some(Numeric(7,0)) → 7");
+    assert_eq!(rows[0].get::<i64>(1), None, "None → SQL NULL");
 }
 
 /// Test Numeric scale=0 parameter round-trip.

@@ -30,8 +30,19 @@
 //! - Floats: `f32`, `f64`
 //! - `bool`
 //! - `&str`, `String`
-//! - `Option<T>` where `T: ToSqlParam` (for nullable parameters)
+//! - Bytes: `&[u8]`, `Vec<u8>`
 //! - Date/time types: `Date`, `Time`, `Timestamp`, `OffsetTimestamp`
+//! - `Interval`
+//! - `Numeric` — **whole numbers only (`scale == 0`)**; Hyper rejects
+//!   scaled binary NUMERIC params (see the `Numeric` impl and issue #132)
+//! - `serde_json::Value` (binds as PostgreSQL `json`)
+//! - `Option<T>` where `T: ToSqlParam` (for nullable parameters)
+//! - `&T` where `T: ToSqlParam`
+//!
+//! Note: `Geography` does **not** implement `ToSqlParam` — Hyper has no
+//! PostgreSQL-binary input function for the geography type (issue #133).
+//! Use the [`Inserter`](crate::Inserter) (`IntoValue`) path to write
+//! geography values instead.
 //!
 //! # Example
 //!
