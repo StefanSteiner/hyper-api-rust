@@ -426,13 +426,27 @@ impl Engine {
         }))
     }
 
-    /// Whether the backing `hyperd` process is still alive.
-    /// In daemon mode, checks the daemon health port.
+    /// Whether the backing `hyperd` is currently reachable.
+    ///
+    /// In local mode, delegates to the owned `HyperProcess`. In daemon mode,
+    /// probes the cached libpq `daemon_endpoint` directly with a short-timeout
+    /// TCP connect — the same endpoint queries run against. This reflects
+    /// *current* liveness of the resource the engine actually depends on, and
+    /// is robust to two failure modes the health-port PING is not:
+    ///   - the health port being unreachable (stale `daemon.json`,
+    ///     port-scan-adopted daemon, firewall) while the libpq endpoint serves;
+    ///   - the daemon restarting `hyperd` on a new port, leaving the cached
+    ///     endpoint stale (the probe then correctly reports `false`).
+    ///
+    /// Falls back to discovery (`daemon.json` + health-port PING) only when no
+    /// endpoint has been cached yet (before the first connection attempt).
     pub fn is_running(&self) -> bool {
         if let Some(ref hyper) = self.hyper {
             hyper.is_running()
+        } else if let Some(ref endpoint) = self.daemon_endpoint {
+            probe_endpoint_alive(endpoint)
         } else {
-            // Daemon mode: check if daemon is still reachable
+            // No cached endpoint yet — fall back to discovery.
             daemon::discovery::discover().is_some()
         }
     }
@@ -1868,6 +1882,25 @@ impl Drop for Engine {
         if let Some(parent) = self.ephemeral_path.parent() {
             let _ = std::fs::remove_dir_all(parent);
         }
+    }
+}
+
+/// Cheap liveness probe for a daemon-mode `hyperd`: attempt a short-timeout
+/// TCP connect to `endpoint` (`host:port`). Returns `true` if the connect
+/// succeeds (something is listening). A bare connect is sufficient here — we
+/// only need to know the port the engine's libpq connection targets is still
+/// accepting connections, not to perform a full protocol round-trip.
+fn probe_endpoint_alive(endpoint: &str) -> bool {
+    use std::net::ToSocketAddrs;
+    const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(300);
+    match endpoint.to_socket_addrs() {
+        // Probe each resolved address, short-circuiting on the first that
+        // accepts a connection. `daemon_endpoint` is normally a single
+        // `127.0.0.1:PORT`, so this is one connect in the common case.
+        Ok(mut addrs) => {
+            addrs.any(|addr| std::net::TcpStream::connect_timeout(&addr, PROBE_TIMEOUT).is_ok())
+        }
+        Err(_) => false,
     }
 }
 

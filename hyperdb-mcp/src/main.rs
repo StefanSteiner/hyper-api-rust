@@ -230,6 +230,18 @@ async fn run_mcp_mode(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let server = HyperMcpServer::with_no_daemon(persistent_str, cli.read_only, cli.no_daemon);
+    // Eagerly initialize the engine before accepting tool calls so observer
+    // tools like `status` report full stats on the first call (issue #138).
+    // Errors are logged and swallowed inside `warm_up_engine` — startup
+    // proceeds even if hyperd is momentarily unreachable. Run on a blocking
+    // thread: warm-up does synchronous I/O (and may spawn the daemon) and
+    // would otherwise stall a runtime worker. Nothing else runs on the
+    // runtime yet (serve() is below), so this only delays startup.
+    let server = tokio::task::spawn_blocking(move || {
+        server.warm_up_engine();
+        server
+    })
+    .await?;
     let service = server.serve(rmcp::transport::io::stdio()).await?;
     service.waiting().await?;
 
