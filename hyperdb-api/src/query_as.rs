@@ -34,7 +34,8 @@ impl<T: FromRow> QueryAs<T> {
     /// for direct use.
     ///
     /// `params` accepts `&dyn std::fmt::Debug` so the macro can pass any bind
-    /// arguments through — the actual typed binding will be tightened in W3.
+    /// arguments through — typed binding via `ToSqlParam` is not yet wired
+    /// (see the `TODO(#137)` on `fetch_all` below).
     pub fn new(sql: &str, params: &[&dyn std::fmt::Debug]) -> Self {
         Self {
             sql: sql.to_owned(),
@@ -91,9 +92,12 @@ impl<T: FromRow> QueryAs<T> {
 #[derive(Debug)]
 pub struct QueryScalar<T> {
     sql: String,
+    // Same gap as `QueryAs::params` — the macro validates the SQL and
+    // accepts args, but binding isn't wired yet. Route through
+    // `fetch_scalar_params` (or equivalent) once it exists.
     #[allow(
         dead_code,
-        reason = "typed parameter binding wired in a future milestone"
+        reason = "typed parameter binding not yet wired — see issue #137"
     )]
     params: Vec<String>,
     _phantom: PhantomData<fn() -> T>,
