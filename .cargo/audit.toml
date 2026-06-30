@@ -12,6 +12,10 @@ ignore = [
     # JWT signing in `hyperapi-salesforce`, where timing sidechannels are not
     # observable to a remote attacker. Threat model does not apply.
     "RUSTSEC-2023-0071",
+    # `ttf-parser` unmaintained (RUSTSEC-2026-0192, informational). Transitive via
+    # `plotters` chart rendering in hyperdb-mcp; no direct use, no patch exists, no
+    # runtime risk. Tracking plotters-rs/plotters#736. Mirror of deny.toml.
+    "RUSTSEC-2026-0192",
 ]
 
 # Forward-looking note (no waiver yet — RustSec hasn't issued an ID):
