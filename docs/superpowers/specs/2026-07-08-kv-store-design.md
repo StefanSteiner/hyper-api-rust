@@ -132,6 +132,22 @@ WHERE NOT EXISTS (
 This mirrors `table_catalog.rs`'s proven pattern. `hyperd` serializes statements
 within a transaction, so the read-modify-write is atomic.
 
+**Parameter placeholders are an escaped-literal facade.** Hyper has no native
+extended-query (`$1`/`$2`) protocol; `command_params`/`query_params` convert
+positional params to safely-escaped SQL literals before sending
+(`DEVELOPMENT.md` "Safe Escaping for Parameters"). Two consequences the plan must
+respect:
+
+- **Repeated placeholders must be verified.** The upsert references `$1`/`$2`/`$3`
+  multiple times in one statement (UPDATE + INSERT + NOT EXISTS). The first
+  implementation step verifies that repeated placeholders each substitute the
+  correct literal. If the escaping layer does not support reuse, the fallback is
+  to pass each param positionally as many times as it appears (e.g. `&[store,
+  key, value, store, key, store, key]`) — an internal detail invisible to the
+  public API.
+- **Injection is already handled by escaping**, independent of the charset
+  validation; the charset rule is for name hygiene, not safety.
+
 ## Milestone 1 — Rust API (`hyperdb-api`)
 
 **The real feature. PR title uses a `feat:` prefix.**
@@ -171,6 +187,14 @@ The async twin (`src/async_kv_store.rs`) exposes `AsyncConnection::kv_store` /
 `kv_list_stores` returning `AsyncKvStore<'conn>` with the same method names as
 `async fn`. No `Owned` (`Arc<AsyncConnection>`) variant in M1 — deferred under
 YAGNI until a caller needs a spawnable handle.
+
+**Lifetime placement.** `KvStore<'conn>` borrows `&'conn Connection`, slotting
+into the crate's established single-root hierarchy (`DEVELOPMENT.md` "Lifetime
+Safety Design": `Connection` owns; `Inserter`/`Catalog`/`Rowset` borrow `'conn`).
+It holds no reference to `Catalog` or any other dependent — no circular
+references, one `'conn` parameter. The plan adds a **compile-fail doc test**
+proving a `KvStore` cannot outlive its `Connection`, matching the existing
+compile-fail tests in `hyperdb-api/src/lib.rs`.
 
 ### Method semantics
 
@@ -236,7 +260,9 @@ workspace). `ToSqlParam` already has a `serde_json::Value` impl, confirming
 
 Integration + unit tests in `hyperdb-api/tests/`, using `HyperProcess::new()` to
 start a real `hyperd` (per repo rules: no fabricated flags; capture and report
-real output; a silent hang is a failure, not a pass). Coverage:
+real output; a silent hang is a failure, not a pass). The fast gate is
+**`make test-api`** (API only, no MCP/Node); full workspace `make test` runs in
+Phase 5. Coverage:
 
 - PK-enforcement probe (documents actual engine behavior).
 - Upsert round-trip: set → get, set again (overwrite) → get.
@@ -246,17 +272,34 @@ real output; a silent hang is a failure, not a pass). Coverage:
 - Multi-store isolation: same key in two stores stays distinct.
 - Cross-store self-join with `store_name` filters (documents the M2 pattern;
   verifies no row multiplication when filters present).
+- Repeated-placeholder substitution in the upsert statement (see backing-table
+  §"Parameter placeholders").
 - Charset/empty/length validation rejects.
 - `delete` / `exists` / `size` / `keys` / `clear` / `kv_list_stores`.
 - **Both** sync and async twins.
+- **Compile-fail doc test:** a `KvStore` outliving its `Connection` must not
+  compile (matches existing lifetime doc tests in `lib.rs`).
 
 `cargo clippy` + `cargo fmt` before every commit. No narrowing `as` casts (repo
-rule #7) — use `TryFrom` where any width conversion arises.
+rule #7) — use `TryFrom` where any width conversion arises. Optionally, add a
+Kani harness for the name/charset validator, alongside the existing
+identifier-validation harnesses (`hyperdb-api/src/proofs.rs`) — marked optional,
+not required for M1.
 
-### CHANGELOG
+### Documentation surfaces to update (M1)
 
-Add an `### Added` bullet under `## [Unreleased]` in `hyperdb-api/CHANGELOG.md`
-(public API surface change).
+Per `RUST_DOCUMENTATION_STYLE.md` and DEVELOPMENT.md's own conventions:
+
+- **Rustdoc** on every public item (summary < 15 words, `# Examples`
+  `no_run`, `# Errors`, `# Panics`), registered as `mod` + `pub use` in
+  `lib.rs`.
+- **`hyperdb-api/README.md`** — overview-list entry + a KV sub-section
+  (two-level structure), realistic example.
+- **`hyperdb-api/CHANGELOG.md`** — `### Added` bullet under `## [Unreleased]`.
+- **`DEVELOPMENT.md`** — add KV to the "Features Implemented" list.
+- **`docs/README.md`** — no new `docs/` file is added by M1 (this spec lives
+  under `docs/superpowers/specs/`), so no index entry is required; confirm
+  during Phase 5.
 
 ## Milestone 2 — MCP (`hyperdb-mcp`)
 
