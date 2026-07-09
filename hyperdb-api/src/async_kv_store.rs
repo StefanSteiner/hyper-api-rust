@@ -32,7 +32,7 @@ pub struct AsyncKvStore<'conn> {
 }
 
 impl<'conn> AsyncKvStore<'conn> {
-    /// Opens a handle to `name`, creating [`KV_TABLE`] if needed.
+    /// Opens a handle to `name`, creating `KV_TABLE` if needed.
     async fn open(
         connection: &'conn AsyncConnection,
         name: &str,

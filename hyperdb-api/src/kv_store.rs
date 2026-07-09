@@ -4,7 +4,7 @@
 //! Key-value store over a fixed Hyper table.
 //!
 //! [`KvStore`] is an ergonomic string-native KV abstraction backed by a
-//! single table, [`KV_TABLE`], namespaced by a `store_name` column. Every
+//! single table, `KV_TABLE`, namespaced by a `store_name` column. Every
 //! named store shares that table; a handle binds one store name, validated
 //! once at [`Connection::kv_store`](crate::Connection::kv_store).
 //!
@@ -76,7 +76,7 @@ pub(crate) fn kv_create_table_sql(table_ref: &str) -> String {
 
 use crate::connection::Connection;
 
-/// A handle to one named key-value store, backed by [`KV_TABLE`].
+/// A handle to one named key-value store, backed by `KV_TABLE`.
 ///
 /// Borrows its [`Connection`] for the handle's lifetime (`'conn`), matching
 /// the crate's [`Catalog`](crate::Catalog)/[`Inserter`](crate::Inserter)
@@ -104,7 +104,7 @@ pub struct KvStore<'conn> {
 }
 
 impl<'conn> KvStore<'conn> {
-    /// Opens a handle to `name`, creating [`KV_TABLE`] if needed.
+    /// Opens a handle to `name`, creating `KV_TABLE` if needed.
     fn open(connection: &'conn Connection, name: &str, table_ref: String) -> Result<Self> {
         validate_kv_name(name, "store name")?;
         connection.execute_command(&kv_create_table_sql(&table_ref))?;
@@ -440,7 +440,7 @@ impl Connection {
 
     /// Lists the names of every KV store that currently holds at least one key.
     ///
-    /// Creates the backing table first (via [`kv_create_table_sql`]) so calling
+    /// Creates the backing table first (via `kv_create_table_sql`) so calling
     /// this on a fresh database returns an empty list rather than erroring on a
     /// missing table.
     ///
