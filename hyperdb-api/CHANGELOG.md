@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Key-value store API: `Connection::kv_store` / `AsyncConnection::kv_store` returning
+  `KvStore` / `AsyncKvStore` handles over a fixed `_hyperdb_kv_store` table, with
+  `get`/`set`/`get_as`/`set_as`/`delete`/`exists`/`size`/`keys`/`pop`/`clear`/`set_batch`,
+  plus `kv_list_stores`. Adds the `Error::Serialization` variant.
+
 ## [0.1.1] - 2026-05-13
 
 ### Added

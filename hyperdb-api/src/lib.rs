@@ -56,6 +56,7 @@
 //! ├── Inserter<'conn>
 //! │   └── CopyInWriter<'conn>
 //! ├── Catalog<'conn>
+//! ├── KvStore<'conn>
 //! ├── Rowset<'conn>
 //! └── Transaction<'conn>
 //! ```
@@ -79,6 +80,20 @@
 //! # }
 //! ```
 //!
+//! The same guarantee holds for a [`KvStore`], which borrows its `Connection`
+//! for the handle's lifetime:
+//!
+//! ```compile_fail
+//! # use hyperdb_api::{Connection, CreateMode};
+//! # fn example() -> hyperdb_api::Result<()> {
+//! let conn = Connection::connect("localhost:7483", "test.hyper", CreateMode::CreateIfNotExists)?;
+//! let kv = conn.kv_store("s")?;
+//! drop(conn);  // ERROR: cannot move `conn` because it is borrowed by `kv`
+//! let _ = kv.get("k")?;
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! The `execute(self)` method on [`Inserter`] takes ownership (`self`), which
 //! automatically ends the borrow when the insert completes — no manual cleanup
 //! needed.
@@ -92,6 +107,7 @@
 //! - [`Catalog`] — Schema/table introspection
 //! - [`TableDefinition`] — Define table schemas
 //! - [`Transaction`] / [`AsyncTransaction`] — RAII transaction guards
+//! - [`KvStore`] / [`AsyncKvStore`] — String-native key-value store over a shared backing table
 //!
 //! # Public Modules
 //!
@@ -142,6 +158,7 @@ mod async_arrow_inserter;
 mod async_connection;
 mod async_connection_builder;
 mod async_inserter;
+mod async_kv_store;
 mod async_prepared;
 mod async_result;
 mod async_transaction;
@@ -149,14 +166,13 @@ mod async_transport;
 mod catalog;
 mod connection;
 mod connection_builder;
-/// CSV/text export and import via COPY protocol.
 pub mod copy;
 mod data_format;
 mod error;
 mod inserter;
+mod kv_store;
 mod names;
 mod params;
-/// Connection pooling support.
 pub mod pool;
 mod prepared;
 mod process;
@@ -184,6 +200,7 @@ pub use async_arrow_inserter::{AsyncArrowInserter, AsyncArrowInserterOwned};
 pub use async_connection::AsyncConnection;
 pub use async_connection_builder::AsyncConnectionBuilder;
 pub use async_inserter::AsyncInserter;
+pub use async_kv_store::AsyncKvStore;
 pub use async_prepared::{AsyncPreparedStatement, AsyncPreparedStatementOwned};
 pub use async_result::AsyncRowset;
 pub use catalog::Catalog;
@@ -197,6 +214,7 @@ pub use prepared::PreparedStatement;
 pub use async_transaction::AsyncTransaction;
 pub use hyperdb_api_core::client::{Notice, NoticeReceiver};
 pub use inserter::{ChunkSender, ColumnMapping, InsertChunk, Inserter, IntoValue, MappedInserter};
+pub use kv_store::KvStore;
 pub use names::{
     escape_name, escape_sql_path, escape_string_literal, DatabaseName, Name, SchemaName, TableName,
 };

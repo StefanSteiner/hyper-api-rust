@@ -277,13 +277,53 @@ cargo kani -p hyperdb-api
 
 ### Parameterized Queries
 
-Hyper does not support PG's native extended query protocol. `query_params()`
-and `command_params()` substitute `$1`/`$2` with safely escaped SQL literals
-via `ToSqlParam::to_sql_literal()`, providing the same injection protection.
-The `$1` syntax ensures forward-compatibility when Hyper adds server-side
-prepared statements. `hyperdb-api-core::client` already implements the full extended
-query protocol, so adding `Connection::prepare()` is wiring, not protocol work.
-See rustdoc on `Connection::query_params()` in `connection.rs`.
+`query_params()` and `command_params()` use the PostgreSQL extended query
+protocol (Parse/Bind/Execute): each `$N` placeholder is bound to a
+binary-encoded parameter via `ToSqlParam::sql_oid()` + `encode_param()`, routed
+through `Connection::prepare_typed()`. Parameters are never interpolated into
+the SQL text, so there is no injection surface. gRPC transport does not support
+prepared statements and returns `Error::FeatureNotSupported`. See rustdoc on
+`Connection::query_params()` in `connection.rs`.
+
+### Key-Value Store
+
+`KvStore` / `AsyncKvStore` (see `kv_store.rs` / `async_kv_store.rs`) are
+string-native key-value handles over a single fixed backing table,
+`_hyperdb_kv_store(store_name, key, value)`, namespaced by `store_name`. Design
+points:
+
+- **No `PRIMARY KEY`.** Hyper rejects one at `CREATE TABLE` (`0A000: Index
+  support is disabled`, empirically confirmed). Per-`(store_name, key)`
+  uniqueness is an application-side invariant, not an engine constraint. All DDL
+  flows through one `kv_create_table_sql()` helper so the sync/async twins can't
+  diverge.
+- **Upsert = UPDATE-then-conditional-INSERT.** Hyper has no `ON CONFLICT`/`MERGE`.
+  `set` issues an `UPDATE`; if it affects 0 rows, a conditional
+  `INSERT ... SELECT ... WHERE NOT EXISTS` runs. hyperd serializes statements on
+  a connection, so this cannot double-insert. Mirrors the `_table_catalog` idiom.
+- **`pop`/`set_batch` are transactional** via `begin_transaction_raw` /
+  `commit_raw` / `rollback_raw` (the `&self` escape hatch; the RAII
+  `Transaction` guard needs `&mut self`, incompatible with `KvStore`'s shared
+  `&'conn Connection` borrow). Rollback on error is best-effort and preserves
+  the original error, matching the RAII guard's commit-failure semantics.
+- **`table_ref` seam.** `KvStore` stores a `table_ref`; the default constructor
+  uses the bare table name, and a crate-internal `with_target()` accepts a
+  qualified reference. `table_ref` is a trusted, construction-time value
+  interpolated into SQL; `store_name`/`key`/`value` are always bound `$N`
+  params. The seam is reserved for the MCP milestone (routing into an attached
+  database) so the M1 public API needs no later change.
+- **Batching amortizes commits, not statements.** `set_batch` wraps N upserts in
+  one transaction. Because each upsert is still up to 2 prepared-statement
+  round-trips, the `kv_benchmark` example shows batched throughput on par with
+  single-commit (~1×) on localhost TCP — `set_batch`'s real value is
+  all-or-nothing atomicity, not raw speed.
+- **Overwriting an existing key is ~2× faster than a fresh insert.** The upsert
+  runs `UPDATE` first; on an existing key that hits and the conditional `INSERT`
+  is skipped (~1 round-trip), whereas a fresh key does `UPDATE` (0 rows) then
+  `INSERT` (~2 round-trips). The `kv_benchmark` example measures both and reports
+  ~2× on localhost TCP. This biases the two-statement upsert toward the common
+  "set once, overwrite repeatedly" config pattern; bulk-loading many *distinct*
+  keys stays on the slow path and should use the COPY-based `Inserter` instead.
 
 ### Callback Connection (Process Lifecycle)
 

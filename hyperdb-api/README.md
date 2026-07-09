@@ -6,6 +6,7 @@ Hyper database files (`.hyper`) without any C library dependencies.
 - 22-24M rows/sec inserts, 18M rows/sec queries (100M row benchmark)
 - Streaming by default — constant memory for billion-row results
 - Both sync (`Connection`) and async (`AsyncConnection`) APIs
+- Built-in string-native key-value store (`KvStore` / `AsyncKvStore`)
 - No feature flags on `hyperdb-api` — everything is always available (opt-in
   compile-time SQL validation lives behind a feature on the separate
   `hyperdb-api-derive` crate)
@@ -389,6 +390,42 @@ txn.commit()?;  // both inserts are committed; drop without commit() auto-rolls-
 ```
 
 See [docs/TRANSACTIONS.md](../docs/TRANSACTIONS.md) for full details.
+
+## Key-Value Store
+
+`Connection::kv_store` (and `AsyncConnection::kv_store`) opens a `KvStore`
+handle — a string-native key-value store backed by a single fixed table,
+namespaced by store name. Values are plain strings, or any `serde`-serializable
+type via `set_as`/`get_as`.
+
+```rust
+use hyperdb_api::{Connection, CreateMode, HyperProcess, Result};
+
+fn main() -> Result<()> {
+    let hyper = HyperProcess::new(None, None)?;
+    let conn = Connection::new(&hyper, "app.hyper", CreateMode::CreateIfNotExists)?;
+
+    let kv = conn.kv_store("settings")?;
+    kv.set("theme", "dark")?;
+    assert_eq!(kv.get("theme")?, Some("dark".to_string()));
+
+    // Typed values via serde (stored as JSON).
+    kv.set_as("retries", &3u32)?;
+    assert_eq!(kv.get_as::<u32>("retries")?, Some(3));
+
+    // Write many entries atomically in one transaction.
+    kv.set_batch(&[("host", "localhost"), ("port", "7483")])?;
+
+    // Other operations: exists, delete, size, keys, clear, and pop
+    // (remove-and-return the lowest-ordered key).
+    assert!(kv.exists("host")?);
+    let _ = conn.kv_list_stores()?; // names of all non-empty stores
+    Ok(())
+}
+```
+
+Store names and keys must be non-empty, at most 512 bytes, and contain only
+ASCII `A-Z a-z 0-9 _ . -`; anything else returns `Error::InvalidName`.
 
 ## Connection Features
 
