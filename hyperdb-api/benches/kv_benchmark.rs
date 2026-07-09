@@ -3,9 +3,15 @@
 
 //! Key-value store write benchmark.
 //!
-//! Compares two write strategies against a real `hyperd`:
-//! - single-commit-per-set: one `KvStore::set` per key (implicit commit)
-//! - batched: `KvStore::set_batch` of `BATCH` keys per transaction
+//! Compares three write paths against a real `hyperd`:
+//! - single-commit-per-set: one `KvStore::set` per fresh key (implicit commit)
+//! - batched: `KvStore::set_batch` of `BATCH` fresh keys per transaction
+//! - overwrite: one `KvStore::set` per *existing* key (implicit commit)
+//!
+//! The fresh-vs-overwrite comparison exposes the upsert's two paths: a fresh
+//! key does `UPDATE` (0 rows) then `INSERT` (~2 round-trips), while overwriting
+//! an existing key does `UPDATE` only — the conditional `INSERT` is skipped
+//! (~1 round-trip), so it runs roughly twice as fast.
 //!
 //! Run with:
 //!   cargo run -p hyperdb-api --release --example kv_benchmark            # default 50k keys
@@ -49,6 +55,21 @@ fn bench_single(conn: &Connection, keys: usize) -> Result<f64> {
     Ok(start.elapsed().as_secs_f64())
 }
 
+fn bench_overwrite(conn: &Connection, keys: usize) -> Result<f64> {
+    let kv = conn.kv_store("bench_overwrite")?;
+    kv.clear()?;
+    // Seed every key first (untimed) so the timed loop only overwrites — the
+    // upsert's `UPDATE` hits and the conditional `INSERT` is skipped.
+    for i in 0..keys {
+        kv.set(&format!("k{i}"), "seed")?;
+    }
+    let start = Instant::now();
+    for i in 0..keys {
+        kv.set(&format!("k{i}"), "value")?;
+    }
+    Ok(start.elapsed().as_secs_f64())
+}
+
 fn bench_batched(conn: &Connection, keys: usize) -> Result<f64> {
     let kv = conn.kv_store("bench_batched")?;
     kv.clear()?;
@@ -84,10 +105,21 @@ fn main() -> Result<()> {
     let batched_secs = bench_batched(&conn, keys)?;
     throughput(&format!("batched ({BATCH}/txn)"), keys, batched_secs);
 
+    let overwrite_secs = bench_overwrite(&conn, keys)?;
+    throughput("overwrite existing keys", keys, overwrite_secs);
+
     if batched_secs > 0.0 {
         println!(
-            "\n  speedup (batched vs single): {:.2}x",
+            "\n  speedup (batched vs single):        {:.2}x",
             single_secs / batched_secs
+        );
+    }
+    // Overwriting an existing key skips the conditional INSERT, so it should
+    // beat the fresh-insert path (which pays UPDATE + INSERT per key).
+    if overwrite_secs > 0.0 {
+        println!(
+            "  speedup (overwrite vs fresh insert): {:.2}x",
+            single_secs / overwrite_secs
         );
     }
     Ok(())

@@ -313,10 +313,17 @@ points:
   params. The seam is reserved for the MCP milestone (routing into an attached
   database) so the M1 public API needs no later change.
 - **Batching amortizes commits, not statements.** `set_batch` wraps N upserts in
-  one transaction. Because each upsert is still 2 prepared-statement
+  one transaction. Because each upsert is still up to 2 prepared-statement
   round-trips, the `kv_benchmark` example shows batched throughput on par with
   single-commit (~1×) on localhost TCP — `set_batch`'s real value is
   all-or-nothing atomicity, not raw speed.
+- **Overwriting an existing key is ~2× faster than a fresh insert.** The upsert
+  runs `UPDATE` first; on an existing key that hits and the conditional `INSERT`
+  is skipped (~1 round-trip), whereas a fresh key does `UPDATE` (0 rows) then
+  `INSERT` (~2 round-trips). The `kv_benchmark` example measures both and reports
+  ~2× on localhost TCP. This biases the two-statement upsert toward the common
+  "set once, overwrite repeatedly" config pattern; bulk-loading many *distinct*
+  keys stays on the slow path and should use the COPY-based `Inserter` instead.
 
 ### Callback Connection (Process Lifecycle)
 
