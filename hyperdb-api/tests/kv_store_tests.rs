@@ -151,3 +151,44 @@ fn list_stores_and_isolation() -> Result<()> {
     assert_eq!(stores, vec!["alpha", "beta"]);
     Ok(())
 }
+
+#[test]
+fn pop_is_ordered_and_destructive() -> Result<()> {
+    let tc = TestConnection::new()?;
+    let kv = tc.connection.kv_store("queue")?;
+    kv.set("c", "3")?;
+    kv.set("a", "1")?;
+    kv.set("b", "2")?;
+
+    assert_eq!(kv.pop()?, Some(("a".to_string(), "1".to_string())));
+    assert_eq!(kv.pop()?, Some(("b".to_string(), "2".to_string())));
+    assert_eq!(kv.pop()?, Some(("c".to_string(), "3".to_string())));
+    assert_eq!(kv.pop()?, None); // empty
+    assert_eq!(kv.size()?, 0);
+    Ok(())
+}
+
+#[test]
+fn set_batch_writes_all() -> Result<()> {
+    let tc = TestConnection::new()?;
+    let kv = tc.connection.kv_store("cfg")?;
+    kv.set_batch(&[("a", "1"), ("b", "2"), ("c", "3")])?;
+    assert_eq!(kv.size()?, 3);
+    assert_eq!(kv.get("b")?, Some("2".to_string()));
+    // Batch upserts overwrite existing keys too.
+    kv.set_batch(&[("b", "20"), ("d", "4")])?;
+    assert_eq!(kv.get("b")?, Some("20".to_string()));
+    assert_eq!(kv.size()?, 4);
+    Ok(())
+}
+
+#[test]
+fn set_batch_rejects_invalid_key_before_writing() -> Result<()> {
+    let tc = TestConnection::new()?;
+    let kv = tc.connection.kv_store("cfg")?;
+    let err = kv.set_batch(&[("ok", "1"), ("bad key", "2")]).unwrap_err();
+    assert!(matches!(err, Error::InvalidName(_)));
+    // Nothing was written because validation happens before the transaction.
+    assert_eq!(kv.size()?, 0);
+    Ok(())
+}

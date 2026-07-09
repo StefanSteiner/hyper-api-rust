@@ -331,6 +331,89 @@ impl<'conn> KvStore<'conn> {
             &[&self.store_name.as_str()],
         )
     }
+
+    /// Removes and returns the lowest-ordered key/value pair, or `None` if empty.
+    ///
+    /// The peek and delete run in one transaction, so they apply atomically —
+    /// either both the read and the delete commit, or neither does (on error
+    /// the transaction is rolled back). A SQL-NULL value is returned as an
+    /// empty string.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::FeatureNotSupported`] / [`Error::Server`].
+    pub fn pop(&self) -> Result<Option<(String, String)>> {
+        self.connection.begin_transaction_raw()?;
+        let result = self.pop_inner();
+        match &result {
+            Ok(_) => self.connection.commit_raw()?,
+            Err(_) => {
+                // Best-effort rollback; preserve the original error.
+                let _ = self.connection.rollback_raw();
+            }
+        }
+        result
+    }
+
+    /// Transaction body for [`pop`](Self::pop).
+    fn pop_inner(&self) -> Result<Option<(String, String)>> {
+        let store = self.store_name.as_str();
+        let select = format!(
+            "SELECT key, value FROM {} WHERE store_name = $1 ORDER BY key ASC LIMIT 1",
+            self.table_ref
+        );
+        // `first_row()` consumes the `Rowset`, dropping it (and releasing its
+        // statement guard on the shared connection) BEFORE the DELETE runs —
+        // the two statements never overlap on the connection.
+        let Some(row) = self
+            .connection
+            .query_params(&select, &[&store])?
+            .first_row()?
+        else {
+            return Ok(None);
+        };
+        let key: String = row
+            .get::<String>(0)
+            .ok_or_else(|| Error::internal("kv pop: key column was unexpectedly NULL"))?;
+        let value: String = row.get::<String>(1).unwrap_or_default();
+        self.connection.command_params(
+            &format!(
+                "DELETE FROM {} WHERE store_name = $1 AND key = $2",
+                self.table_ref
+            ),
+            &[&store, &key.as_str()],
+        )?;
+        Ok(Some((key, value)))
+    }
+
+    /// Upserts every `(key, value)` pair in one transaction.
+    ///
+    /// All keys are validated before the transaction opens, so an invalid key
+    /// aborts the whole batch without writing anything.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidName`] if any key is invalid (checked before writing).
+    /// - [`Error::FeatureNotSupported`] / [`Error::Server`].
+    pub fn set_batch(&self, entries: &[(&str, &str)]) -> Result<()> {
+        for (key, _) in entries {
+            validate_kv_name(key, "key")?;
+        }
+        self.connection.begin_transaction_raw()?;
+        let result = (|| {
+            for (key, value) in entries {
+                self.upsert(key, value)?;
+            }
+            Ok(())
+        })();
+        match &result {
+            Ok(()) => self.connection.commit_raw()?,
+            Err(_) => {
+                let _ = self.connection.rollback_raw();
+            }
+        }
+        result
+    }
 }
 
 impl Connection {
