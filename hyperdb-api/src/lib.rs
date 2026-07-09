@@ -154,6 +154,7 @@ pub mod copy;
 mod data_format;
 mod error;
 mod inserter;
+mod kv_store;
 mod names;
 mod params;
 /// Connection pooling support.
