@@ -237,6 +237,100 @@ impl<'conn> KvStore<'conn> {
         let json = serde_json::to_string(value).map_err(|e| Error::serialization(e.to_string()))?;
         self.upsert(key, &json)
     }
+
+    /// Deletes `key`; returns `true` if a row was removed.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidName`] if `key` is invalid.
+    /// - [`Error::FeatureNotSupported`] / [`Error::Server`].
+    pub fn delete(&self, key: &str) -> Result<bool> {
+        validate_kv_name(key, "key")?;
+        let affected = self.connection.command_params(
+            &format!(
+                "DELETE FROM {} WHERE store_name = $1 AND key = $2",
+                self.table_ref
+            ),
+            &[&self.store_name.as_str(), &key],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// Returns whether `key` is present in this store.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidName`] if `key` is invalid.
+    /// - [`Error::FeatureNotSupported`] / [`Error::Server`].
+    pub fn exists(&self, key: &str) -> Result<bool> {
+        validate_kv_name(key, "key")?;
+        let sql = format!(
+            "SELECT 1 FROM {} WHERE store_name = $1 AND key = $2 LIMIT 1",
+            self.table_ref
+        );
+        Ok(self
+            .connection
+            .query_params(&sql, &[&self.store_name.as_str(), &key])?
+            .first_row()?
+            .is_some())
+    }
+
+    /// Returns the number of keys in this store.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::FeatureNotSupported`] / [`Error::Server`].
+    pub fn size(&self) -> Result<i64> {
+        let sql = format!(
+            "SELECT COUNT(*) FROM {} WHERE store_name = $1",
+            self.table_ref
+        );
+        // `scalar()` errors on zero rows, but COUNT(*) always returns exactly
+        // one non-NULL row, so `unwrap_or(0)` is unreachable-but-defensive.
+        Ok(self
+            .connection
+            .query_params(&sql, &[&self.store_name.as_str()])?
+            .scalar::<i64>()?
+            .unwrap_or(0))
+    }
+
+    /// Returns this store's keys, sorted ascending.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::FeatureNotSupported`] / [`Error::Server`].
+    pub fn keys(&self) -> Result<Vec<String>> {
+        let sql = format!(
+            "SELECT key FROM {} WHERE store_name = $1 ORDER BY key ASC",
+            self.table_ref
+        );
+        let mut result = self
+            .connection
+            .query_params(&sql, &[&self.store_name.as_str()])?;
+        let mut keys = Vec::new();
+        while let Some(chunk) = result.next_chunk()? {
+            for row in &chunk {
+                if let Some(k) = row.get::<String>(0) {
+                    keys.push(k);
+                }
+            }
+        }
+        Ok(keys)
+    }
+
+    /// Deletes every key in this store; returns the number removed.
+    ///
+    /// The shared backing table survives; only this store's rows are removed.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::FeatureNotSupported`] / [`Error::Server`].
+    pub fn clear(&self) -> Result<u64> {
+        self.connection.command_params(
+            &format!("DELETE FROM {} WHERE store_name = $1", self.table_ref),
+            &[&self.store_name.as_str()],
+        )
+    }
 }
 
 impl Connection {

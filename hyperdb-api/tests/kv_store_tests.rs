@@ -108,3 +108,46 @@ fn set_rejects_invalid_key() {
     assert!(matches!(kv.set("bad key", "v"), Err(Error::InvalidName(_))));
     assert!(matches!(kv.get("bad key"), Err(Error::InvalidName(_))));
 }
+
+#[test]
+fn delete_exists_size_keys_clear() -> Result<()> {
+    let tc = TestConnection::new()?;
+    let kv = tc.connection.kv_store("cfg")?;
+    kv.set("b", "2")?;
+    kv.set("a", "1")?;
+    kv.set("c", "3")?;
+
+    assert_eq!(kv.size()?, 3);
+    assert!(kv.exists("a")?);
+    assert!(!kv.exists("z")?);
+    assert_eq!(kv.keys()?, vec!["a", "b", "c"]); // ORDER BY key ASC
+
+    assert!(kv.delete("b")?);
+    assert!(!kv.delete("b")?); // already gone
+    assert_eq!(kv.size()?, 2);
+
+    let removed = kv.clear()?;
+    assert_eq!(removed, 2);
+    assert_eq!(kv.size()?, 0);
+    Ok(())
+}
+
+#[test]
+fn list_stores_and_isolation() -> Result<()> {
+    let tc = TestConnection::new()?;
+    // Empty before any store has keys.
+    assert!(tc.connection.kv_list_stores()?.is_empty());
+
+    let a = tc.connection.kv_store("alpha")?;
+    let b = tc.connection.kv_store("beta")?;
+    a.set("k", "from_alpha")?;
+    b.set("k", "from_beta")?; // same key, different store
+
+    assert_eq!(a.get("k")?, Some("from_alpha".to_string()));
+    assert_eq!(b.get("k")?, Some("from_beta".to_string()));
+
+    let mut stores = tc.connection.kv_list_stores()?;
+    stores.sort();
+    assert_eq!(stores, vec!["alpha", "beta"]);
+    Ok(())
+}
