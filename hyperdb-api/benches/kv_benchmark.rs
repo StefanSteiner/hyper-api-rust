@@ -3,10 +3,16 @@
 
 //! Key-value store write benchmark.
 //!
-//! Compares three write paths against a real `hyperd`:
+//! Write paths:
 //! - single-commit-per-set: one `KvStore::set` per fresh key (implicit commit)
 //! - batched: `KvStore::set_batch` of `BATCH` fresh keys per transaction
 //! - overwrite: one `KvStore::set` per *existing* key (implicit commit)
+//!
+//! Read / delete paths (each seeded untimed, then timed over existing keys):
+//! - get: one `KvStore::get` per key (single `SELECT`, ~1 round-trip)
+//! - delete: one `KvStore::delete` per key (single `DELETE`, ~1 round-trip)
+//! - pop: one `KvStore::pop` per key — transactional
+//!   (`BEGIN`+`SELECT`+`DELETE`+`COMMIT`, ~4 round-trips), so it is the slowest
 //!
 //! The fresh-vs-overwrite comparison exposes the upsert's two paths: a fresh
 //! key does `UPDATE` (0 rows) then `INSERT` (~2 round-trips), while overwriting
@@ -91,6 +97,48 @@ fn bench_batched(conn: &Connection, keys: usize) -> Result<f64> {
     Ok(start.elapsed().as_secs_f64())
 }
 
+/// Seeds `keys` entries into `store` (untimed helper for the read/delete paths).
+fn seed(conn: &Connection, store: &str, keys: usize) -> Result<()> {
+    let kv = conn.kv_store(store)?;
+    kv.clear()?;
+    for i in 0..keys {
+        kv.set(&format!("k{i}"), "value")?;
+    }
+    Ok(())
+}
+
+fn bench_get(conn: &Connection, keys: usize) -> Result<f64> {
+    seed(conn, "bench_get", keys)?;
+    let kv = conn.kv_store("bench_get")?;
+    let start = Instant::now();
+    for i in 0..keys {
+        // `?` propagates errors; the returned value is intentionally discarded.
+        let _ = kv.get(&format!("k{i}"))?;
+    }
+    Ok(start.elapsed().as_secs_f64())
+}
+
+fn bench_delete(conn: &Connection, keys: usize) -> Result<f64> {
+    seed(conn, "bench_delete", keys)?;
+    let kv = conn.kv_store("bench_delete")?;
+    let start = Instant::now();
+    for i in 0..keys {
+        let _ = kv.delete(&format!("k{i}"))?;
+    }
+    Ok(start.elapsed().as_secs_f64())
+}
+
+fn bench_pop(conn: &Connection, keys: usize) -> Result<f64> {
+    seed(conn, "bench_pop", keys)?;
+    let kv = conn.kv_store("bench_pop")?;
+    let start = Instant::now();
+    // Each pop is one transaction (BEGIN + SELECT + DELETE + COMMIT).
+    for _ in 0..keys {
+        let _ = kv.pop()?;
+    }
+    Ok(start.elapsed().as_secs_f64())
+}
+
 fn main() -> Result<()> {
     let keys = key_count();
     println!("\n=== KV Store write benchmark ({keys} keys, batch size {BATCH}) ===");
@@ -107,6 +155,15 @@ fn main() -> Result<()> {
 
     let overwrite_secs = bench_overwrite(&conn, keys)?;
     throughput("overwrite existing keys", keys, overwrite_secs);
+
+    let get_secs = bench_get(&conn, keys)?;
+    throughput("get existing keys", keys, get_secs);
+
+    let delete_secs = bench_delete(&conn, keys)?;
+    throughput("delete existing keys", keys, delete_secs);
+
+    let pop_secs = bench_pop(&conn, keys)?;
+    throughput("pop (transactional)", keys, pop_secs);
 
     if batched_secs > 0.0 {
         println!(
