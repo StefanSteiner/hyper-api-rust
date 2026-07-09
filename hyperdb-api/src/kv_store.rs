@@ -144,6 +144,99 @@ impl<'conn> KvStore<'conn> {
     pub fn name(&self) -> &str {
         &self.store_name
     }
+
+    /// Returns the value for `key`, or `None` if the key is absent or NULL.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidName`] if `key` is invalid.
+    /// - [`Error::FeatureNotSupported`] on gRPC transport.
+    /// - [`Error::Server`] if the query fails.
+    pub fn get(&self, key: &str) -> Result<Option<String>> {
+        validate_kv_name(key, "key")?;
+        let sql = format!(
+            "SELECT value FROM {} WHERE store_name = $1 AND key = $2",
+            self.table_ref
+        );
+        // Bind store_name/key as `&str` params (never interpolated) — uniform
+        // `&str` element types coerce cleanly to `&[&dyn ToSqlParam]`.
+        let row = self
+            .connection
+            .query_params(&sql, &[&self.store_name.as_str(), &key])?
+            .first_row()?;
+        Ok(row.and_then(|r| r.get::<String>(0)))
+    }
+
+    /// Sets `key` to `value`, inserting or overwriting (upsert).
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidName`] if `key` is invalid.
+    /// - [`Error::FeatureNotSupported`] on gRPC transport.
+    /// - [`Error::Server`] if the `UPDATE`/`INSERT` fails.
+    pub fn set(&self, key: &str, value: &str) -> Result<()> {
+        validate_kv_name(key, "key")?;
+        self.upsert(key, value)
+    }
+
+    /// UPDATE-then-conditional-INSERT upsert. Assumes `key` is validated.
+    ///
+    /// Hyper has no `ON CONFLICT`; this mirrors the proven `_table_catalog`
+    /// idiom. The conditional INSERT uses distinct placeholders (`$4`/`$5`)
+    /// so it is unambiguous under the extended-query protocol.
+    fn upsert(&self, key: &str, value: &str) -> Result<()> {
+        let store = self.store_name.as_str();
+        let updated = self.connection.command_params(
+            &format!(
+                "UPDATE {} SET value = $3 WHERE store_name = $1 AND key = $2",
+                self.table_ref
+            ),
+            &[&store, &key, &value],
+        )?;
+        if updated == 0 {
+            self.connection.command_params(
+                &format!(
+                    "INSERT INTO {t} (store_name, key, value) \
+                     SELECT $1, $2, $3 \
+                     WHERE NOT EXISTS (SELECT 1 FROM {t} WHERE store_name = $4 AND key = $5)",
+                    t = self.table_ref
+                ),
+                &[&store, &key, &value, &store, &key],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Deserializes the JSON-encoded value for `key` into `T`.
+    ///
+    /// Returns `None` if the key is absent.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidName`] if `key` is invalid.
+    /// - [`Error::Serialization`] if the stored value is not valid JSON for `T`.
+    /// - [`Error::FeatureNotSupported`] / [`Error::Server`] as for [`get`](Self::get).
+    pub fn get_as<T: serde::de::DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
+        match self.get(key)? {
+            Some(json) => serde_json::from_str(&json)
+                .map(Some)
+                .map_err(|e| Error::serialization(e.to_string())),
+            None => Ok(None),
+        }
+    }
+
+    /// Serializes `value` to JSON and stores it under `key` (upsert).
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidName`] if `key` is invalid.
+    /// - [`Error::Serialization`] if `value` cannot be serialized to JSON.
+    /// - [`Error::FeatureNotSupported`] / [`Error::Server`] as for [`set`](Self::set).
+    pub fn set_as<T: serde::Serialize>(&self, key: &str, value: &T) -> Result<()> {
+        validate_kv_name(key, "key")?;
+        let json = serde_json::to_string(value).map_err(|e| Error::serialization(e.to_string()))?;
+        self.upsert(key, &json)
+    }
 }
 
 impl Connection {

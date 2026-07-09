@@ -56,3 +56,55 @@ fn documents_duplicate_insert_behavior() -> Result<()> {
     }
     Ok(())
 }
+
+use serde::{Deserialize, Serialize};
+
+#[test]
+fn set_then_get_and_overwrite() -> Result<()> {
+    let tc = TestConnection::new()?;
+    let kv = tc.connection.kv_store("cfg")?;
+    assert_eq!(kv.get("missing")?, None);
+    kv.set("k", "v1")?;
+    assert_eq!(kv.get("k")?, Some("v1".to_string()));
+    kv.set("k", "v2")?; // upsert overwrite
+    assert_eq!(kv.get("k")?, Some("v2".to_string()));
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct Profile {
+    name: String,
+    level: u32,
+}
+
+#[test]
+fn set_as_get_as_round_trip() -> Result<()> {
+    let tc = TestConnection::new()?;
+    let kv = tc.connection.kv_store("cfg")?;
+    let p = Profile {
+        name: "ada".into(),
+        level: 7,
+    };
+    kv.set_as("profile", &p)?;
+    assert_eq!(kv.get_as::<Profile>("profile")?, Some(p));
+    assert_eq!(kv.get_as::<Profile>("absent")?, None);
+    Ok(())
+}
+
+#[test]
+fn get_as_malformed_json_is_serialization_error() -> Result<()> {
+    let tc = TestConnection::new()?;
+    let kv = tc.connection.kv_store("cfg")?;
+    kv.set("bad", "not json")?;
+    let err = kv.get_as::<Profile>("bad").unwrap_err();
+    assert!(matches!(err, Error::Serialization(_)));
+    Ok(())
+}
+
+#[test]
+fn set_rejects_invalid_key() {
+    let tc = TestConnection::new().unwrap();
+    let kv = tc.connection.kv_store("cfg").unwrap();
+    assert!(matches!(kv.set("bad key", "v"), Err(Error::InvalidName(_))));
+    assert!(matches!(kv.get("bad key"), Err(Error::InvalidName(_))));
+}
