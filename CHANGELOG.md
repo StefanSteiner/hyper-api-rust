@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/tableau/hyper-api-rust/compare/v0.6.0...v0.6.1) (2026-07-10)
+
+
+### Bug Fixes
+
+* **mcp:** surface the KV store in the crates.io README and map caller-fixable identifier errors to INVALID_ARGUMENT ([#188](https://github.com/tableau/hyper-api-rust/issues/188)) ([a5993d5](https://github.com/tableau/hyper-api-rust/commit/a5993d5e9901a5bcc02bb9d7fbfe850ad36fe272))
+
 ## [0.6.0](https://github.com/tableau/hyper-api-rust/compare/v0.5.6...v0.6.0) (2026-07-10)
 
 
