@@ -247,6 +247,33 @@ async fn kv_list_size_and_list_stores() -> TestResult {
     h.shutdown().await
 }
 
+/// kv_size reports both key count and total value bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kv_size_reports_bytes() -> TestResult {
+    let h = TestHarness::start(false, false).await?;
+    call_tool(
+        &h.client,
+        "kv_set",
+        serde_json::json!({ "store": "s", "key": "a", "value": "abc" }),
+    )
+    .await?;
+    call_tool(
+        &h.client,
+        "kv_set",
+        serde_json::json!({ "store": "s", "key": "b", "value": "de" }),
+    )
+    .await?;
+
+    let size = call_tool(&h.client, "kv_size", serde_json::json!({ "store": "s" })).await?;
+    assert_eq!(structured(&size)["size"], serde_json::json!(2), "two keys");
+    assert_eq!(
+        structured(&size)["bytes"],
+        serde_json::json!(5),
+        "3+2=5 bytes"
+    );
+    h.shutdown().await
+}
+
 /// delete returns `{deleted:true}` when the key existed and
 /// `{deleted:false}` on a second delete (idempotent, not an error).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

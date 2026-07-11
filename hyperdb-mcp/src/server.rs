@@ -3273,7 +3273,7 @@ impl HyperMcpServer {
 
     /// Count the keys in a scratchpad store.
     #[tool(
-        description = "Return the number of keys in a KV scratchpad store. Omit `database` for the ephemeral store, or route with \"persistent\"/persist=true/an attached alias."
+        description = "Returns {store, size, bytes} where `size` is the key count and `bytes` is the total `OCTET_LENGTH` of all values (0 for empty stores). Omit `database` for the ephemeral store, or route with \"persistent\"/persist=true/an attached alias."
     )]
     fn kv_size(
         &self,
@@ -3282,10 +3282,16 @@ impl HyperMcpServer {
         let result = self.with_engine(|engine| {
             let db = self.resolve_db(engine, p.database.as_deref(), p.persist, true)?;
             let kv = Self::kv_open(engine, db.as_deref(), &p.store)?;
-            kv.size().map_err(McpError::from)
+            let key_count = kv.size().map_err(McpError::from)?;
+            let value_bytes = kv.byte_size().map_err(McpError::from)?;
+            Ok(json!({
+                "store": p.store,
+                "size": key_count,
+                "bytes": value_bytes,
+            }))
         });
         match result {
-            Ok(size) => Self::ok_content(json!({ "store": p.store, "size": size })),
+            Ok(val) => Self::ok_content(val),
             Err(e) => Self::err_content(e),
         }
     }
