@@ -902,12 +902,29 @@ pub struct KvSetManyParams {
     pub persist: Option<bool>,
 }
 
-/// Parameters for store-scoped KV tools (`kv_list`, `kv_size`, `kv_pop`,
-/// `kv_clear`).
+/// Parameters for store-scoped KV tools (`kv_size`, `kv_pop`, `kv_clear`).
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct KvStoreParams {
     /// Namespace of the KV store to operate on.
     pub store: String,
+    /// Target database alias. Omit (or pass `"local"`) for the ephemeral
+    /// primary. Pass `"persistent"` for the durable database, or a
+    /// user-attached alias. Each database has its own isolated stores.
+    pub database: Option<String>,
+    /// Shorthand for `database: "persistent"`. If both `database` and
+    /// `persist` are set, `database` wins.
+    pub persist: Option<bool>,
+}
+
+/// Parameters for `kv_list` (enumerate keys, optionally with values).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct KvListParams {
+    /// Namespace of the KV store to list.
+    pub store: String,
+    /// When true, return the full `(key, value)` pairs as `entries`; when
+    /// false or omitted, return only `keys` (the default behavior). Use
+    /// `values:true` for whole-store reads without N×`kv_get`.
+    pub values: Option<bool>,
     /// Target database alias. Omit (or pass `"local"`) for the ephemeral
     /// primary. Pass `"persistent"` for the durable database, or a
     /// user-attached alias. Each database has its own isolated stores.
@@ -3337,21 +3354,35 @@ impl HyperMcpServer {
 
     /// List all keys in a scratchpad store, sorted ascending.
     #[tool(
-        description = "List all keys in a KV scratchpad store, sorted ascending. Omit `database` for the ephemeral store, or route with \"persistent\"/persist=true/an attached alias."
+        description = "List all keys in a KV scratchpad store, sorted ascending. Omit `database` for the ephemeral store, or route with \"persistent\"/persist=true/an attached alias. Pass values=true to return full (key, value) pairs as an `entries` array instead of just keys — useful for reading a whole store without N×kv_get."
     )]
     fn kv_list(
         &self,
-        Parameters(p): Parameters<KvStoreParams>,
+        Parameters(p): Parameters<KvListParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let with_values = p.values.unwrap_or(false);
         let result = self.with_engine(|engine| {
             let db = self.resolve_db(engine, p.database.as_deref(), p.persist, true)?;
             let kv = Self::kv_open(engine, db.as_deref(), &p.store)?;
-            kv.keys().map_err(McpError::from)
+            if with_values {
+                kv.entries().map(|pairs| (Some(pairs), None))
+            } else {
+                kv.keys().map(|keys| (None, Some(keys)))
+            }
+            .map_err(McpError::from)
         });
         match result {
-            Ok(keys) => {
+            Ok((Some(entries), None)) => {
+                let arr: Vec<Value> = entries
+                    .into_iter()
+                    .map(|(k, v)| json!({ "key": k, "value": v }))
+                    .collect();
+                Self::ok_content(json!({ "store": p.store, "entries": arr }))
+            }
+            Ok((None, Some(keys))) => {
                 Self::ok_content(json!({ "store": p.store, "count": keys.len(), "keys": keys }))
             }
+            Ok(_) => unreachable!("exactly one of entries/keys is Some"),
             Err(e) => Self::err_content(e),
         }
     }

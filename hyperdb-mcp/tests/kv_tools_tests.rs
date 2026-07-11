@@ -247,6 +247,65 @@ async fn kv_list_size_and_list_stores() -> TestResult {
     h.shutdown().await
 }
 
+/// kv_list default (values absent/false) preserves the keys-only shape.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kv_list_keys_only_unchanged() -> TestResult {
+    let h = TestHarness::start(false, false).await?;
+    call_tool(
+        &h.client,
+        "kv_set",
+        serde_json::json!({ "store": "s", "key": "a", "value": "v1" }),
+    )
+    .await?;
+    call_tool(
+        &h.client,
+        "kv_set",
+        serde_json::json!({ "store": "s", "key": "b", "value": "v2" }),
+    )
+    .await?;
+    let list = call_tool(&h.client, "kv_list", serde_json::json!({ "store": "s" })).await?;
+    let body = structured(&list);
+    assert_eq!(body["store"], serde_json::json!("s"));
+    assert_eq!(body["count"], serde_json::json!(2));
+    assert_eq!(body["keys"], serde_json::json!(["a", "b"]));
+    h.shutdown().await
+}
+
+/// kv_list with values:true returns entries with both key and value.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kv_list_values_returns_entries() -> TestResult {
+    let h = TestHarness::start(false, false).await?;
+    call_tool(
+        &h.client,
+        "kv_set",
+        serde_json::json!({ "store": "s", "key": "x", "value": "hello" }),
+    )
+    .await?;
+    call_tool(
+        &h.client,
+        "kv_set",
+        serde_json::json!({ "store": "s", "key": "y", "value": "world" }),
+    )
+    .await?;
+    let list = call_tool(
+        &h.client,
+        "kv_list",
+        serde_json::json!({ "store": "s", "values": true }),
+    )
+    .await?;
+    let body = structured(&list);
+    assert_eq!(body["store"], serde_json::json!("s"));
+    let entries = body["entries"]
+        .as_array()
+        .expect("entries must be an array");
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["key"], serde_json::json!("x"));
+    assert_eq!(entries[0]["value"], serde_json::json!("hello"));
+    assert_eq!(entries[1]["key"], serde_json::json!("y"));
+    assert_eq!(entries[1]["value"], serde_json::json!("world"));
+    h.shutdown().await
+}
+
 /// kv_size reports both key count and total value bytes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn kv_size_reports_bytes() -> TestResult {
