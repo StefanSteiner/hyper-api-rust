@@ -383,6 +383,51 @@ impl<'conn> KvStore<'conn> {
         Ok(keys)
     }
 
+    /// Returns the total byte length of all values in this store
+    /// (`SUM(OCTET_LENGTH(value))`). Returns 0 for an empty store; `NULL`
+    /// values contribute 0 via `COALESCE`.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::FeatureNotSupported`] / [`Error::Server`].
+    pub fn byte_size(&self) -> Result<i64> {
+        let sql = format!(
+            "SELECT COALESCE(SUM(OCTET_LENGTH(value)), 0) FROM {} WHERE store_name = $1",
+            self.table_ref
+        );
+        Ok(self
+            .connection
+            .query_params(&sql, &[&self.store_name.as_str()])?
+            .scalar::<i64>()?
+            .unwrap_or(0))
+    }
+
+    /// Returns this store's `(key, value)` pairs, sorted by key ascending.
+    ///
+    /// Materializes the whole store — intended for small scratchpad stores.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::FeatureNotSupported`] / [`Error::Server`].
+    pub fn entries(&self) -> Result<Vec<(String, String)>> {
+        let sql = format!(
+            "SELECT key, value FROM {} WHERE store_name = $1 ORDER BY key ASC",
+            self.table_ref
+        );
+        let mut result = self
+            .connection
+            .query_params(&sql, &[&self.store_name.as_str()])?;
+        let mut entries = Vec::new();
+        while let Some(chunk) = result.next_chunk()? {
+            for row in &chunk {
+                if let Some(k) = row.get::<String>(0) {
+                    entries.push((k, row.get::<String>(1).unwrap_or_default()));
+                }
+            }
+        }
+        Ok(entries)
+    }
+
     /// Deletes every key in this store; returns the number removed.
     ///
     /// The shared backing table survives; only this store's rows are removed.

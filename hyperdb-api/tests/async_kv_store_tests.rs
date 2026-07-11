@@ -143,3 +143,22 @@ async fn async_set_reports_created_and_batch_outcome() -> Result<()> {
     assert_eq!(out.overwritten, 1);
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn async_byte_size_and_entries() -> Result<()> {
+    let (_hyper, conn) = fresh_async_conn("async_kv_sized").await?;
+    let kv = conn.kv_store("sized").await?;
+    assert_eq!(kv.byte_size().await?, 0, "empty store has 0 bytes");
+    kv.set("a", "hello").await?; // 5 bytes
+    kv.set("b", "worlds").await?; // 6 bytes
+    assert_eq!(kv.byte_size().await?, 11, "sum of OCTET_LENGTH");
+    assert_eq!(
+        kv.entries().await?,
+        vec![
+            ("a".to_string(), "hello".to_string()),
+            ("b".to_string(), "worlds".to_string()),
+        ],
+        "entries sorted by key with values"
+    );
+    Ok(())
+}

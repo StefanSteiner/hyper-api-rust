@@ -241,6 +241,52 @@ impl<'conn> AsyncKvStore<'conn> {
             .unwrap_or(0))
     }
 
+    /// Returns the total byte size of all values in this store (0 if empty).
+    ///
+    /// # Errors
+    ///
+    /// See [`KvStore::byte_size`](crate::KvStore::byte_size).
+    pub async fn byte_size(&self) -> Result<i64> {
+        let sql = format!(
+            "SELECT COALESCE(SUM(OCTET_LENGTH(value)), 0) FROM {} WHERE store_name = $1",
+            self.table_ref
+        );
+        Ok(self
+            .connection
+            .query_params(&sql, &[&self.store_name.as_str()])
+            .await?
+            .scalar::<i64>()
+            .await?
+            .unwrap_or(0))
+    }
+
+    /// Returns this store's `(key, value)` pairs, sorted by key ascending.
+    ///
+    /// Materializes the whole store — intended for small scratchpad stores.
+    ///
+    /// # Errors
+    ///
+    /// See [`KvStore::entries`](crate::KvStore::entries).
+    pub async fn entries(&self) -> Result<Vec<(String, String)>> {
+        let sql = format!(
+            "SELECT key, value FROM {} WHERE store_name = $1 ORDER BY key ASC",
+            self.table_ref
+        );
+        let mut result = self
+            .connection
+            .query_params(&sql, &[&self.store_name.as_str()])
+            .await?;
+        let mut entries = Vec::new();
+        while let Some(chunk) = result.next_chunk().await? {
+            for row in &chunk {
+                if let Some(k) = row.get::<String>(0) {
+                    entries.push((k, row.get::<String>(1).unwrap_or_default()));
+                }
+            }
+        }
+        Ok(entries)
+    }
+
     /// Returns this store's keys, sorted ascending.
     ///
     /// # Errors

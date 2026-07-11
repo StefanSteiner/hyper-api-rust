@@ -251,3 +251,22 @@ fn set_if_absent_guards_existing_key() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn byte_size_and_entries() -> Result<()> {
+    let tc = TestConnection::new()?;
+    let kv = tc.connection.kv_store("sized")?;
+    assert_eq!(kv.byte_size()?, 0, "empty store has 0 bytes");
+    kv.set("a", "hello")?; // 5 bytes
+    kv.set("b", "worlds")?; // 6 bytes
+    assert_eq!(kv.byte_size()?, 11, "sum of OCTET_LENGTH");
+    assert_eq!(
+        kv.entries()?,
+        vec![
+            ("a".to_string(), "hello".to_string()),
+            ("b".to_string(), "worlds".to_string()),
+        ],
+        "entries sorted by key with values"
+    );
+    Ok(())
+}
