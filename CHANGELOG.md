@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.7.0](https://github.com/tableau/hyper-api-rust/compare/v0.6.1...v0.7.0) (2026-07-11)
+
+
+### ⚠ BREAKING CHANGES
+
+* **kv:** #192 KV MCP LLM ergonomics — created signal, batch, size, value_path, JSON docs ([#193](https://github.com/tableau/hyper-api-rust/issues/193))
+* **kv:** async set/set_as/set_batch return SetOutcome/BatchSetOutcome
+* **kv:** async twin — reshape AsyncKvStore set/set_as/set_batch
+* **kv:** sync set/set_as/set_batch return SetOutcome/BatchSetOutcome
+* commits the plan produces, per release-please.
+
+### Features
+
+* commits the plan produces, per release-please. ([f6e5789](https://github.com/tableau/hyper-api-rust/commit/f6e57895bb1b76fbe5c71a1d25a4fef1ffcaa241))
+* **kv:** [#192](https://github.com/tableau/hyper-api-rust/issues/192) KV MCP LLM ergonomics — created signal, batch, size, value_path, JSON docs ([#193](https://github.com/tableau/hyper-api-rust/issues/193)) ([52a3ba0](https://github.com/tableau/hyper-api-rust/commit/52a3ba013f150e18785943a917f03eed2bad9cea))
+* **kv:** add async set_if_absent/byte_size/entries/set_batch_if_absent ([a166813](https://github.com/tableau/hyper-api-rust/commit/a16681378b7e71a9ee8821aedd1f4ebdd4373160))
+* **kv:** add set_if_absent and set_batch_if_absent to AsyncKvStore ([d116b12](https://github.com/tableau/hyper-api-rust/commit/d116b125a92d9819f1e07b0e4a1e094b581312bc))
+* **kv:** add sync KvStore::byte_size and entries ([aea9ea5](https://github.com/tableau/hyper-api-rust/commit/aea9ea54d261e8f76368acd83c028374e8b1b6bc))
+* **kv:** add sync KvStore::set_batch_if_absent atomic guard ([4a88aa3](https://github.com/tableau/hyper-api-rust/commit/4a88aa3b284c5843ec3a573417d7a35f15a93b20))
+* **kv:** add sync KvStore::set_if_absent write guard ([4f1ca85](https://github.com/tableau/hyper-api-rust/commit/4f1ca85fabec62fb225a70e7a922f669d6053711))
+* **kv:** async set/set_as/set_batch return SetOutcome/BatchSetOutcome ([6af0649](https://github.com/tableau/hyper-api-rust/commit/6af06495121ba78d1273d714c599ed8b9a8a7113))
+* **kv:** async twin — reshape AsyncKvStore set/set_as/set_batch ([89a7767](https://github.com/tableau/hyper-api-rust/commit/89a7767b80f0420691a65dcfbe27bcf49f31dd2c))
+* **kv:** sync set/set_as/set_batch return SetOutcome/BatchSetOutcome ([5aeab78](https://github.com/tableau/hyper-api-rust/commit/5aeab78c92c5b7f3897692da6ff4aea9943375fa))
+* **mcp:** add kv_set_many atomic batch write tool ([34f15f7](https://github.com/tableau/hyper-api-rust/commit/34f15f7b0f067d47932ef48d3434b9f584c5d8c2))
+* **mcp:** add values flag to kv_list for whole-store reads ([f0b3527](https://github.com/tableau/hyper-api-rust/commit/f0b35275a13bdb2289f58dd8f24e2321d1764e7a))
+* **mcp:** kv_set reports created/value_bytes, adds overwrite guard + value_path ([fd89084](https://github.com/tableau/hyper-api-rust/commit/fd89084afdbfb3ffac41ae4ee255cc2312c9c557))
+* **mcp:** kv_size reports total value bytes ([0967c05](https://github.com/tableau/hyper-api-rust/commit/0967c05eb7f27667ad9e1f792bc039ad332a8d06))
+
+
+### Bug Fixes
+
+* **mcp:** [#192](https://github.com/tableau/hyper-api-rust/issues/192) cap kv_set value_path file size before reading ([0fda8ec](https://github.com/tableau/hyper-api-rust/commit/0fda8ece5ac0e6065c2b797fd9fe26d6221279e9))
+* **mcp:** preserve PermissionDenied and steer JSON errors to ::json cast ([e1acbcd](https://github.com/tableau/hyper-api-rust/commit/e1acbcde9cf09308acd7d805745877939fb2be9d))
+
 ## [0.6.1](https://github.com/tableau/hyper-api-rust/compare/v0.6.0...v0.6.1) (2026-07-10)
 
 
