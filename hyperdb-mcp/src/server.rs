@@ -1253,6 +1253,31 @@ impl HyperMcpServer {
         })
     }
 
+    /// Hard cap (bytes) on a `value_path` file. Unlike the soft warning, this is
+    /// enforced: a file above the cap is rejected *before* it is read, so a
+    /// stray path to a multi-gigabyte file can't OOM the server by slurping the
+    /// whole thing into a single TEXT value. Generous enough (64 MiB) that any
+    /// legitimate scratchpad value passes.
+    const KV_VALUE_PATH_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+    /// Rejects a `value_path` file whose size exceeds [`Self::KV_VALUE_PATH_MAX_BYTES`].
+    /// `Ok(())` means the file is small enough to read into memory. Kept as a
+    /// pure helper so the bound is unit-testable without materializing a
+    /// multi-megabyte fixture on disk.
+    fn check_value_path_size(bytes: u64) -> Result<(), McpError> {
+        if bytes > Self::KV_VALUE_PATH_MAX_BYTES {
+            return Err(McpError::new(
+                ErrorCode::InvalidArgument,
+                format!(
+                    "value_path file is {bytes} bytes (> {} hard limit); the KV store \
+                     is for small scraps — use load_file or a real table for large payloads",
+                    Self::KV_VALUE_PATH_MAX_BYTES
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     /// Opens a KV store handle on the engine's connection, targeting the
     /// resolved `database` (`None` = the ephemeral primary's default location,
     /// `Some(alias)` = the persistent DB or an attached alias).
@@ -3182,7 +3207,7 @@ impl HyperMcpServer {
 
     /// Save a value under store + key (upsert). Ephemeral unless routed.
     #[tool(
-        description = "KV scratchpad. Save a variable, state, summary, or JSON config under store + key to remember later without creating a database table. IMPORTANT: without `database` the value is written to the EPHEMERAL database and is LOST when the server restarts. To persist across restarts, pass database=\"persistent\" (or persist=true). Returns {stored, created, value_bytes}; `created:false` means an existing value was overwritten. Pass overwrite=false to avoid clobbering (skips + returns stored:false, existed:true). Pass value_path=<absolute path> to store a file's contents server-side instead of `value` (exactly one of value/value_path; reads any server-readable path — no sandbox)."
+        description = "KV scratchpad. Save a variable, state, summary, or JSON config under store + key to remember later without creating a database table. IMPORTANT: without `database` the value is written to the EPHEMERAL database and is LOST when the server restarts. To persist across restarts, pass database=\"persistent\" (or persist=true). Returns {stored, created, value_bytes}; `created:false` means an existing value was overwritten. Pass overwrite=false to avoid clobbering (skips + returns stored:false, existed:true). Pass value_path=<absolute path> to store a file's contents server-side instead of `value` (exactly one of value/value_path; reads any server-readable path — no sandbox; files over 64 MiB are rejected before reading)."
     )]
     fn kv_set(
         &self,
@@ -3199,6 +3224,16 @@ impl HyperMcpServer {
                     Ok(c) => c,
                     Err(e) => return Self::err_content(e),
                 };
+                // Enforce the hard size cap on the file's metadata BEFORE reading,
+                // so a huge path is rejected instead of slurped into memory.
+                match std::fs::metadata(&canonical) {
+                    Ok(m) => {
+                        if let Err(e) = Self::check_value_path_size(m.len()) {
+                            return Self::err_content(e);
+                        }
+                    }
+                    Err(e) => return Self::err_content(McpError::from_io_error(&e, "value_path")),
+                }
                 match std::fs::read_to_string(&canonical) {
                     Ok(s) => s,
                     Err(e) => return Self::err_content(McpError::from_io_error(&e, "value_path")),
@@ -5375,5 +5410,31 @@ mod validate_execute_batch_tests {
     #[test]
     fn allows_trailing_semicolon() {
         validate_execute_batch(&s(&["INSERT INTO t VALUES (1);"])).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod kv_value_path_size_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_file_at_or_below_cap() {
+        // A zero-byte file, a modest file, and exactly-at-the-cap all pass.
+        HyperMcpServer::check_value_path_size(0).unwrap();
+        HyperMcpServer::check_value_path_size(1024).unwrap();
+        HyperMcpServer::check_value_path_size(HyperMcpServer::KV_VALUE_PATH_MAX_BYTES).unwrap();
+    }
+
+    #[test]
+    fn rejects_file_above_cap() {
+        let err =
+            HyperMcpServer::check_value_path_size(HyperMcpServer::KV_VALUE_PATH_MAX_BYTES + 1)
+                .unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
+        assert!(
+            err.message.contains("hard limit"),
+            "message should name the hard limit: {}",
+            err.message
+        );
     }
 }
