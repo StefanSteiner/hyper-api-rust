@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`kv_set_many` tool** — atomic batch write accepting an array of `{key, value}` entries. Validates all keys before opening the transaction; an invalid key aborts the whole batch without writing anything. Default behavior (`overwrite` absent or `true`) reports `{stored, created, overwritten, total_bytes}`; with `overwrite: false`, existing keys are skipped (not errors) and the response reports `{stored, created: 0, skipped, total_bytes}`. Each oversized entry (> 1 MiB) adds a keyed `warning` to a `warnings` array.
+- **`kv_set` — `value_path` parameter** — absolute path to a file whose contents become the value (read server-side). Provide exactly one of `value` or `value_path`; neither or both is `INVALID_ARGUMENT`. Reads any path the server process can read (same posture as `load_file` — no sandbox), with I/O errors preserved (`PermissionDenied` → `ErrorCode::PermissionDenied`, not collapsed to `FileNotFound`).
+- **`kv_set` — `overwrite` parameter** (default `true`) — when `false`, skips the write if the key already exists (calls `set_if_absent` instead of `set`), returning `{stored: false, created: false, existed: true}` with the original value unchanged. Eliminates silent data-loss from accidental overwrites.
+- **`kv_set` — `created` and `value_bytes` in response** — `created: true` means the key was newly inserted, `false` means an existing value was overwritten. `value_bytes` reports the UTF-8 byte length of the written value.
+- **`kv_set` — soft size warning** — values exceeding 1 MiB trigger a non-fatal `warning` field in the response steering the LLM toward `load_data` or a real table for large payloads. The write always succeeds.
+- **`kv_size` — `bytes` field** — response now includes `{store, size, bytes}` where `size` is the key count (unchanged) and `bytes` is `SUM(OCTET_LENGTH(value))` (0 for an empty store).
+- **`kv_list` — `values` flag** (default `false`) — when `true`, the response includes `{store, entries: [{key, value}, ...]}` instead of `{store, keys: [...]}`, eliminating the N×`kv_get` read pattern for whole-store materialization. Backed by a single `SELECT key, value` streamed to completion; acceptable for small scratchpad stores.
 - **Key-value scratchpad tools** — eight new MCP tools (`kv_set`, `kv_get`,
   `kv_delete`, `kv_list`, `kv_list_stores`, `kv_size`, `kv_pop`, `kv_clear`)
   let an LLM stash variables, state, summaries, or JSON strings under a
@@ -27,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **I/O error fidelity on `value_path` and `load_file`.** File-read errors now preserve `PermissionDenied` → `ErrorCode::PermissionDenied` instead of collapsing every I/O failure to `FileNotFound`. A missing file still maps to `FileNotFound`; any other I/O error becomes a generic `InternalError` with the OS message. (Implemented via `McpError::from_io_error` in `error.rs`.)
+- **Misleading JSON-error `suggestion` text corrected.** The "requires a structured data type" (`42601`) and `JSON_VALUE`-not-implemented (`0A000`) errors previously suggested splitting the statement, which was wrong; they now advise casting the TEXT value to `json` first (`value::json ->> 'field'`), the actual fix. Applies narrowly to JSON-related cases; other `42601` syntax errors carry a generic message without a misleading hint.
 - **Caller-fixable argument errors now return `INVALID_ARGUMENT`, not
   `INTERNAL_ERROR`.** An invalid identifier from the `hyperdb-api` layer —
   such as a KV `store`/`key` containing a disallowed byte or exceeding the

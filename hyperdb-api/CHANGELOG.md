@@ -7,8 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING:** `KvStore::set`, `KvStore::set_as`, and `KvStore::set_batch` (plus their `AsyncKvStore` twins) now return `SetOutcome` or `BatchSetOutcome` instead of `Result<()>`, reporting whether each write created a new key or overwrote an existing one. The `created` signal eliminates silent data loss when an LLM accidentally clobbers existing KV data. Pre-0.7.0 callers that ignored the `Result` (statement-position `set("k","v")?;`) still compile unchanged; callers that bound the return (`let _ = set(...)?;`) must destructure or ignore the outcome. Released as 0.7.0 under pre-1.0 semver (the minor slot is the breaking slot).
+
 ### Added
 
+- `KvStore::set_if_absent` / `AsyncKvStore::set_if_absent` — guarded write that inserts only if the key is absent (no check-then-write race; single `INSERT ... WHERE NOT EXISTS`). Returns `true` if written, `false` if the key already existed (nothing written).
+- `KvStore::set_batch_if_absent` / `AsyncKvStore::set_batch_if_absent` — atomic batch variant of `set_if_absent`, returning `BatchGuardOutcome { written, skipped }`. All keys are validated before the transaction opens; an invalid key aborts the whole batch.
+- `KvStore::byte_size` / `AsyncKvStore::byte_size` — returns the total byte length of all values in the store (`SUM(OCTET_LENGTH(value))`); 0 for an empty store.
+- `KvStore::entries` / `AsyncKvStore::entries` — returns all `(key, value)` pairs sorted by key ascending, materializing the whole store. Intended for small scratchpad stores.
+- `SetOutcome`, `BatchSetOutcome`, `BatchGuardOutcome` — public outcome types re-exported from `hyperdb_api` (sync + async twins).
 - Key-value store API: `Connection::kv_store` / `AsyncConnection::kv_store` returning
   `KvStore` / `AsyncKvStore` handles over a fixed `_hyperdb_kv_store` table, with
   `get`/`set`/`get_as`/`set_as`/`delete`/`exists`/`size`/`keys`/`pop`/`clear`/`set_batch`,
