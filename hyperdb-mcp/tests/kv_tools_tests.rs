@@ -643,6 +643,48 @@ async fn kv_set_reports_created_and_bytes() -> TestResult {
     )
     .await?;
     assert_eq!(structured(&second)["created"], serde_json::json!(false));
+    assert_eq!(structured(&second)["value_bytes"], serde_json::json!(2));
+    h.shutdown().await
+}
+
+/// kv_set warns when value_bytes exceeds the soft limit (1MB).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kv_set_large_value_warns() -> TestResult {
+    let h = TestHarness::start(false, false).await?;
+
+    // At exactly 1 MB boundary: no warning
+    let one_mb = "x".repeat(1_048_576);
+    let at_limit = call_tool(
+        &h.client,
+        "kv_set",
+        serde_json::json!({ "store": "s", "key": "at_limit", "value": one_mb }),
+    )
+    .await?;
+    assert_eq!(structured(&at_limit)["stored"], serde_json::json!(true));
+    assert!(structured(&at_limit)["warning"].is_null());
+
+    // Above 1 MB: warning fires
+    let over_mb = "x".repeat(1_048_577);
+    let over_limit = call_tool(
+        &h.client,
+        "kv_set",
+        serde_json::json!({ "store": "s", "key": "over_limit", "value": over_mb }),
+    )
+    .await?;
+    let structured_over = structured(&over_limit);
+    assert_eq!(structured_over["stored"], serde_json::json!(true));
+    let warning = structured_over["warning"]
+        .as_str()
+        .expect("warning should be a string");
+    assert!(
+        warning.contains("1048576"),
+        "warning should mention the byte limit; got: {warning}"
+    );
+    assert!(
+        warning.contains("soft limit") || warning.contains("recommended"),
+        "warning should mention soft limit or recommended; got: {warning}"
+    );
+
     h.shutdown().await
 }
 
