@@ -3133,7 +3133,7 @@ impl HyperMcpServer {
             kv.set(&p.key, &p.value).map_err(McpError::from)
         });
         match result {
-            Ok(()) => Self::ok_content(json!({ "stored": true, "store": p.store, "key": p.key })),
+            Ok(_) => Self::ok_content(json!({ "stored": true, "store": p.store, "key": p.key })),
             Err(e) => Self::err_content(e),
         }
     }

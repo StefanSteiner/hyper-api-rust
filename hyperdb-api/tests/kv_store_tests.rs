@@ -204,3 +204,30 @@ fn set_batch_rejects_invalid_key_before_writing() -> Result<()> {
     assert_eq!(kv.size()?, 0);
     Ok(())
 }
+
+#[test]
+fn set_reports_created_then_overwritten() -> Result<()> {
+    let tc = TestConnection::new()?;
+    let kv = tc.connection.kv_store("outcome")?;
+    let first = kv.set("k", "v1")?;
+    assert!(
+        first.created,
+        "first write of a key must report created=true"
+    );
+    let second = kv.set("k", "v2")?;
+    assert!(!second.created, "overwrite must report created=false");
+    assert_eq!(kv.get("k")?, Some("v2".to_string()));
+    Ok(())
+}
+
+#[test]
+fn set_batch_reports_created_and_overwritten() -> Result<()> {
+    let tc = TestConnection::new()?;
+    let kv = tc.connection.kv_store("batch_outcome")?;
+    kv.set("a", "1")?; // pre-existing → will be overwritten
+    let out = kv.set_batch(&[("a", "10"), ("b", "20"), ("c", "30")])?;
+    assert_eq!(out.created, 2, "b and c are new");
+    assert_eq!(out.overwritten, 1, "a existed");
+    assert_eq!(kv.get("a")?, Some("10".to_string()));
+    Ok(())
+}
