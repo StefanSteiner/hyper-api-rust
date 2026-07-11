@@ -869,6 +869,39 @@ pub struct KvSetParams {
     pub persist: Option<bool>,
 }
 
+/// A single key-value pair for batch writes.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct KvEntry {
+    /// Key to write.
+    pub key: String,
+    /// Value to store.
+    pub value: String,
+}
+
+/// Parameters for `kv_set_many` (atomic batch write).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct KvSetManyParams {
+    /// Namespace of the KV store. Created on first write.
+    pub store: String,
+    /// Key-value pairs to write atomically. All keys are validated before the
+    /// transaction opens, so an invalid key aborts the whole batch without
+    /// writing anything. Empty `entries` is an error.
+    pub entries: Vec<KvEntry>,
+    /// When false, skip existing keys instead of overwriting them (written
+    /// entries report `created`, skipped ones report `skipped`). Defaults to
+    /// true (upsert).
+    pub overwrite: Option<bool>,
+    /// Target database alias. Omit (or pass `"local"`) to write to the
+    /// ephemeral primary. Pass `"persistent"` to write to the durable database
+    /// that survives across sessions. Other values target a user-attached
+    /// database (must be writable). Each database has its own isolated stores.
+    pub database: Option<String>,
+    /// Shorthand for `database: "persistent"`. When true, the batch is written
+    /// to the persistent database. If both `database` and `persist` are set,
+    /// `database` wins.
+    pub persist: Option<bool>,
+}
+
 /// Parameters for store-scoped KV tools (`kv_list`, `kv_size`, `kv_pop`,
 /// `kv_clear`).
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -3197,6 +3230,80 @@ impl HyperMcpServer {
                 }
                 if let Some(w) = Self::kv_size_warning(value_bytes) {
                     body["warning"] = json!(w);
+                }
+                Self::ok_content(body)
+            }
+            Err(e) => Self::err_content(e),
+        }
+    }
+
+    /// Atomic batch write to the KV scratchpad.
+    #[tool(
+        description = "Write multiple KV pairs atomically. All keys validated before the transaction opens, so an invalid key aborts the whole batch. Returns {stored, created, overwritten, total_bytes} when overwrite=true (default); returns {stored, created, skipped, total_bytes} when overwrite=false (guard mode — skips existing keys). Empty `entries` is an error. Omit `database` to write to the ephemeral store; pass \"persistent\" (or persist=true) or an attached alias to write elsewhere."
+    )]
+    fn kv_set_many(
+        &self,
+        Parameters(p): Parameters<KvSetManyParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Err(e) = self.check_writable("kv_set_many") {
+            return Self::err_content(e);
+        }
+        if p.entries.is_empty() {
+            return Self::err_content(McpError::new(
+                ErrorCode::InvalidArgument,
+                "entries must not be empty",
+            ));
+        }
+
+        // Build the &[(&str, &str)] slice for the API crate; collect per-entry
+        // warnings for oversized values.
+        let pairs: Vec<(&str, &str)> = p
+            .entries
+            .iter()
+            .map(|e| (e.key.as_str(), e.value.as_str()))
+            .collect();
+        let total_bytes: usize = p.entries.iter().map(|e| e.value.len()).sum();
+        let mut warnings: Vec<serde_json::Value> = Vec::new();
+        for entry in &p.entries {
+            if let Some(w) = Self::kv_size_warning(entry.value.len()) {
+                warnings.push(json!({ "key": entry.key, "warning": w }));
+            }
+        }
+
+        // Shape the outcome JSON *inside* each branch so the `with_engine`
+        // closure returns a single type (`Result<Value, McpError>`). The two
+        // batch primitives return different outcome structs (`BatchSetOutcome`
+        // vs `BatchGuardOutcome`), so a bare `if`/`else` returning both would
+        // not type-check — a closure, like any block, needs one return type.
+        // `total_bytes` and `warnings` are engine-independent (computed above),
+        // so they are spliced into the object after the closure returns. This
+        // mirrors the single-type-closure pattern used by `kv_list` (Task 11).
+        let overwrite = p.overwrite.unwrap_or(true);
+        let result = self.with_engine(|engine| {
+            let db = self.resolve_db(engine, p.database.as_deref(), p.persist, true)?;
+            let kv = Self::kv_open(engine, db.as_deref(), &p.store)?;
+            if overwrite {
+                let o = kv.set_batch(&pairs).map_err(McpError::from)?;
+                Ok(json!({
+                    "stored": o.created + o.overwritten,
+                    "created": o.created,
+                    "overwritten": o.overwritten,
+                }))
+            } else {
+                let o = kv.set_batch_if_absent(&pairs).map_err(McpError::from)?;
+                Ok(json!({
+                    "stored": o.written,
+                    "created": o.written,
+                    "skipped": o.skipped,
+                }))
+            }
+        });
+
+        match result {
+            Ok(mut body) => {
+                body["total_bytes"] = json!(total_bytes);
+                if !warnings.is_empty() {
+                    body["warnings"] = json!(warnings);
                 }
                 Self::ok_content(body)
             }
