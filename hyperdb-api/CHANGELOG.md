@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- **BREAKING:** `KvStore::set`, `KvStore::set_as`, and `KvStore::set_batch` (plus their `AsyncKvStore` twins) now return `SetOutcome` or `BatchSetOutcome` instead of `Result<()>`, reporting whether each write created a new key or overwrote an existing one. The `created` signal eliminates silent data loss when an LLM accidentally clobbers existing KV data. Pre-0.7.0 callers that ignored the `Result` (statement-position `set("k","v")?;`) still compile unchanged; callers that bound the return (`let _ = set(...)?;`) must destructure or ignore the outcome. Released as 0.7.0 under pre-1.0 semver (the minor slot is the breaking slot).
+- **BREAKING:** `KvStore::set`, `KvStore::set_as`, and `KvStore::set_batch` (plus their `AsyncKvStore` twins) now return `SetOutcome` or `BatchSetOutcome` instead of `Result<()>`, reporting whether each write created a new key or overwrote an existing one. The `created` signal eliminates silent data loss when an LLM accidentally clobbers existing KV data. Callers that ignored the `Result` (statement-position `set("k","v")?;`) — including `let _ = set(...)?;` — still compile unchanged. The genuinely breaking cases are callers that named the unit return (`let x: () = set(...)?;`) or that returned `set(...)` where a `Result<()>` was expected; these now see `SetOutcome`/`BatchSetOutcome` and must adapt. Under pre-1.0 semver the minor slot is the breaking slot, so this lands in the next minor release.
 
 ### Added
 

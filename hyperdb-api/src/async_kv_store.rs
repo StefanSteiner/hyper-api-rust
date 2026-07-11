@@ -185,7 +185,12 @@ impl<'conn> AsyncKvStore<'conn> {
     ///
     /// Returns `true` if a row was written, `false` if the key already existed
     /// (in which case nothing is written). A single `INSERT ... WHERE NOT
-    /// EXISTS` statement decides, so there is no check-then-write race.
+    /// EXISTS` statement decides, so there is no check-then-write race within a
+    /// connection. The backing table has no unique constraint on
+    /// `(store_name, key)`, so two *separate* processes writing the same key to
+    /// a shared persistent store concurrently could both pass `NOT EXISTS` and
+    /// double-insert; within a single process (including the MCP daemon, which
+    /// serializes engine access) the guard is exact.
     ///
     /// # Errors
     ///

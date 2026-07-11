@@ -191,13 +191,16 @@ watcher targets the alias; call `unwatch_directory` first.
   (response: `{stored: false, existed: true}`). Pass
   `value_path: <absolute path>` to store a file's contents server-side
   instead of inlining `value` (exactly one of `value` / `value_path`;
-  reads any path the server process can read — no sandbox).
+  reads any path the server process can read — no sandbox; files over
+  64 MiB are rejected before reading).
 - `kv_set_many` — atomic batch write. Pass an `entries` array of
   `{key, value}` objects. All keys validated up front; an invalid key
   aborts the whole batch without writing anything. `overwrite: false`
   skips existing keys within the batch. Returns
   `{stored, created, overwritten, total_bytes}` (or `skipped` instead
-  of `overwritten` under `overwrite: false`).
+  of `overwritten` under `overwrite: false`). `total_bytes` counts all
+  submitted values — an upper bound on bytes actually persisted when
+  keys are skipped or duplicated.
 - `kv_get` — read a value by store + key.
 - `kv_delete` — delete a key.
 - `kv_list` — list keys in a store. Pass `values: true` to return
