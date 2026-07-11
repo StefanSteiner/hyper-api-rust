@@ -5,7 +5,9 @@
 
 use crate::async_connection::AsyncConnection;
 use crate::error::{Error, Result};
-use crate::kv_store::{kv_create_table_sql, kv_target_prefix, validate_kv_name, KV_TABLE};
+use crate::kv_store::{
+    kv_create_table_sql, kv_target_prefix, validate_kv_name, BatchSetOutcome, SetOutcome, KV_TABLE,
+};
 
 /// A handle to one named key-value store over an [`AsyncConnection`].
 ///
@@ -97,22 +99,27 @@ impl<'conn> AsyncKvStore<'conn> {
         Ok(row.and_then(|r| r.get::<String>(0)))
     }
 
-    /// Sets `key` to `value` (upsert).
+    /// Sets `key` to `value`, inserting or overwriting (upsert). Returns
+    /// [`SetOutcome`] indicating whether the key was newly created.
     ///
     /// # Errors
     ///
     /// See [`KvStore::set`](crate::KvStore::set).
-    pub async fn set(&self, key: &str, value: &str) -> Result<()> {
+    pub async fn set(&self, key: &str, value: &str) -> Result<SetOutcome> {
         validate_kv_name(key, "key")?;
-        self.upsert(key, value).await
+        Ok(SetOutcome {
+            created: self.upsert(key, value).await?,
+        })
     }
 
     /// UPDATE-then-conditional-INSERT upsert. Assumes `key` is validated.
+    /// Returns `true` if the row was newly inserted (created), `false` if an
+    /// existing value was overwritten.
     ///
     /// Mirrors [`KvStore::upsert`](crate::KvStore); the conditional INSERT uses
     /// distinct placeholders (`$4`/`$5`) so it is unambiguous under the
     /// extended-query protocol.
-    async fn upsert(&self, key: &str, value: &str) -> Result<()> {
+    async fn upsert(&self, key: &str, value: &str) -> Result<bool> {
         let updated = self
             .connection
             .command_params(
@@ -142,7 +149,7 @@ impl<'conn> AsyncKvStore<'conn> {
                 )
                 .await?;
         }
-        Ok(())
+        Ok(updated == 0)
     }
 
     /// Deserializes the JSON value for `key` into `T`; `None` if absent.
@@ -159,15 +166,18 @@ impl<'conn> AsyncKvStore<'conn> {
         }
     }
 
-    /// Serializes `value` to JSON and stores it under `key` (upsert).
+    /// Serializes `value` to JSON and stores it under `key` (upsert). Returns
+    /// [`SetOutcome`] indicating whether the key was newly created.
     ///
     /// # Errors
     ///
     /// See [`KvStore::set_as`](crate::KvStore::set_as).
-    pub async fn set_as<T: serde::Serialize>(&self, key: &str, value: &T) -> Result<()> {
+    pub async fn set_as<T: serde::Serialize>(&self, key: &str, value: &T) -> Result<SetOutcome> {
         validate_kv_name(key, "key")?;
         let json = serde_json::to_string(value).map_err(|e| Error::serialization(e.to_string()))?;
-        self.upsert(key, &json).await
+        Ok(SetOutcome {
+            created: self.upsert(key, &json).await?,
+        })
     }
 
     /// Deletes `key`; returns `true` if a row was removed.
@@ -328,7 +338,9 @@ impl<'conn> AsyncKvStore<'conn> {
         Ok(Some((key, value)))
     }
 
-    /// Upserts every `(key, value)` pair in one transaction.
+    /// Upserts every `(key, value)` pair in one transaction. Returns
+    /// [`BatchSetOutcome`] reporting how many keys were newly inserted vs.
+    /// overwritten.
     ///
     /// All keys are validated before the transaction opens, so an invalid key
     /// aborts the whole batch without writing anything.
@@ -336,20 +348,28 @@ impl<'conn> AsyncKvStore<'conn> {
     /// # Errors
     ///
     /// See [`KvStore::set_batch`](crate::KvStore::set_batch).
-    pub async fn set_batch(&self, entries: &[(&str, &str)]) -> Result<()> {
+    pub async fn set_batch(&self, entries: &[(&str, &str)]) -> Result<BatchSetOutcome> {
         for (key, _) in entries {
             validate_kv_name(key, "key")?;
         }
         self.connection.begin_transaction_raw().await?;
-        let mut inner: Result<()> = Ok(());
-        for (key, value) in entries {
-            if let Err(e) = self.upsert(key, value).await {
-                inner = Err(e);
-                break;
+        let inner: Result<BatchSetOutcome> = async {
+            let mut outcome = BatchSetOutcome {
+                created: 0,
+                overwritten: 0,
+            };
+            for (key, value) in entries {
+                if self.upsert(key, value).await? {
+                    outcome.created += 1;
+                } else {
+                    outcome.overwritten += 1;
+                }
             }
+            Ok(outcome)
         }
+        .await;
         match &inner {
-            Ok(()) => self.connection.commit_raw().await?,
+            Ok(_) => self.connection.commit_raw().await?,
             Err(_) => {
                 let _ = self.connection.rollback_raw().await;
             }
