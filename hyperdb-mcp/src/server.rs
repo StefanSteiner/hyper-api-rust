@@ -845,10 +845,19 @@ pub struct KvKeyParams {
 pub struct KvSetParams {
     /// Namespace of the KV store. Created on first write.
     pub store: String,
-    /// Key to write. Overwrites any existing value for this key (upsert).
+    /// Key to write.
     pub key: String,
-    /// Value to store. Any string, including a JSON document.
-    pub value: String,
+    /// Value to store. Any string, including a JSON document. Provide exactly
+    /// one of `value` or `value_path`.
+    pub value: Option<String>,
+    /// Absolute path to a file whose contents become the value (read
+    /// server-side). Provide exactly one of `value` or `value_path`. Reads any
+    /// path the server process can read — no sandbox.
+    pub value_path: Option<String>,
+    /// When false, do not overwrite an existing key: if the key already exists
+    /// the write is skipped and the response reports `stored:false,
+    /// existed:true`. Defaults to true (upsert).
+    pub overwrite: Option<bool>,
     /// Target database alias. Omit (or pass `"local"`) to write to the
     /// ephemeral primary. Pass `"persistent"` to write to the durable database
     /// that survives across sessions. Other values target a user-attached
@@ -860,12 +869,62 @@ pub struct KvSetParams {
     pub persist: Option<bool>,
 }
 
-/// Parameters for store-scoped KV tools (`kv_list`, `kv_size`, `kv_pop`,
-/// `kv_clear`).
+/// A single key-value pair for batch writes.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct KvEntry {
+    /// Key to write.
+    pub key: String,
+    /// Value to store.
+    pub value: String,
+}
+
+/// Parameters for `kv_set_many` (atomic batch write).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct KvSetManyParams {
+    /// Namespace of the KV store. Created on first write.
+    pub store: String,
+    /// Key-value pairs to write atomically. All keys are validated before the
+    /// transaction opens, so an invalid key aborts the whole batch without
+    /// writing anything. Empty `entries` is an error.
+    pub entries: Vec<KvEntry>,
+    /// When false, skip existing keys instead of overwriting them (written
+    /// entries report `created`, skipped ones report `skipped`). Defaults to
+    /// true (upsert).
+    pub overwrite: Option<bool>,
+    /// Target database alias. Omit (or pass `"local"`) to write to the
+    /// ephemeral primary. Pass `"persistent"` to write to the durable database
+    /// that survives across sessions. Other values target a user-attached
+    /// database (must be writable). Each database has its own isolated stores.
+    pub database: Option<String>,
+    /// Shorthand for `database: "persistent"`. When true, the batch is written
+    /// to the persistent database. If both `database` and `persist` are set,
+    /// `database` wins.
+    pub persist: Option<bool>,
+}
+
+/// Parameters for store-scoped KV tools (`kv_size`, `kv_pop`, `kv_clear`).
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct KvStoreParams {
     /// Namespace of the KV store to operate on.
     pub store: String,
+    /// Target database alias. Omit (or pass `"local"`) for the ephemeral
+    /// primary. Pass `"persistent"` for the durable database, or a
+    /// user-attached alias. Each database has its own isolated stores.
+    pub database: Option<String>,
+    /// Shorthand for `database: "persistent"`. If both `database` and
+    /// `persist` are set, `database` wins.
+    pub persist: Option<bool>,
+}
+
+/// Parameters for `kv_list` (enumerate keys, optionally with values).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct KvListParams {
+    /// Namespace of the KV store to list.
+    pub store: String,
+    /// When true, return the full `(key, value)` pairs as `entries`; when
+    /// false or omitted, return only `keys` (the default behavior). Use
+    /// `values:true` for whole-store reads without N×`kv_get`.
+    pub values: Option<bool>,
     /// Target database alias. Omit (or pass `"local"`) for the ephemeral
     /// primary. Pass `"persistent"` for the durable database, or a
     /// user-attached alias. Each database has its own isolated stores.
@@ -1175,6 +1234,48 @@ impl HyperMcpServer {
         }
 
         Ok(Some(resolved))
+    }
+
+    /// Soft threshold (bytes) above which a single KV value triggers a non-fatal
+    /// `warning` in the write response. The write always succeeds.
+    const KV_SOFT_SIZE_WARN_BYTES: usize = 1_048_576;
+
+    /// Returns a soft-size advisory when `bytes` exceeds the KV scratchpad
+    /// threshold, else `None`. Reports the raw byte count (no float division, to
+    /// stay clear of `cast_precision_loss` under the pedantic lint gate).
+    fn kv_size_warning(bytes: usize) -> Option<String> {
+        (bytes > Self::KV_SOFT_SIZE_WARN_BYTES).then(|| {
+            format!(
+                "value is {bytes} bytes (> {} soft limit); the KV \
+                 store is for small scraps — consider load_data or a real table for large payloads",
+                Self::KV_SOFT_SIZE_WARN_BYTES
+            )
+        })
+    }
+
+    /// Hard cap (bytes) on a `value_path` file. Unlike the soft warning, this is
+    /// enforced: a file above the cap is rejected *before* it is read, so a
+    /// stray path to a multi-gigabyte file can't OOM the server by slurping the
+    /// whole thing into a single TEXT value. Generous enough (64 MiB) that any
+    /// legitimate scratchpad value passes.
+    const KV_VALUE_PATH_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+    /// Rejects a `value_path` file whose size exceeds [`Self::KV_VALUE_PATH_MAX_BYTES`].
+    /// `Ok(())` means the file is small enough to read into memory. Kept as a
+    /// pure helper so the bound is unit-testable without materializing a
+    /// multi-megabyte fixture on disk.
+    fn check_value_path_size(bytes: u64) -> Result<(), McpError> {
+        if bytes > Self::KV_VALUE_PATH_MAX_BYTES {
+            return Err(McpError::new(
+                ErrorCode::InvalidArgument,
+                format!(
+                    "value_path file is {bytes} bytes (> {} hard limit); the KV store \
+                     is for small scraps — use load_file or a real table for large payloads",
+                    Self::KV_VALUE_PATH_MAX_BYTES
+                ),
+            ));
+        }
+        Ok(())
     }
 
     /// Opens a KV store handle on the engine's connection, targeting the
@@ -1667,12 +1768,8 @@ impl HyperMcpServer {
             };
 
             let ingest_result = if let Some(ref json_path) = params.json_extract_path {
-                let raw = std::fs::read_to_string(&params.path).map_err(|e| {
-                    McpError::new(
-                        ErrorCode::FileNotFound,
-                        format!("Cannot read file '{}': {e}", params.path),
-                    )
-                })?;
+                let raw = std::fs::read_to_string(&params.path)
+                    .map_err(|e| McpError::from_io_error(&e, "load_file"))?;
                 let extracted = crate::ingest::extract_json_path(&raw, json_path)?;
                 let array_text = crate::ingest::normalize_json_or_jsonl(&extracted)?;
                 let mut result = ingest_json(engine, &array_text, &opts)?;
@@ -1837,12 +1934,8 @@ impl HyperMcpServer {
             };
 
             let ingest_result = if let Some(ref json_path) = params.json_extract_path {
-                let raw = std::fs::read_to_string(&params.path).map_err(|e| {
-                    McpError::new(
-                        ErrorCode::FileNotFound,
-                        format!("Cannot read file '{}': {e}", params.path),
-                    )
-                })?;
+                let raw = std::fs::read_to_string(&params.path)
+                    .map_err(|e| McpError::from_io_error(&e, "load_file"))?;
                 let extracted = crate::ingest::extract_json_path(&raw, json_path)?;
                 let array_text = crate::ingest::normalize_json_or_jsonl(&extracted)?;
                 let mut result = ingest_json(engine, &array_text, &opts)?;
@@ -2864,12 +2957,8 @@ impl HyperMcpServer {
         let sample_rows = params.sample_rows.unwrap_or(5).clamp(1, 50) as usize;
         let result = if let Some(ref json_path) = params.json_extract_path {
             (|| -> Result<_, McpError> {
-                let raw = std::fs::read_to_string(&params.path).map_err(|e| {
-                    McpError::new(
-                        ErrorCode::FileNotFound,
-                        format!("Cannot read file '{}': {e}", params.path),
-                    )
-                })?;
+                let raw = std::fs::read_to_string(&params.path)
+                    .map_err(|e| McpError::from_io_error(&e, "load_file"))?;
                 let file_size = std::fs::metadata(&params.path).map_or(0, |m| m.len());
                 let extracted = crate::ingest::extract_json_path(&raw, json_path)?;
                 crate::inspect::inspect_json_from_text(&extracted, file_size, sample_rows)
@@ -3118,7 +3207,7 @@ impl HyperMcpServer {
 
     /// Save a value under store + key (upsert). Ephemeral unless routed.
     #[tool(
-        description = "KV scratchpad. Save a variable, state, summary, or JSON config under store + key to remember later without creating a database table. Overwrites any existing value (upsert). IMPORTANT: without `database` the value is written to the EPHEMERAL database and is LOST when the server restarts. To persist across restarts, pass database=\"persistent\" (or persist=true)."
+        description = "KV scratchpad. Save a variable, state, summary, or JSON config under store + key to remember later without creating a database table. IMPORTANT: without `database` the value is written to the EPHEMERAL database and is LOST when the server restarts. To persist across restarts, pass database=\"persistent\" (or persist=true). Returns {stored, created, value_bytes}; `created:false` means an existing value was overwritten. Pass overwrite=false to avoid clobbering (skips + returns stored:false, existed:true). Pass value_path=<absolute path> to store a file's contents server-side instead of `value` (exactly one of value/value_path; reads any server-readable path — no sandbox; files over 64 MiB are rejected before reading)."
     )]
     fn kv_set(
         &self,
@@ -3127,13 +3216,149 @@ impl HyperMcpServer {
         if let Err(e) = self.check_writable("kv_set") {
             return Self::err_content(e);
         }
+        // Exactly one of value / value_path.
+        let value = match (p.value.as_deref(), p.value_path.as_deref()) {
+            (Some(v), None) => v.to_string(),
+            (None, Some(path)) => {
+                let canonical = match crate::attach::validate_input_path(path, "value_path") {
+                    Ok(c) => c,
+                    Err(e) => return Self::err_content(e),
+                };
+                // Enforce the hard size cap on the file's metadata BEFORE reading,
+                // so a huge path is rejected instead of slurped into memory.
+                match std::fs::metadata(&canonical) {
+                    Ok(m) => {
+                        if let Err(e) = Self::check_value_path_size(m.len()) {
+                            return Self::err_content(e);
+                        }
+                    }
+                    Err(e) => return Self::err_content(McpError::from_io_error(&e, "value_path")),
+                }
+                match std::fs::read_to_string(&canonical) {
+                    Ok(s) => s,
+                    Err(e) => return Self::err_content(McpError::from_io_error(&e, "value_path")),
+                }
+            }
+            (Some(_), Some(_)) => {
+                return Self::err_content(McpError::new(
+                    ErrorCode::InvalidArgument,
+                    "provide exactly one of `value` or `value_path`, not both",
+                ));
+            }
+            (None, None) => {
+                return Self::err_content(McpError::new(
+                    ErrorCode::InvalidArgument,
+                    "provide either `value` or `value_path`",
+                ));
+            }
+        };
+        let value_bytes = value.len();
+        let overwrite = p.overwrite.unwrap_or(true);
+
         let result = self.with_engine(|engine| {
             let db = self.resolve_db(engine, p.database.as_deref(), p.persist, true)?;
             let kv = Self::kv_open(engine, db.as_deref(), &p.store)?;
-            kv.set(&p.key, &p.value).map_err(McpError::from)
+            if overwrite {
+                kv.set(&p.key, &value)
+                    .map(|o| (true, o.created))
+                    .map_err(McpError::from)
+            } else {
+                kv.set_if_absent(&p.key, &value)
+                    .map(|written| (written, written))
+                    .map_err(McpError::from)
+            }
         });
         match result {
-            Ok(()) => Self::ok_content(json!({ "stored": true, "store": p.store, "key": p.key })),
+            Ok((stored, created)) => {
+                let mut body = json!({
+                    "stored": stored,
+                    "created": created,
+                    "store": p.store,
+                    "key": p.key,
+                    "value_bytes": value_bytes,
+                });
+                if !stored {
+                    body["existed"] = json!(true);
+                }
+                if let Some(w) = Self::kv_size_warning(value_bytes) {
+                    body["warning"] = json!(w);
+                }
+                Self::ok_content(body)
+            }
+            Err(e) => Self::err_content(e),
+        }
+    }
+
+    /// Atomic batch write to the KV scratchpad.
+    #[tool(
+        description = "Write multiple KV pairs atomically. All keys validated before the transaction opens, so an invalid key aborts the whole batch. Returns {stored, created, overwritten, total_bytes} when overwrite=true (default); returns {stored, created, skipped, total_bytes} when overwrite=false (guard mode — skips existing keys). Empty `entries` is an error. Omit `database` to write to the ephemeral store; pass \"persistent\" (or persist=true) or an attached alias to write elsewhere."
+    )]
+    fn kv_set_many(
+        &self,
+        Parameters(p): Parameters<KvSetManyParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Err(e) = self.check_writable("kv_set_many") {
+            return Self::err_content(e);
+        }
+        if p.entries.is_empty() {
+            return Self::err_content(McpError::new(
+                ErrorCode::InvalidArgument,
+                "entries must not be empty",
+            ));
+        }
+
+        // Build the &[(&str, &str)] slice for the API crate; collect per-entry
+        // warnings for oversized values.
+        let pairs: Vec<(&str, &str)> = p
+            .entries
+            .iter()
+            .map(|e| (e.key.as_str(), e.value.as_str()))
+            .collect();
+        let total_bytes: usize = p.entries.iter().map(|e| e.value.len()).sum();
+        let mut warnings: Vec<serde_json::Value> = Vec::new();
+        for entry in &p.entries {
+            if let Some(w) = Self::kv_size_warning(entry.value.len()) {
+                warnings.push(json!({ "key": entry.key, "warning": w }));
+            }
+        }
+
+        // Shape the outcome JSON *inside* each branch so the `with_engine`
+        // closure returns a single type (`Result<Value, McpError>`). The two
+        // batch primitives return different outcome structs (`BatchSetOutcome`
+        // vs `BatchGuardOutcome`), so a bare `if`/`else` returning both would
+        // not type-check — a closure, like any block, needs one return type.
+        // `total_bytes` and `warnings` are engine-independent (computed above),
+        // so they are spliced into the object after the closure returns. This
+        // mirrors the single-type-closure pattern used by `kv_list` (Task 11).
+        let overwrite = p.overwrite.unwrap_or(true);
+        let result = self.with_engine(|engine| {
+            let db = self.resolve_db(engine, p.database.as_deref(), p.persist, true)?;
+            let kv = Self::kv_open(engine, db.as_deref(), &p.store)?;
+            if overwrite {
+                let o = kv.set_batch(&pairs).map_err(McpError::from)?;
+                Ok(json!({
+                    "stored": o.created + o.overwritten,
+                    "created": o.created,
+                    "overwritten": o.overwritten,
+                }))
+            } else {
+                let o = kv.set_batch_if_absent(&pairs).map_err(McpError::from)?;
+                Ok(json!({
+                    "stored": o.written,
+                    "created": o.written,
+                    "skipped": o.skipped,
+                }))
+            }
+        });
+
+        match result {
+            Ok(mut body) => {
+                body["total_bytes"] = json!(total_bytes);
+                if !warnings.is_empty() {
+                    body["warnings"] = json!(warnings);
+                }
+                Self::ok_content(body)
+            }
             Err(e) => Self::err_content(e),
         }
     }
@@ -3164,21 +3389,35 @@ impl HyperMcpServer {
 
     /// List all keys in a scratchpad store, sorted ascending.
     #[tool(
-        description = "List all keys in a KV scratchpad store, sorted ascending. Omit `database` for the ephemeral store, or route with \"persistent\"/persist=true/an attached alias."
+        description = "List all keys in a KV scratchpad store, sorted ascending. Omit `database` for the ephemeral store, or route with \"persistent\"/persist=true/an attached alias. Pass values=true to return full (key, value) pairs as an `entries` array instead of just keys — useful for reading a whole store without N×kv_get."
     )]
     fn kv_list(
         &self,
-        Parameters(p): Parameters<KvStoreParams>,
+        Parameters(p): Parameters<KvListParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let with_values = p.values.unwrap_or(false);
         let result = self.with_engine(|engine| {
             let db = self.resolve_db(engine, p.database.as_deref(), p.persist, true)?;
             let kv = Self::kv_open(engine, db.as_deref(), &p.store)?;
-            kv.keys().map_err(McpError::from)
+            if with_values {
+                kv.entries().map(|pairs| (Some(pairs), None))
+            } else {
+                kv.keys().map(|keys| (None, Some(keys)))
+            }
+            .map_err(McpError::from)
         });
         match result {
-            Ok(keys) => {
+            Ok((Some(entries), None)) => {
+                let arr: Vec<Value> = entries
+                    .into_iter()
+                    .map(|(k, v)| json!({ "key": k, "value": v }))
+                    .collect();
+                Self::ok_content(json!({ "store": p.store, "entries": arr }))
+            }
+            Ok((None, Some(keys))) => {
                 Self::ok_content(json!({ "store": p.store, "count": keys.len(), "keys": keys }))
             }
+            Ok(_) => unreachable!("exactly one of entries/keys is Some"),
             Err(e) => Self::err_content(e),
         }
     }
@@ -3207,7 +3446,7 @@ impl HyperMcpServer {
 
     /// Count the keys in a scratchpad store.
     #[tool(
-        description = "Return the number of keys in a KV scratchpad store. Omit `database` for the ephemeral store, or route with \"persistent\"/persist=true/an attached alias."
+        description = "Returns {store, size, bytes} where `size` is the key count and `bytes` is the total `OCTET_LENGTH` of all values (0 for empty stores). Omit `database` for the ephemeral store, or route with \"persistent\"/persist=true/an attached alias."
     )]
     fn kv_size(
         &self,
@@ -3216,10 +3455,16 @@ impl HyperMcpServer {
         let result = self.with_engine(|engine| {
             let db = self.resolve_db(engine, p.database.as_deref(), p.persist, true)?;
             let kv = Self::kv_open(engine, db.as_deref(), &p.store)?;
-            kv.size().map_err(McpError::from)
+            let key_count = kv.size().map_err(McpError::from)?;
+            let value_bytes = kv.byte_size().map_err(McpError::from)?;
+            Ok(json!({
+                "store": p.store,
+                "size": key_count,
+                "bytes": value_bytes,
+            }))
         });
         match result {
-            Ok(size) => Self::ok_content(json!({ "store": p.store, "size": size })),
+            Ok(val) => Self::ok_content(val),
             Err(e) => Self::err_content(e),
         }
     }
@@ -5165,5 +5410,31 @@ mod validate_execute_batch_tests {
     #[test]
     fn allows_trailing_semicolon() {
         validate_execute_batch(&s(&["INSERT INTO t VALUES (1);"])).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod kv_value_path_size_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_file_at_or_below_cap() {
+        // A zero-byte file, a modest file, and exactly-at-the-cap all pass.
+        HyperMcpServer::check_value_path_size(0).unwrap();
+        HyperMcpServer::check_value_path_size(1024).unwrap();
+        HyperMcpServer::check_value_path_size(HyperMcpServer::KV_VALUE_PATH_MAX_BYTES).unwrap();
+    }
+
+    #[test]
+    fn rejects_file_above_cap() {
+        let err =
+            HyperMcpServer::check_value_path_size(HyperMcpServer::KV_VALUE_PATH_MAX_BYTES + 1)
+                .unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
+        assert!(
+            err.message.contains("hard limit"),
+            "message should name the hard limit: {}",
+            err.message
+        );
     }
 }

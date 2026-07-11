@@ -406,15 +406,19 @@ fn main() -> Result<()> {
     let conn = Connection::new(&hyper, "app.hyper", CreateMode::CreateIfNotExists)?;
 
     let kv = conn.kv_store("settings")?;
-    kv.set("theme", "dark")?;
+    let outcome = kv.set("theme", "dark")?;
+    assert!(outcome.created);
     assert_eq!(kv.get("theme")?, Some("dark".to_string()));
 
     // Typed values via serde (stored as JSON).
-    kv.set_as("retries", &3u32)?;
+    let outcome = kv.set_as("retries", &3u32)?;
+    assert!(outcome.created);
     assert_eq!(kv.get_as::<u32>("retries")?, Some(3));
 
     // Write many entries atomically in one transaction.
-    kv.set_batch(&[("host", "localhost"), ("port", "7483")])?;
+    let batch_outcome = kv.set_batch(&[("host", "localhost"), ("port", "7483")])?;
+    assert_eq!(batch_outcome.created, 2);
+    assert_eq!(batch_outcome.overwritten, 0);
 
     // Other operations: exists, delete, size, keys, clear, and pop
     // (remove-and-return the lowest-ordered key).

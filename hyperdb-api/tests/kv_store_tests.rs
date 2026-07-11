@@ -204,3 +204,86 @@ fn set_batch_rejects_invalid_key_before_writing() -> Result<()> {
     assert_eq!(kv.size()?, 0);
     Ok(())
 }
+
+#[test]
+fn set_reports_created_then_overwritten() -> Result<()> {
+    let tc = TestConnection::new()?;
+    let kv = tc.connection.kv_store("outcome")?;
+    let first = kv.set("k", "v1")?;
+    assert!(
+        first.created,
+        "first write of a key must report created=true"
+    );
+    let second = kv.set("k", "v2")?;
+    assert!(!second.created, "overwrite must report created=false");
+    assert_eq!(kv.get("k")?, Some("v2".to_string()));
+    Ok(())
+}
+
+#[test]
+fn set_batch_reports_created_and_overwritten() -> Result<()> {
+    let tc = TestConnection::new()?;
+    let kv = tc.connection.kv_store("batch_outcome")?;
+    kv.set("a", "1")?; // pre-existing → will be overwritten
+    let out = kv.set_batch(&[("a", "10"), ("b", "20"), ("c", "30")])?;
+    assert_eq!(out.created, 2, "b and c are new");
+    assert_eq!(out.overwritten, 1, "a existed");
+    assert_eq!(kv.get("a")?, Some("10".to_string()));
+    Ok(())
+}
+
+#[test]
+fn set_if_absent_guards_existing_key() -> Result<()> {
+    let tc = TestConnection::new()?;
+    let kv = tc.connection.kv_store("guard")?;
+    assert!(
+        kv.set_if_absent("k", "first")?,
+        "absent key must be written"
+    );
+    assert!(
+        !kv.set_if_absent("k", "second")?,
+        "present key must be skipped"
+    );
+    assert_eq!(
+        kv.get("k")?,
+        Some("first".to_string()),
+        "value must be unchanged"
+    );
+    Ok(())
+}
+
+#[test]
+fn byte_size_and_entries() -> Result<()> {
+    let tc = TestConnection::new()?;
+    let kv = tc.connection.kv_store("sized")?;
+    assert_eq!(kv.byte_size()?, 0, "empty store has 0 bytes");
+    kv.set("a", "hello")?; // 5 bytes
+    kv.set("b", "worlds")?; // 6 bytes
+    assert_eq!(kv.byte_size()?, 11, "sum of OCTET_LENGTH");
+    assert_eq!(
+        kv.entries()?,
+        vec![
+            ("a".to_string(), "hello".to_string()),
+            ("b".to_string(), "worlds".to_string()),
+        ],
+        "entries sorted by key with values"
+    );
+    Ok(())
+}
+
+#[test]
+fn set_batch_if_absent_skips_existing() -> Result<()> {
+    let tc = TestConnection::new()?;
+    let kv = tc.connection.kv_store("batch_guard")?;
+    kv.set("a", "orig")?; // pre-existing → must be skipped
+    let out = kv.set_batch_if_absent(&[("a", "new"), ("b", "b1"), ("c", "c1")])?;
+    assert_eq!(out.written, 2, "b and c are new");
+    assert_eq!(out.skipped, 1, "a existed");
+    assert_eq!(
+        kv.get("a")?,
+        Some("orig".to_string()),
+        "existing value untouched"
+    );
+    assert_eq!(kv.get("b")?, Some("b1".to_string()));
+    Ok(())
+}

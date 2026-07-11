@@ -35,22 +35,22 @@ async fn async_kv_full_surface() -> Result<()> {
     let kv = conn.kv_store("cfg").await?;
 
     assert_eq!(kv.get("missing").await?, None);
-    kv.set("k", "v1").await?;
-    kv.set("k", "v2").await?;
+    let _ = kv.set("k", "v1").await?;
+    let _ = kv.set("k", "v2").await?;
     assert_eq!(kv.get("k").await?, Some("v2".to_string()));
 
     let p = Profile {
         name: "ada".into(),
         level: 7,
     };
-    kv.set_as("p", &p).await?;
+    let _ = kv.set_as("p", &p).await?;
     assert_eq!(kv.get_as::<Profile>("p").await?, Some(p));
     assert!(matches!(
         kv.get_as::<Profile>("k").await,
         Err(Error::Serialization(_))
     ));
 
-    kv.set_batch(&[("a", "1"), ("b", "2")]).await?;
+    let _ = kv.set_batch(&[("a", "1"), ("b", "2")]).await?;
     assert_eq!(kv.size().await?, 4);
     assert_eq!(kv.keys().await?, vec!["a", "b", "k", "p"]);
     assert!(kv.exists("a").await?);
@@ -72,8 +72,8 @@ async fn async_kv_full_surface() -> Result<()> {
 async fn async_list_stores_and_validation() -> Result<()> {
     let (_hyper, conn) = fresh_async_conn("async_kv_list").await?;
     assert!(conn.kv_list_stores().await?.is_empty());
-    conn.kv_store("alpha").await?.set("k", "1").await?;
-    conn.kv_store("beta").await?.set("k", "2").await?;
+    let _ = conn.kv_store("alpha").await?.set("k", "1").await?;
+    let _ = conn.kv_store("beta").await?.set("k", "2").await?;
     let mut stores = conn.kv_list_stores().await?;
     stores.sort();
     assert_eq!(stores, vec!["alpha", "beta"]);
@@ -123,9 +123,67 @@ async fn async_store_isolation() -> Result<()> {
     let a = conn.kv_store("alpha").await?;
     let b = conn.kv_store("beta").await?;
     // Same key in two stores resolves to each store's own value.
-    a.set("k", "from_alpha").await?;
-    b.set("k", "from_beta").await?;
+    let _ = a.set("k", "from_alpha").await?;
+    let _ = b.set("k", "from_beta").await?;
     assert_eq!(a.get("k").await?, Some("from_alpha".to_string()));
     assert_eq!(b.get("k").await?, Some("from_beta".to_string()));
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn async_set_reports_created_and_batch_outcome() -> Result<()> {
+    let (_hyper, conn) = fresh_async_conn("async_kv_outcome").await?;
+    let kv = conn.kv_store("outcome").await?;
+    assert!(kv.set("k", "v1").await?.created);
+    assert!(!kv.set("k", "v2").await?.created);
+
+    kv.set("a", "1").await?; // pre-existing
+    let out = kv.set_batch(&[("a", "10"), ("b", "20")]).await?;
+    assert_eq!(out.created, 1);
+    assert_eq!(out.overwritten, 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn async_byte_size_and_entries() -> Result<()> {
+    let (_hyper, conn) = fresh_async_conn("async_kv_sized").await?;
+    let kv = conn.kv_store("sized").await?;
+    assert_eq!(kv.byte_size().await?, 0, "empty store has 0 bytes");
+    kv.set("a", "hello").await?; // 5 bytes
+    kv.set("b", "worlds").await?; // 6 bytes
+    assert_eq!(kv.byte_size().await?, 11, "sum of OCTET_LENGTH");
+    assert_eq!(
+        kv.entries().await?,
+        vec![
+            ("a".to_string(), "hello".to_string()),
+            ("b".to_string(), "worlds".to_string()),
+        ],
+        "entries sorted by key with values"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn async_guard_size_and_entries() -> Result<()> {
+    let (_hyper, conn) = fresh_async_conn("async_kv_guard").await?;
+    let kv = conn.kv_store("g").await?;
+    assert!(kv.set_if_absent("k", "first").await?);
+    assert!(!kv.set_if_absent("k", "second").await?);
+    assert_eq!(kv.get("k").await?, Some("first".to_string()));
+
+    assert_eq!(kv.byte_size().await?, 5); // "first"
+    kv.set("z", "hello").await?; // 5 more
+    assert_eq!(kv.byte_size().await?, 10);
+    assert_eq!(
+        kv.entries().await?,
+        vec![
+            ("k".to_string(), "first".to_string()),
+            ("z".to_string(), "hello".to_string()),
+        ]
+    );
+
+    let out = kv.set_batch_if_absent(&[("k", "x"), ("new", "n1")]).await?;
+    assert_eq!(out.written, 1);
+    assert_eq!(out.skipped, 1);
     Ok(())
 }

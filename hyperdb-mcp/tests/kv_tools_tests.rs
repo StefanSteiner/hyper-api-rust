@@ -247,6 +247,92 @@ async fn kv_list_size_and_list_stores() -> TestResult {
     h.shutdown().await
 }
 
+/// kv_list default (values absent/false) preserves the keys-only shape.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kv_list_keys_only_unchanged() -> TestResult {
+    let h = TestHarness::start(false, false).await?;
+    call_tool(
+        &h.client,
+        "kv_set",
+        serde_json::json!({ "store": "s", "key": "a", "value": "v1" }),
+    )
+    .await?;
+    call_tool(
+        &h.client,
+        "kv_set",
+        serde_json::json!({ "store": "s", "key": "b", "value": "v2" }),
+    )
+    .await?;
+    let list = call_tool(&h.client, "kv_list", serde_json::json!({ "store": "s" })).await?;
+    let body = structured(&list);
+    assert_eq!(body["store"], serde_json::json!("s"));
+    assert_eq!(body["count"], serde_json::json!(2));
+    assert_eq!(body["keys"], serde_json::json!(["a", "b"]));
+    h.shutdown().await
+}
+
+/// kv_list with values:true returns entries with both key and value.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kv_list_values_returns_entries() -> TestResult {
+    let h = TestHarness::start(false, false).await?;
+    call_tool(
+        &h.client,
+        "kv_set",
+        serde_json::json!({ "store": "s", "key": "x", "value": "hello" }),
+    )
+    .await?;
+    call_tool(
+        &h.client,
+        "kv_set",
+        serde_json::json!({ "store": "s", "key": "y", "value": "world" }),
+    )
+    .await?;
+    let list = call_tool(
+        &h.client,
+        "kv_list",
+        serde_json::json!({ "store": "s", "values": true }),
+    )
+    .await?;
+    let body = structured(&list);
+    assert_eq!(body["store"], serde_json::json!("s"));
+    let entries = body["entries"]
+        .as_array()
+        .expect("entries must be an array");
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["key"], serde_json::json!("x"));
+    assert_eq!(entries[0]["value"], serde_json::json!("hello"));
+    assert_eq!(entries[1]["key"], serde_json::json!("y"));
+    assert_eq!(entries[1]["value"], serde_json::json!("world"));
+    h.shutdown().await
+}
+
+/// kv_size reports both key count and total value bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kv_size_reports_bytes() -> TestResult {
+    let h = TestHarness::start(false, false).await?;
+    call_tool(
+        &h.client,
+        "kv_set",
+        serde_json::json!({ "store": "s", "key": "a", "value": "abc" }),
+    )
+    .await?;
+    call_tool(
+        &h.client,
+        "kv_set",
+        serde_json::json!({ "store": "s", "key": "b", "value": "de" }),
+    )
+    .await?;
+
+    let size = call_tool(&h.client, "kv_size", serde_json::json!({ "store": "s" })).await?;
+    assert_eq!(structured(&size)["size"], serde_json::json!(2), "two keys");
+    assert_eq!(
+        structured(&size)["bytes"],
+        serde_json::json!(5),
+        "3+2=5 bytes"
+    );
+    h.shutdown().await
+}
+
 /// delete returns `{deleted:true}` when the key existed and
 /// `{deleted:false}` on a second delete (idempotent, not an error).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -621,4 +707,262 @@ async fn kv_persistent_value_survives_server_restart() -> TestResult {
     );
 
     h2.shutdown().await
+}
+
+/// kv_set reports `created` (insert vs overwrite) and `value_bytes`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kv_set_reports_created_and_bytes() -> TestResult {
+    let h = TestHarness::start(false, false).await?;
+    let first = call_tool(
+        &h.client,
+        "kv_set",
+        serde_json::json!({ "store": "s", "key": "k", "value": "hello" }),
+    )
+    .await?;
+    assert_eq!(structured(&first)["created"], serde_json::json!(true));
+    assert_eq!(structured(&first)["value_bytes"], serde_json::json!(5));
+
+    let second = call_tool(
+        &h.client,
+        "kv_set",
+        serde_json::json!({ "store": "s", "key": "k", "value": "hi" }),
+    )
+    .await?;
+    assert_eq!(structured(&second)["created"], serde_json::json!(false));
+    assert_eq!(structured(&second)["value_bytes"], serde_json::json!(2));
+    h.shutdown().await
+}
+
+/// kv_set warns when value_bytes exceeds the soft limit (1MB).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kv_set_large_value_warns() -> TestResult {
+    let h = TestHarness::start(false, false).await?;
+
+    // At exactly 1 MB boundary: no warning
+    let one_mb = "x".repeat(1_048_576);
+    let at_limit = call_tool(
+        &h.client,
+        "kv_set",
+        serde_json::json!({ "store": "s", "key": "at_limit", "value": one_mb }),
+    )
+    .await?;
+    assert_eq!(structured(&at_limit)["stored"], serde_json::json!(true));
+    assert!(structured(&at_limit)["warning"].is_null());
+
+    // Above 1 MB: warning fires
+    let over_mb = "x".repeat(1_048_577);
+    let over_limit = call_tool(
+        &h.client,
+        "kv_set",
+        serde_json::json!({ "store": "s", "key": "over_limit", "value": over_mb }),
+    )
+    .await?;
+    let structured_over = structured(&over_limit);
+    assert_eq!(structured_over["stored"], serde_json::json!(true));
+    let warning = structured_over["warning"]
+        .as_str()
+        .expect("warning should be a string");
+    assert!(
+        warning.contains("1048576"),
+        "warning should mention the byte limit; got: {warning}"
+    );
+    assert!(
+        warning.contains("soft limit") || warning.contains("recommended"),
+        "warning should mention soft limit or recommended; got: {warning}"
+    );
+
+    h.shutdown().await
+}
+
+/// overwrite:false skips an existing key without clobbering it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kv_set_overwrite_false_guards() -> TestResult {
+    let h = TestHarness::start(false, false).await?;
+    call_tool(
+        &h.client,
+        "kv_set",
+        serde_json::json!({ "store": "s", "key": "k", "value": "orig" }),
+    )
+    .await?;
+    let guard = call_tool(
+        &h.client,
+        "kv_set",
+        serde_json::json!({ "store": "s", "key": "k", "value": "new", "overwrite": false }),
+    )
+    .await?;
+    assert_eq!(structured(&guard)["stored"], serde_json::json!(false));
+    assert_eq!(structured(&guard)["existed"], serde_json::json!(true));
+    let got = call_tool(
+        &h.client,
+        "kv_get",
+        serde_json::json!({ "store": "s", "key": "k" }),
+    )
+    .await?;
+    assert_eq!(structured(&got)["value"], serde_json::json!("orig"));
+    h.shutdown().await
+}
+
+/// value_path reads a file's contents; neither/both value+value_path errors.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kv_set_value_path_reads_file() -> TestResult {
+    let h = TestHarness::start(false, false).await?;
+    let dir = tempfile::TempDir::new()?;
+    let path = dir.path().join("payload.txt");
+    std::fs::write(&path, "from-file")?;
+    let abs = std::fs::canonicalize(&path)?;
+
+    let set = call_tool(
+        &h.client,
+        "kv_set",
+        serde_json::json!({ "store": "s", "key": "f", "value_path": abs.to_string_lossy() }),
+    )
+    .await?;
+    assert!(
+        !is_error(&set),
+        "value_path set failed: {:?}",
+        first_text(&set)
+    );
+    let got = call_tool(
+        &h.client,
+        "kv_get",
+        serde_json::json!({ "store": "s", "key": "f" }),
+    )
+    .await?;
+    assert_eq!(structured(&got)["value"], serde_json::json!("from-file"));
+
+    // Neither value nor value_path → INVALID_ARGUMENT.
+    let neither = call_tool(
+        &h.client,
+        "kv_set",
+        serde_json::json!({ "store": "s", "key": "x" }),
+    )
+    .await?;
+    assert!(is_error(&neither));
+    // Both → INVALID_ARGUMENT.
+    let both = call_tool(&h.client, "kv_set",
+        serde_json::json!({ "store": "s", "key": "y", "value": "v", "value_path": abs.to_string_lossy() })).await?;
+    assert!(is_error(&both));
+    h.shutdown().await
+}
+
+/// kv_set_many writes all entries atomically (overwrite=true default); reports
+/// {stored, created, overwritten, total_bytes}; a mixed batch counts correctly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kv_set_many_writes_all() -> TestResult {
+    let h = TestHarness::start(false, false).await?;
+    call_tool(
+        &h.client,
+        "kv_set",
+        serde_json::json!({ "store": "s", "key": "a", "value": "1" }),
+    )
+    .await?;
+
+    let batch = call_tool(
+        &h.client,
+        "kv_set_many",
+        serde_json::json!({
+            "store": "s",
+            "entries": [
+                { "key": "a", "value": "10" },   // overwrite
+                { "key": "b", "value": "20" },   // new
+                { "key": "c", "value": "30" },   // new
+            ]
+        }),
+    )
+    .await?;
+    assert!(
+        !is_error(&batch),
+        "kv_set_many failed: {:?}",
+        first_text(&batch)
+    );
+    assert_eq!(structured(&batch)["stored"], serde_json::json!(3));
+    assert_eq!(structured(&batch)["created"], serde_json::json!(2));
+    assert_eq!(structured(&batch)["overwritten"], serde_json::json!(1));
+    assert_eq!(
+        structured(&batch)["total_bytes"],
+        serde_json::json!(6),
+        "10+20+30 = 6 bytes"
+    );
+
+    let got = call_tool(
+        &h.client,
+        "kv_get",
+        serde_json::json!({ "store": "s", "key": "a" }),
+    )
+    .await?;
+    assert_eq!(structured(&got)["value"], serde_json::json!("10"));
+    h.shutdown().await
+}
+
+/// kv_set_many with overwrite=false skips existing keys, reports {stored, created, skipped}.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kv_set_many_guard_skips_existing() -> TestResult {
+    let h = TestHarness::start(false, false).await?;
+    call_tool(
+        &h.client,
+        "kv_set",
+        serde_json::json!({ "store": "s", "key": "a", "value": "orig" }),
+    )
+    .await?;
+
+    let guard = call_tool(
+        &h.client,
+        "kv_set_many",
+        serde_json::json!({
+            "store": "s",
+            "entries": [
+                { "key": "a", "value": "new" },   // skipped
+                { "key": "b", "value": "b1" },    // written
+            ],
+            "overwrite": false
+        }),
+    )
+    .await?;
+    assert!(
+        !is_error(&guard),
+        "kv_set_many guard failed: {:?}",
+        first_text(&guard)
+    );
+    assert_eq!(structured(&guard)["stored"], serde_json::json!(1));
+    assert_eq!(structured(&guard)["created"], serde_json::json!(1));
+    assert_eq!(structured(&guard)["skipped"], serde_json::json!(1));
+    // total_bytes is the sum of ALL submitted entry values ("new"=3 + "b1"=2),
+    // an upper bound under overwrite=false: the batch-guard primitive returns
+    // only counts, not which keys were actually written, so total_bytes cannot
+    // subtract the skipped entry's bytes.
+    assert_eq!(
+        structured(&guard)["total_bytes"],
+        serde_json::json!(5),
+        "\"new\"(3) + \"b1\"(2), all submitted"
+    );
+
+    let got = call_tool(
+        &h.client,
+        "kv_get",
+        serde_json::json!({ "store": "s", "key": "a" }),
+    )
+    .await?;
+    assert_eq!(
+        structured(&got)["value"],
+        serde_json::json!("orig"),
+        "existing value untouched"
+    );
+    h.shutdown().await
+}
+
+/// kv_set_many rejects empty entries with INVALID_ARGUMENT.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kv_set_many_empty_batch_errors() -> TestResult {
+    let h = TestHarness::start(false, false).await?;
+    let empty = call_tool(
+        &h.client,
+        "kv_set_many",
+        serde_json::json!({
+            "store": "s",
+            "entries": []
+        }),
+    )
+    .await?;
+    assert!(is_error(&empty), "empty entries must error");
+    h.shutdown().await
 }
