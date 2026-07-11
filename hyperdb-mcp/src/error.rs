@@ -88,6 +88,19 @@ impl McpError {
         self.suggestion = Some(suggestion.into());
         self
     }
+
+    /// Maps a filesystem [`std::io::Error`] to an [`McpError`], preserving the
+    /// distinction between a missing file and a permission problem instead of
+    /// collapsing both to [`ErrorCode::FileNotFound`].
+    #[must_use]
+    pub fn from_io_error(err: &std::io::Error, context: &str) -> Self {
+        let code = match err.kind() {
+            std::io::ErrorKind::PermissionDenied => ErrorCode::PermissionDenied,
+            std::io::ErrorKind::NotFound => ErrorCode::FileNotFound,
+            _ => ErrorCode::InternalError,
+        };
+        McpError::new(code, format!("{context}: {err}"))
+    }
 }
 
 impl std::fmt::Display for McpError {
@@ -144,9 +157,27 @@ impl From<hyperdb_api::Error> for McpError {
                         "A value could not be parsed into its column type. Retry with a partial schema override forcing TEXT for the offending column, e.g. schema: {\"Id\": \"TEXT\"}, and cast in SQL as needed.");
                 }
                 "0A000" => {
-                    // feature_not_supported — Hyper's "Multi-part queries"
+                    // feature_not_supported — could be Hyper's "multi-part
+                    // queries" OR an unimplemented function (e.g. JSON_VALUE).
+                    let lower = err.to_string().to_lowercase();
+                    if lower.contains("json") {
+                        return McpError::new(ErrorCode::SqlError, err.to_string()).with_suggestion(
+                            "JSON_VALUE is not implemented in this engine. Cast the TEXT value to json first, then use -> / ->> / JSON_EACH, e.g. `SELECT value::json ->> 'field' FROM _hyperdb_kv_store WHERE store_name = '...'`.");
+                    }
                     return McpError::new(ErrorCode::SqlError, err.to_string()).with_suggestion(
                         "Hyper only accepts one SQL statement per call. Split your query into separate execute/query calls — one per statement.");
+                }
+                "42601" => {
+                    // syntax_error — includes "requires a structured data type"
+                    // when ->/->>' is applied to raw TEXT. Only steer toward the
+                    // JSON cast when the message actually points at that case;
+                    // otherwise leave a generic SQL error (no misleading hint).
+                    let lower = err.to_string().to_lowercase();
+                    if lower.contains("structured data type") || lower.contains("json") {
+                        return McpError::new(ErrorCode::SqlError, err.to_string()).with_suggestion(
+                            "The -> / ->> operators need a structured type. Cast the TEXT value to json first, e.g. `value::json ->> 'field'`.");
+                    }
+                    return McpError::new(ErrorCode::SqlError, err.to_string());
                 }
                 _ => {} // fall through to message-based classification
             }
@@ -287,4 +318,74 @@ fn is_resource_busy(msg: &str) -> bool {
         || lower.contains("could not lock")
         || lower.contains("already in use")
         || lower.contains("file is locked")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn io_error_preserves_permission_denied() {
+        let e = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            McpError::from_io_error(&e, "value_path").code,
+            ErrorCode::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn io_error_maps_not_found() {
+        let e = std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert_eq!(
+            McpError::from_io_error(&e, "value_path").code,
+            ErrorCode::FileNotFound
+        );
+    }
+
+    #[test]
+    fn json_value_error_suggests_cast_not_split() {
+        let err = hyperdb_api::Error::server(
+            Some("0A000".to_string()),
+            "function JSON_VALUE is not implemented yet",
+            None,
+            None,
+        );
+        let mapped = McpError::from(err);
+        let s = mapped.suggestion.unwrap_or_default();
+        assert!(
+            s.contains("::json"),
+            "expected a ::json cast hint, got: {s}"
+        );
+        assert!(
+            !s.to_lowercase().contains("split"),
+            "must not suggest splitting: {s}"
+        );
+    }
+
+    #[test]
+    fn structured_type_error_suggests_cast() {
+        let err = hyperdb_api::Error::server(
+            Some("42601".to_string()),
+            "operator ->> requires a structured data type",
+            None,
+            None,
+        );
+        let s = McpError::from(err).suggestion.unwrap_or_default();
+        assert!(
+            s.contains("::json"),
+            "expected a ::json cast hint, got: {s}"
+        );
+    }
+
+    #[test]
+    fn multi_statement_error_still_suggests_split() {
+        let err = hyperdb_api::Error::server(
+            Some("0A000".to_string()),
+            "multi-statement queries are not supported",
+            None,
+            None,
+        );
+        let s = McpError::from(err).suggestion.unwrap_or_default();
+        assert!(s.to_lowercase().contains("one sql statement"), "got: {s}");
+    }
 }
