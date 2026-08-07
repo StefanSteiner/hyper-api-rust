@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Bump the pinned `hyperd` release to `0.0.26225` (build `rbf04a855`).**
+  Updates the version, build id, and all four per-platform sha256s in
+  `hyperd-version.toml`. The `macos-arm64` Java bundle's `hyperd` was
+  verified to be a native arm64 Mach-O binary, preserving the reason this
+  crate downloads from the Java bundle rather than the C++ one.
+
 ### Fixed
 
 - **Download `hyperd` from the Java API bundle instead of the C++ bundle.**
