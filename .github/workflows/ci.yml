@@ -107,7 +107,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14, windows-latest]
+        # TEMPORARY (EH-frame fix test): narrowed to macos-14 only to validate the
+        # patched hyperd on the affected platform. Restore
+        # [ubuntu-latest, macos-14, windows-latest] before merge.
+        os: [macos-14]
     steps:
       - uses: actions/checkout@v7
       - name: Free disk space (Linux only)
@@ -140,15 +143,45 @@ jobs:
         # Keyed on the pinned release file, so bumping the pin
         # (hyperdb-bootstrap/hyperd-version.toml) invalidates the cache
         # automatically and the next run re-downloads.
+        #
+        # TEMPORARY (EH-frame fix test): a `-ehframefix` suffix isolates this
+        # cache so the patched binary we write into .hyperd/ below can never be
+        # restored under the real pin's cache key (which would silently falsify a
+        # future attempt to reproduce the 0.0.26225 hang). Remove the suffix with
+        # the rest of the test scaffolding.
         id: hyperd-cache
         uses: actions/cache@v6
         with:
           path: .hyperd
-          key: hyperd-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hyperdb-bootstrap/hyperd-version.toml') }}
+          key: hyperd-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hyperdb-bootstrap/hyperd-version.toml') }}-ehframefix
 
       - name: Download hyperd
         if: steps.hyperd-cache.outputs.cache-hit != 'true'
         run: cargo run --release -p hyperdb-bootstrap --bin hyperdb-bootstrap -- download
+
+      - name: Override hyperd with patched build (EH-frame fix test)
+        # TEMPORARY (remove with the matrix change above): replaces the pinned
+        # 0.0.26225 hyperd with a locally-patched build that routes macOS arm64
+        # back to __register_frame (reverting the __unw_add_dynamic_eh_frame_section
+        # SPI that deadlocks macOS-14's system libunwind — see PR #219). Hosted as a
+        # release asset on the fork; sha256-verified. If this run goes GREEN, the fix
+        # is confirmed and the Hyper team can land it upstream.
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          HYPERD_DIR: ${{ github.workspace }}/.hyperd/current
+          PATCHED_URL: https://github.com/StefanSteiner/hyper-api-rust/releases/download/hyperd-macos14-ehframe-fix-test/hyperd
+          PATCHED_SHA256: bf05c80e61fdcd99cf8972b0f033d26fbf520740625e80368d0410bd622045c1
+        run: |
+          set -euo pipefail
+          echo "Downloading patched hyperd..."
+          curl -fL --retry 3 -o /tmp/hyperd-patched "$PATCHED_URL"
+          echo "$PATCHED_SHA256  /tmp/hyperd-patched" | shasum -a 256 -c -
+          chmod +x /tmp/hyperd-patched
+          mkdir -p "$HYPERD_DIR"
+          mv /tmp/hyperd-patched "$HYPERD_DIR/hyperd"
+          echo "Patched hyperd installed at $HYPERD_DIR/hyperd"
+          "$HYPERD_DIR/hyperd" --version || true
 
       - name: Start macOS hang watchdog
         # DIAGNOSTIC (temporary): hyperd 0.0.26225 wedges after its
