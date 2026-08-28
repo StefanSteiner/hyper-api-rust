@@ -31,9 +31,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   backing table, its indexless shape, the ephemeral-vs-persistent
   durability rule, per-database isolation, and the `LEFT JOIN` pattern for
   enriching analytical tables with KV metadata.
+- **Side-effect-free native `hyperdb-mcp doctor` diagnostics.** Human and
+  JSON reports compare authoritative native MCP/Rust API identity, bounded
+  launcher-reported npm provenance, resolved configuration, verified daemon
+  identity, and the measured MCP catalog without creating directories,
+  starting Hyper, or opening a database.
+- **Canonical `resolved_database` result metadata.** Successful responses
+  from all 21 database-routed tools now identify the effective `local`,
+  `persistent`, or lowercase attached alias after routing precedence;
+  `copy_query` also retains `target_database`.
+- **Diagnostic chart presentation controls.** MCP `chart` adds
+  `bar_orientation`, `label_values`, `show_legend`, and positive-only
+  `y_scale`, while preserving the public Rust `ChartOptions` surface and
+  existing rendering defaults.
+
+### Changed
+
+- **KV attachment/read-only clarification (supersedes the shorthand in the
+  Added notes above).** The global `--read-only` guard leaves the four KV
+  readers available, but every `kv_*` call targeting a user attachment still
+  requires that attachment to be registered writable because the backing table
+  may need initialization.
+- **Status now has one full/degraded identity contract.** Both shapes report
+  correct MCP/Rust API installation identity, `default_database: "local"`,
+  attachments, watchers, and read-only state. `engine_busy: true` explicitly
+  means partial, inconclusive statistics that callers should retry.
+- **Chart is documented and bounded as a quick SQL-to-image diagnostic.** Its
+  inline/file delivery, proportional temporal x axes, categorical override,
+  presentation controls, and finite/log range requirements are now consistent
+  across the MCP schema, smoke/demo guidance, the public README, and
+  `get_readme`.
 
 ### Fixed
 
+- **Hyper-format export side-effect correction (supersedes the older
+  Unreleased note below).** Export does not mutate its source database, but it
+  creates or replaces the requested destination `.hyper` file and materializes
+  every user table from the selected source. It remains available under
+  `--read-only`; this is destination creation, not a raw database-file copy.
+- **Daemon health-port targeting and diagnostics.** Explicit
+  `daemon status --port` now probes that exact health port, discovered-daemon
+  error reports target the effective health port, and best-effort health I/O
+  no longer retains the engine mutex.
+- **Attachment contention is actionable for persistent *and* user attaches.**
+  A lock conflict (SQLSTATE `55006`, or a legacy "already attached" / "file is
+  locked" phrase from older hyperd) now returns `RESOURCE_BUSY` with the
+  effective path, preserved Hyper diagnostic/SQLSTATE, doctor guidance, and
+  non-accusatory possible-owner recovery. Previously only the reserved
+  persistent-attach path was reclassified, so a user `attach_database` on a
+  file another process already held surfaced as a generic `SqlError`; it now
+  routes through the same attach-context mapper. Unrelated `55006` errors
+  outside the attach context retain their existing mapping.
+- **Chart geometry, ranges, and positive-log rendering.** Bars always treat x
+  as categorical, honor y ranges and in-range baselines, and validate finite,
+  increasing, representable spans. Horizontal ordering/grouping/labels and
+  extreme positive log ranges now render without zero baselines, collapsed
+  endpoints, unbounded ticks, or silently misrepresented measures.
+- **Chart color parsing no longer panics on non-ASCII input.** A `color_map`
+  value that is six *bytes* but not six ASCII characters (e.g. `"1é234"`, where
+  `é` is two UTF-8 bytes) passed the length check and then panicked on a
+  non-char-boundary byte slice, aborting the request. `parse_hex_color` now
+  rejects any non-ASCII string up front and returns a normal "invalid color"
+  result instead.
+- **`doctor` no longer presents an illustrative client-log path as fact in
+  ephemeral-only mode.** With no persistent database configured, the reported
+  client log path is derived from the doctor invocation's own temporary
+  directory and process id, so it cannot identify a separate running MCP
+  server's log directory. `doctor` now emits a warning making that explicit
+  instead of implying the path locates a live session.
+- **npm launcher reports the correct manifest in the same-directory
+  fallback.** When the binary is resolved next to `bin.js` (rather than in a
+  platform subpackage), the launcher metadata's `platform.package_path`
+  pointed at a nonexistent platform-subdirectory `package.json`. It now
+  resolves the manifest that actually sits beside the binary, so
+  `doctor`/launcher diagnostics report a real path.
 - **I/O error fidelity on `value_path` and `load_file`.** File-read errors now preserve `PermissionDenied` → `ErrorCode::PermissionDenied` instead of collapsing every I/O failure to `FileNotFound`. A missing file still maps to `FileNotFound`; any other I/O error becomes a generic `InternalError` with the OS message. (Implemented via `McpError::from_io_error` in `error.rs`.)
 - **Misleading JSON-error `suggestion` text corrected.** The "requires a structured data type" (`42601`) and `JSON_VALUE`-not-implemented (`0A000`) errors previously suggested splitting the statement, which was wrong; they now advise casting the TEXT value to `json` first (`value::json ->> 'field'`), the actual fix. Applies narrowly to JSON-related cases; other `42601` syntax errors carry a generic message without a misleading hint.
 - **Caller-fixable argument errors now return `INVALID_ARGUMENT`, not
@@ -62,15 +133,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the norm. (Fixed in `hyperdb-api-core` for both the sync and async clients.)
 
 ## [0.5.0] - 2026-06-07
-
-### Fixed
-
-- Query results now preserve the sign of negative `NUMERIC`/`DECIMAL` values
-  with magnitude less than 1. Previously a value like `CAST(-0.5 AS
-  numeric(10,4))` was serialized to JSON as `0.5` because `row_value_to_json`
-  stringifies NUMERIC via `Numeric::to_string()`, whose `Display` impl dropped
-  the sign for sub-unit magnitudes (fixed in `hyperdb-api-core`). This silently
-  flipped the sign of correlations, 0–1 indices, and regression residuals.
 
 ### Added
 
@@ -287,6 +349,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   lowercases `target_database` after the `LOCAL_ALIAS` filter so the
   registry lookup AND the qualified-SQL build path agree on the
   canonical lowercase form.
+- Query results now preserve the sign of negative `NUMERIC`/`DECIMAL` values
+  with magnitude less than 1. Previously a value like `CAST(-0.5 AS
+  numeric(10,4))` was serialized to JSON as `0.5` because `row_value_to_json`
+  stringifies NUMERIC via `Numeric::to_string()`, whose `Display` impl dropped
+  the sign for sub-unit magnitudes (fixed in `hyperdb-api-core`). This silently
+  flipped the sign of correlations, 0–1 indices, and regression residuals.
 
 ## [0.1.1] - 2026-05-13
 

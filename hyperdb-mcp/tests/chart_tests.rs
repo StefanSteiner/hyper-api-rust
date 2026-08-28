@@ -22,6 +22,36 @@ fn bar_opts() -> ChartOptions {
     }
 }
 
+/// The public chart API is intentionally frozen while richer MCP-only
+/// presentation controls are added behind it. An exhaustive literal catches
+/// any added public field at compile time; the call pins the legacy renderer
+/// signature as `render_chart(&[Value], &ChartOptions)`.
+#[test]
+fn legacy_chart_options_literal_is_source_compatible() {
+    let opts = ChartOptions {
+        chart_type: ChartType::Bar,
+        x_column: Some("category".into()),
+        y_column: Some("value".into()),
+        series_column: None,
+        title: Some("Legacy chart".into()),
+        format: ChartFormat::Svg,
+        width: 320,
+        height: 240,
+        bins: 20,
+        x_as_category: None,
+        x_range: None,
+        y_range: None,
+        color_map: std::collections::HashMap::new(),
+        label_points: false,
+    };
+    let rows = vec![json!({"category": "legacy", "value": 1})];
+
+    let result = render_chart(&rows, &opts).expect("legacy chart API must still render");
+
+    assert_eq!(result.mime_type, "image/svg+xml");
+    assert_eq!(result.rows_plotted, 1);
+}
+
 /// PNG output should start with the 8-byte PNG magic signature.
 #[test]
 fn bar_chart_png_has_magic_bytes() {
@@ -209,6 +239,11 @@ fn hex_color_parse() {
     assert!(parse_hex_color("not-a-color").is_none());
     assert!(parse_hex_color("#gg0000").is_none()); // invalid hex digit
     assert!(parse_hex_color("#fff").is_none()); // too short
+                                                // Regression: a 6-*byte* string whose bytes are not all ASCII (here `é`
+                                                // is two UTF-8 bytes) has `len() == 6` but its byte offsets don't land on
+                                                // char boundaries — slicing `[0..2]` used to panic. It must be rejected.
+    assert!(parse_hex_color("1é234").is_none()); // 6 bytes, not 6 ASCII chars
+    assert!(parse_hex_color("#1é234").is_none()); // same, with a leading '#'
 }
 
 /// `x_range` and `y_range` fix the axis extents; the chart still renders with

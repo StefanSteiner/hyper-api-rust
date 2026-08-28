@@ -12,7 +12,9 @@
 //! includes full JSON Schema descriptions for each tool's inputs.
 
 use crate::attach::{self, AttachRegistry, AttachRequest, AttachSource, LOCAL_ALIAS};
-use crate::chart::{render_chart, ChartFormat, ChartOptions, ChartType};
+use crate::chart::{
+    render_chart_with_measure_metadata, ChartFormat, ChartOptions, ChartPresentation, ChartType,
+};
 use crate::engine::{classify_statement, is_read_only_sql, Engine, StatementKind};
 use crate::error::{ErrorCode, McpError};
 use crate::export::{export_to_file, ExportOptions};
@@ -67,9 +69,17 @@ const TABLE_SAMPLE_ROWS: u64 = 5;
 /// more compact wire format and the extra rows help LLMs see patterns.
 const TABLE_CSV_SAMPLE_ROWS: u64 = 20;
 
+/// Canonical generated-catalog metrics used by the native doctor command.
+pub(crate) struct DoctorCatalogSnapshot {
+    pub(crate) tool_count: usize,
+    pub(crate) canonical_tool_bytes: usize,
+    pub(crate) initialization_instructions_bytes: usize,
+    pub(crate) get_readme_bytes: usize,
+}
+
 /// Body of the `hyper://schema/kv` resource: describes the `_hyperdb_kv_store`
 /// backing table behind the `kv_*` tools, its (indexless) shape, the
-/// ephemeral-vs-persistent durability rule, per-database isolation, and the
+/// local-vs-persistent durability rule, per-database isolation, and the
 /// LEFT JOIN enrichment pattern. Served verbatim as `text/plain`.
 const KV_SCHEMA_RESOURCE: &str = "\
 KV store backing table (managed by the kv_* tools):
@@ -89,10 +99,13 @@ the kv_* tools, which guarantee uniqueness within a session.
 
 DATABASE / DURABILITY: each database has its own _hyperdb_kv_store table. Every
 kv_* tool takes the same optional `database` parameter as the other tools. Omit it
-and the store lives in the EPHEMERAL database — convenient, but LOST when the
+and the store lives in the local database — convenient, but LOST when the
 server restarts. Pass \"persistent\" (or persist=true) to survive restarts, or any
 attached alias to target that database. A store in one database is invisible from
-another.
+another. Every user-attached KV target must be writable, even for readers,
+because opening a store may initialize this backing table. The global
+`--read-only` mode blocks KV mutators; KV readers remain allowed, subject to
+that attached-target writability requirement.
 
 Enrich an analytical table with KV metadata without ALTER TABLE. The KV table must
 be in the SAME database as the joined table (or fully qualify both) — a LEFT JOIN
@@ -179,7 +192,7 @@ pub struct QueryFileParams {
     pub json_extract_path: Option<String>,
 }
 
-/// Parameters for the `load_data` workspace tool.
+/// Parameters for the `load_data` database tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct LoadDataParams {
     /// Target table name.
@@ -195,7 +208,7 @@ pub struct LoadDataParams {
     /// See the docs on `QueryDataParams` for the full spec.
     pub schema: Option<Value>,
     /// Target database alias. Omit (or pass `"local"`) to write to the
-    /// ephemeral primary. Pass `"persistent"` to write to the durable
+    /// local database. Pass `"persistent"` to write to the durable
     /// database that survives across sessions. Other values target a
     /// user-attached database (must be writable).
     pub database: Option<String>,
@@ -205,7 +218,7 @@ pub struct LoadDataParams {
     pub persist: Option<bool>,
 }
 
-/// Parameters for the `load_file` workspace tool.
+/// Parameters for the `load_file` database tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct LoadFileParams {
     /// Target table name.
@@ -236,7 +249,7 @@ pub struct LoadFileParams {
     /// error if set for `replace` or `append`.
     pub merge_key: Option<MergeKey>,
     /// Target database alias. Omit (or pass `"local"`) to write to the
-    /// ephemeral primary. Pass `"persistent"` to write to the durable
+    /// local database. Pass `"persistent"` to write to the durable
     /// database. Other values target a user-attached writable database.
     pub database: Option<String>,
     /// Shorthand for `database: "persistent"`. If both `database` and
@@ -334,7 +347,7 @@ pub struct LoadFilesEntry {
     pub merge_key: Option<MergeKey>,
 }
 
-/// Parameters for the `load_files` workspace tool.
+/// Parameters for the `load_files` database tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct LoadFilesParams {
     /// Batch of files to ingest in parallel. Each entry targets its own
@@ -348,7 +361,7 @@ pub struct LoadFilesParams {
     /// and can starve the primary connection.
     pub concurrency: Option<u32>,
     /// Target database alias. Omit (or pass `"local"`) to write to the
-    /// ephemeral primary. Pass `"persistent"` to write to the durable
+    /// local database. Pass `"persistent"` to write to the durable
     /// database. Other values target a user-attached writable database.
     /// Applies to every entry in the batch — multi-target batches are
     /// not supported.
@@ -390,7 +403,7 @@ fn validate_merge_args(
     }
 }
 
-/// Parameters for the `load_iceberg` workspace tool.
+/// Parameters for the local-only `load_iceberg` tool.
 ///
 /// An Iceberg table on disk is a *directory* containing a `metadata/`
 /// subdir and one or more `data/` parquet files — hyperd reads the
@@ -411,18 +424,18 @@ pub struct LoadIcebergParams {
     pub version_as_of: Option<i64>,
 }
 
-/// Parameters for the read-only `query` workspace tool.
+/// Parameters for the read-only `query` database tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct QueryParams {
     /// SQL SELECT / WITH / EXPLAIN / SHOW / VALUES statement (read-only)
     pub sql: String,
     /// Target database alias for unqualified name resolution. Omit to
-    /// query the ephemeral primary. Pass `"persistent"` to route to the
+    /// query the local database. Pass `"persistent"` to route to the
     /// durable database, or any user-attached alias.
     pub database: Option<String>,
 }
 
-/// Parameters for the mutating `execute` workspace tool.
+/// Parameters for the mutating `execute` database tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ExecuteParams {
     /// One or more DDL/DML SQL statements (CREATE, INSERT, UPDATE, DELETE,
@@ -444,7 +457,7 @@ pub struct ExecuteParams {
     ///   issue each DDL in its own `execute` call.
     pub sql: Vec<String>,
     /// Target database alias for unqualified name resolution. Omit to
-    /// run against the ephemeral primary. Pass `"persistent"` to write
+    /// run against the local database. Pass `"persistent"` to write
     /// to the durable database (or a writable user-attached alias).
     pub database: Option<String>,
 }
@@ -456,23 +469,36 @@ pub struct SampleParams {
     pub table: String,
     /// Number of rows to return (default: 5, max: 100)
     pub n: Option<u64>,
-    /// Target database alias. Omit to sample from the ephemeral primary;
+    /// Target database alias. Omit to sample from the local database;
     /// pass `"persistent"` or a user-attached alias to sample from there.
     pub database: Option<String>,
 }
 
 /// Parameters for the `describe` tool. Both fields are optional to preserve
 /// backward compatibility with callers that invoke `describe` with no args
-/// to get the full workspace listing.
+/// to get the full local-database listing.
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct DescribeParams {
     /// If set, return the schema and row count for just this table. Omit to
-    /// list every public table in the workspace.
+    /// list every public table in the selected database.
     pub table: Option<String>,
-    /// Target database alias. Omit to describe tables in the ephemeral
-    /// primary; pass `"persistent"` or a user-attached alias to describe
-    /// tables in another database.
+    /// Target database alias. Omit to describe tables in the local database;
+    /// pass `"persistent"` or a user-attached alias for another database.
     pub database: Option<String>,
+}
+
+fn chart_bar_orientation_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "string",
+        "enum": ["vertical", "horizontal"]
+    })
+}
+
+fn chart_y_scale_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "string",
+        "enum": ["linear", "log"]
+    })
 }
 
 /// Parameters for the `chart` tool.
@@ -498,20 +524,31 @@ pub struct ChartParams {
     pub height: Option<u32>,
     /// Number of bins for histograms (default 20)
     pub bins: Option<u32>,
-    /// Treat the x column as categorical rather than numeric. Auto-detected
-    /// from the first row's x value for line/scatter charts: DATE, TIMESTAMP,
-    /// TEXT, and other non-numeric types flip to categorical automatically.
-    /// Set explicitly to override auto-detection. Bar charts are always
-    /// categorical regardless of this flag.
+    /// Force the x column to evenly spaced categorical positions. By default,
+    /// line/scatter DATE, TIMESTAMP, and TIMESTAMPTZ values use proportional
+    /// temporal spacing; numeric values use a numeric axis and TEXT is
+    /// categorical. Bar charts are always categorical regardless of this flag.
     pub x_as_category: Option<bool>,
+    /// Bar layout: "vertical" (default) or "horizontal". Invalid for
+    /// line, scatter, and histogram charts.
+    #[serde(default)]
+    #[schemars(schema_with = "chart_bar_orientation_schema")]
+    pub bar_orientation: Option<String>,
     /// Fix the x-axis range as [min, max]. Omit to auto-scale. Useful when
     /// comparing multiple charts at a consistent scale (e.g. [0, 1500] for
     /// population in millions) or when an outlier would distort auto-scaling.
     /// Ignored for bar charts (which use categorical x positions).
     pub x_range: Option<[f64; 2]>,
-    /// Fix the y-axis range as [min, max]. Omit to auto-scale.
+    /// Fix the data-role y measure range as [min, max]. This applies to bars;
+    /// horizontal bars render it on the physical x axis. Omit to auto-scale.
     /// Example: [0.0, 1.0] to pin a 0–1 index axis regardless of the data.
     pub y_range: Option<[f64; 2]>,
+    /// Data-role y measure scale: "linear" (default) or positive-only "log".
+    /// For horizontal bars this controls the physical x axis. Log histograms
+    /// are unsupported.
+    #[serde(default)]
+    #[schemars(schema_with = "chart_y_scale_schema")]
+    pub y_scale: Option<String>,
     /// Map series names to hex colors ("#rrggbb"). Series not listed here
     /// fall back to the default color palette. Example:
     /// {"India": "#e41a1c", "China": "#ff7f0e"}. Only meaningful when a
@@ -522,11 +559,15 @@ pub struct ChartParams {
     /// each series has exactly one point (e.g. one country per dot).
     /// Defaults to false (legend shown).
     pub label_points: Option<bool>,
-    /// Where to write the rendered image. Parent directory is created
-    /// automatically. If omitted, a file is auto-generated under the
-    /// system temp dir (`<temp>/hyperdb-charts/chart-<ts>-<pid>-<n>.<ext>`).
-    /// Combine with `inline=true` to receive the bytes inline AND write
-    /// a file; otherwise the file is the sole output.
+    /// For bars, draw the original y scalar beside each mark. Defaults false.
+    pub label_values: Option<bool>,
+    /// Show the series legend. Defaults true; `label_points=true` still
+    /// suppresses line/scatter legends.
+    pub show_legend: Option<bool>,
+    /// Where to write the rendered image. Parent directories are created.
+    /// Omit for inline-only delivery (the default). With `inline=false`, an
+    /// omitted path is auto-generated under the system temp directory.
+    /// Supplying a path writes the file and, by default, also returns it inline.
     pub output_path: Option<String>,
     /// When true, include the PNG/SVG bytes inline in the tool result.
     /// Without `output_path` this also skips the disk write entirely
@@ -539,7 +580,7 @@ pub struct ChartParams {
     /// true (overwrite silently), matching the `export` tool.
     pub overwrite: Option<bool>,
     /// Target database alias for unqualified name resolution in the
-    /// chart's SQL. Omit to query the ephemeral primary. Pass
+    /// chart's SQL. Omit to query the local database. Pass
     /// `"persistent"` or a user-attached alias to chart from there.
     pub database: Option<String>,
 }
@@ -555,8 +596,8 @@ pub struct WatchDirectoryParams {
     /// Each in-flight ingest holds one connection to hyperd plus a transaction.
     #[serde(default)]
     pub max_concurrent: Option<u32>,
-    /// Target database alias. Omit (or pass `"local"`) for the ephemeral
-    /// primary. Pass `"persistent"` for the durable database, or any
+    /// Target database alias. Omit (or pass `"local"`) for the local
+    /// database. Pass `"persistent"` for the durable database, or any
     /// user-attached writable alias. The watcher's connection pool is
     /// built against the resolved target, so subsequent ingests land
     /// in the right database without per-file routing.
@@ -636,7 +677,7 @@ pub struct ExportParams {
     ///
     /// Ignored for `format = "hyper"` (which isn't a `COPY`).
     pub format_options: Option<Value>,
-    /// Source database alias. Omit to read from the ephemeral primary.
+    /// Source database alias. Omit to read from the local database.
     /// Pass `"persistent"` or a user-attached alias to export from there.
     /// In `table` mode, the table name is fully qualified against this
     /// database. In `sql` mode, unqualified names in the SQL resolve
@@ -654,9 +695,9 @@ pub struct ExportParams {
 /// * `hyper://queries/{name}/result` — re-runs the SQL on every read and
 ///   returns the rows + query stats.
 ///
-/// In ephemeral workspaces (no `--workspace`) saved queries live only for
-/// the life of the server process; in persistent workspaces they are
-/// stored in the `_hyperdb_saved_queries` meta-table and survive restarts.
+/// With the normal persistent attachment, saved queries are stored in
+/// `_hyperdb_saved_queries` and survive restarts. Under `--ephemeral-only`
+/// they live only for the server process lifetime.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SaveQueryParams {
     /// Unique name identifying the query. Becomes the path component of
@@ -714,13 +755,14 @@ pub struct AttachSpec {
 pub struct AttachDatabaseParams {
     /// Alias to register the attachment under. Must be a SQL identifier
     /// (`[A-Za-z_][A-Za-z0-9_]{0,62}`) and cannot be `local` (reserved
-    /// for the primary workspace).
+    /// for the local database).
     pub alias: String,
     /// Attachment kind. Only `"local_file"` is supported today.
     pub kind: String,
     /// Absolute path to a `.hyper` file. Required when `kind ==
-    /// "local_file"`. The file must be idle — another MCP server or
-    /// `hyperd` instance holding it will cause a `RESOURCE_BUSY` error.
+    /// "local_file"`. Attachment failures preserve Hyper diagnostics. The
+    /// specialized contention classification is reserved for startup of the
+    /// configured persistent attachment, not user attachments.
     pub path: Option<String>,
     /// If `true`, `copy_query` (and raw `execute`) may target this
     /// attachment. Defaults to `false` so sources stay safe from
@@ -749,10 +791,10 @@ pub struct DetachDatabaseParams {
 /// Parameters for the `copy_query` tool. Runs a read-only SELECT / WITH
 /// / VALUES statement and lands the result into a target table.
 ///
-/// The inner `sql` may reference tables in the primary workspace
+/// The inner `sql` may reference tables in the local database
 /// (unqualified) as well as tables in any attachment by its fully
 /// qualified form — e.g. `src.public.customers`. The destination is
-/// resolved via `target_database` (main workspace by default).
+/// resolved via `target_database` (local by default).
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CopyQueryParams {
     /// Read-only SQL statement whose result rows will be inserted into
@@ -772,7 +814,7 @@ pub struct CopyQueryParams {
     /// * `"replace"` — drop (if any) and recreate, atomically.
     pub mode: String,
     /// Alias of the destination database. `None` and `"local"` both
-    /// mean the server's primary workspace. Any other value must refer
+    /// mean the server's local database. Any other value must refer
     /// to an attachment registered with `writable: true`.
     pub target_database: Option<String>,
     /// Optional list of databases to attach for the duration of this
@@ -790,16 +832,15 @@ pub struct CopyQueryParams {
 /// and cannot be set through this tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SetTableMetadataParams {
-    /// Target table name. Must already exist in the workspace and have a
-    /// catalog entry — load the table first (or run `execute CREATE
-    /// TABLE`) so the server auto-stubs the row.
+    /// Target table name. Must have an existing catalog entry — load the table
+    /// first (or run `execute CREATE TABLE`) so the server auto-stubs the row.
     pub table: String,
     /// Where the data came from (URL, S3 path, internal system name).
     pub source_url: Option<String>,
     /// Short description of the dataset (what's in the table, how to
     /// interpret it).
     pub source_description: Option<String>,
-    /// Why this data is in the workspace — what questions it's intended
+    /// Why this data is in the database — what questions it's intended
     /// to answer.
     pub purpose: Option<String>,
     /// License or attribution requirements for the source data.
@@ -811,12 +852,11 @@ pub struct SetTableMetadataParams {
     /// Enables mechanical refresh: the server can re-ingest the table
     /// from this URL + `load_params` without prose parsing.
     pub data_url: Option<String>,
-    /// Target database alias for the catalog write. Omit (or pass
-    /// `"local"` / `"persistent"`) to update the persistent catalog —
-    /// matches the default for the ephemeral primary's tables.
-    /// Pass any user-attached writable alias to update that DB's
-    /// per-database `_table_catalog` instead. Read-only attachments
-    /// are rejected with a clear "re-attach with writable:true"
+    /// Target database alias for the catalog write. Local and persistent tables
+    /// use one shared name-keyed persistent catalog; omit this field or pass
+    /// `"local"` / `"persistent"` to select it. A user-attached writable alias
+    /// selects that database's per-database `_table_catalog` instead. Read-only
+    /// attachments are rejected with a clear "re-attach with writable:true"
     /// message.
     pub database: Option<String>,
 }
@@ -829,8 +869,8 @@ pub struct KvKeyParams {
     pub store: String,
     /// Key to look up or delete within the store.
     pub key: String,
-    /// Target database alias. Omit (or pass `"local"`) to use the ephemeral
-    /// primary. Pass `"persistent"` to use the durable database that survives
+    /// Target database alias. Omit (or pass `"local"`) to use the local
+    /// database. Pass `"persistent"` to use the durable database that survives
     /// across sessions. Other values target a user-attached database (must be
     /// writable). Each database has its own isolated set of KV stores.
     pub database: Option<String>,
@@ -859,7 +899,7 @@ pub struct KvSetParams {
     /// existed:true`. Defaults to true (upsert).
     pub overwrite: Option<bool>,
     /// Target database alias. Omit (or pass `"local"`) to write to the
-    /// ephemeral primary. Pass `"persistent"` to write to the durable database
+    /// local database. Pass `"persistent"` to write to the durable database
     /// that survives across sessions. Other values target a user-attached
     /// database (must be writable). Each database has its own isolated stores.
     pub database: Option<String>,
@@ -892,7 +932,7 @@ pub struct KvSetManyParams {
     /// true (upsert).
     pub overwrite: Option<bool>,
     /// Target database alias. Omit (or pass `"local"`) to write to the
-    /// ephemeral primary. Pass `"persistent"` to write to the durable database
+    /// local database. Pass `"persistent"` to write to the durable database
     /// that survives across sessions. Other values target a user-attached
     /// database (must be writable). Each database has its own isolated stores.
     pub database: Option<String>,
@@ -907,9 +947,10 @@ pub struct KvSetManyParams {
 pub struct KvStoreParams {
     /// Namespace of the KV store to operate on.
     pub store: String,
-    /// Target database alias. Omit (or pass `"local"`) for the ephemeral
-    /// primary. Pass `"persistent"` for the durable database, or a
-    /// user-attached alias. Each database has its own isolated stores.
+    /// Target database alias. Omit (or pass `"local"`) for the local database.
+    /// Pass `"persistent"` for the durable database, or a user-attached alias
+    /// that was registered writable (required even for KV readers). Each
+    /// database has its own isolated stores.
     pub database: Option<String>,
     /// Shorthand for `database: "persistent"`. If both `database` and
     /// `persist` are set, `database` wins.
@@ -925,9 +966,10 @@ pub struct KvListParams {
     /// false or omitted, return only `keys` (the default behavior). Use
     /// `values:true` for whole-store reads without N×`kv_get`.
     pub values: Option<bool>,
-    /// Target database alias. Omit (or pass `"local"`) for the ephemeral
-    /// primary. Pass `"persistent"` for the durable database, or a
-    /// user-attached alias. Each database has its own isolated stores.
+    /// Target database alias. Omit (or pass `"local"`) for the local database.
+    /// Pass `"persistent"` for the durable database, or a user-attached alias
+    /// that was registered writable (required even for KV readers). Each
+    /// database has its own isolated stores.
     pub database: Option<String>,
     /// Shorthand for `database: "persistent"`. If both `database` and
     /// `persist` are set, `database` wins.
@@ -937,9 +979,10 @@ pub struct KvListParams {
 /// Parameters for `kv_list_stores` (enumerate every store in a database).
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct KvListStoresParams {
-    /// Target database alias. Omit (or pass `"local"`) for the ephemeral
-    /// primary. Pass `"persistent"` for the durable database, or a
-    /// user-attached alias. Each database has its own isolated stores.
+    /// Target database alias. Omit (or pass `"local"`) for the local database.
+    /// Pass `"persistent"` for the durable database, or a user-attached alias
+    /// that was registered writable (required even for KV readers). Each
+    /// database has its own isolated stores.
     pub database: Option<String>,
     /// Shorthand for `database: "persistent"`. If both `database` and
     /// `persist` are set, `database` wins.
@@ -990,6 +1033,10 @@ pub struct SuggestQueriesArgs {
 /// starting `hyperd` if the client never calls a tool.
 pub struct HyperMcpServer {
     engine: Arc<Mutex<Option<Engine>>>,
+    /// Serializes construction while keeping the public engine mutex available
+    /// for status observers and health-plane callbacks.  Only the initializer
+    /// holds this guard; it must never protect tool execution.
+    engine_initialization: Mutex<()>,
     /// `true` once [`Self::ensure_catalog_ready`] has successfully run on
     /// the current engine, so we only try to create / reconcile
     /// `_table_catalog` once per process. Reset to `false` if the
@@ -1039,25 +1086,49 @@ impl std::fmt::Debug for HyperMcpServer {
 }
 
 impl HyperMcpServer {
-    /// Create a server instance. Pass `Some(path)` for persistent workspace,
-    /// `None` for ephemeral (temp directory, auto-cleaned).
+    /// Snapshot the exact generated router contract without warming an engine.
     ///
-    /// The saved-queries store is chosen to match the workspace mode:
-    /// persistent workspaces get a [`crate::saved_queries::WorkspaceStore`]
-    /// (backed by a meta-table in the `.hyper` file so queries survive
-    /// restarts), ephemeral workspaces get an in-memory
-    /// [`crate::saved_queries::SessionStore`].
+    /// The temporary server exists only to obtain the same initialization
+    /// instructions exposed by [`ServerHandler::get_info`]. Its session query
+    /// store and router registries are in-memory; this path never constructs an
+    /// [`Engine`] or starts Hyper.
+    pub(crate) fn doctor_catalog_snapshot(
+        read_only: bool,
+    ) -> Result<DoctorCatalogSnapshot, serde_json::Error> {
+        let tools = Self::tool_router().list_all();
+        let canonical_tool_bytes = serde_json::to_vec(&tools)?.len();
+        let server = Self::with_no_daemon(None, read_only, true);
+        let initialization_instructions_bytes = server
+            .get_info()
+            .instructions
+            .as_deref()
+            .map_or(0, str::len);
+
+        Ok(DoctorCatalogSnapshot {
+            tool_count: tools.len(),
+            canonical_tool_bytes,
+            initialization_instructions_bytes,
+            get_readme_bytes: crate::readme::README.len(),
+        })
+    }
+
+    /// Create a server instance.
     ///
-    /// When `read_only` is `true`, the `execute`, `load_data`, `load_file`,
-    /// `save_query`, `delete_query`, and `set_table_metadata` tools return
-    /// a `ReadOnlyViolation` error, and exporting to the `hyper` format
-    /// (which is a raw file copy, harmless) remains allowed.
+    /// Every instance has a fresh ephemeral local database, which remains the
+    /// default target. `Some(persistent_path)` also attaches the optional
+    /// persistent database under the reserved `"persistent"` alias; `None`
+    /// leaves that attachment disabled. Saved queries use persistent
+    /// database-backed storage when that attachment is configured and
+    /// in-memory session storage otherwise.
     ///
-    /// When `bare` is `true`, the server does not create or maintain the
-    /// `_table_catalog` table, and saved queries fall back to the in-memory
-    /// [`crate::saved_queries::SessionStore`] regardless of `workspace_path`
-    /// `persistent_path` is the resolved path to the persistent database
-    /// (`Some`) or `None` for `--ephemeral-only` mode.
+    /// When `read_only` is `true`, the server guards `execute`, every `load_*`
+    /// tool, `watch_directory`, saved-query mutations, `set_table_metadata`,
+    /// `copy_query`, all KV mutators, and writable/create `attach_database`.
+    /// Queries and inspection, read-only attachment, detach/list,
+    /// `unwatch_directory`, `chart`, and every export format remain available.
+    /// Hyper export does not mutate its source database, but it creates or
+    /// replaces a destination database and materializes the source's user
+    /// tables into it.
     pub fn new(persistent_path: Option<String>, read_only: bool) -> Self {
         Self::with_options(persistent_path, read_only, false)
     }
@@ -1077,6 +1148,7 @@ impl HyperMcpServer {
         let saved_queries: Arc<dyn SavedQueryStore> = build_store(persistent_path.as_deref());
         Self {
             engine: Arc::new(Mutex::new(None)),
+            engine_initialization: Mutex::new(()),
             catalog_ready: Arc::new(Mutex::new(false)),
             watchers: Arc::new(crate::watcher::WatcherRegistry::new()),
             saved_queries,
@@ -1236,6 +1308,45 @@ impl HyperMcpServer {
         Ok(Some(resolved))
     }
 
+    /// Return the canonical name of the database a successful tool call used.
+    /// The primary ephemeral database is addressed as `local` in MCP results.
+    fn resolved_database_name(target_db: Option<&str>) -> &str {
+        target_db.unwrap_or(LOCAL_ALIAS)
+    }
+
+    /// Add database-routing metadata to a successful object payload.
+    ///
+    /// Tool errors retain their established error response shape, so this
+    /// helper rejects non-object values rather than wrapping them.
+    fn with_resolved_database(
+        mut payload: Value,
+        target_db: Option<&str>,
+    ) -> Result<Value, McpError> {
+        let object = payload.as_object_mut().ok_or_else(|| {
+            McpError::new(
+                ErrorCode::InternalError,
+                "successful tool response must be a JSON object",
+            )
+        })?;
+        object.insert(
+            "resolved_database".into(),
+            Value::String(Self::resolved_database_name(target_db).to_owned()),
+        );
+        Ok(payload)
+    }
+
+    /// Add routing metadata to a successful object payload and wrap it as an
+    /// MCP result. A non-object success is treated as an internal tool error.
+    fn ok_content_with_resolved_database(
+        payload: Value,
+        target_db: Option<&str>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        match Self::with_resolved_database(payload, target_db) {
+            Ok(payload) => Self::ok_content(payload),
+            Err(e) => Self::err_content(e),
+        }
+    }
+
     /// Soft threshold (bytes) above which a single KV value triggers a non-fatal
     /// `warning` in the write response. The write always succeeds.
     const KV_SOFT_SIZE_WARN_BYTES: usize = 1_048_576;
@@ -1305,48 +1416,76 @@ impl HyperMcpServer {
     /// [`Self::catalog_ready`] flag so the subsequent `with_engine` call
     /// runs the catalog bootstrap. We can't run the bootstrap here
     /// because it needs to issue SQL back through `Engine`, and we're
-    /// still holding the outer lock.
+    /// still holding the outer lock. Engine construction is single-flight but
+    /// deliberately occurs outside the public engine mutex: daemon discovery,
+    /// its best-effort health report, and attachment replay may all perform
+    /// slow I/O.
     fn ensure_engine(&self) -> Result<std::sync::MutexGuard<'_, Option<Engine>>, McpError> {
+        let guard = self
+            .engine
+            .lock()
+            .map_err(|_| McpError::new(ErrorCode::InternalError, "Lock poisoned"))?;
+        if guard.is_some() {
+            return Ok(guard);
+        }
+        drop(guard);
+
+        let initialization = self
+            .engine_initialization
+            .lock()
+            .map_err(|_| McpError::new(ErrorCode::InternalError, "Lock poisoned"))?;
+
+        // A competing initializer may have completed while this caller was
+        // waiting for the single-flight guard. Recheck before constructing.
+        let guard = self
+            .engine
+            .lock()
+            .map_err(|_| McpError::new(ErrorCode::InternalError, "Lock poisoned"))?;
+        if guard.is_some() {
+            drop(initialization);
+            return Ok(guard);
+        }
+        drop(guard);
+
+        tracing::info!(
+            persistent_db = self.workspace_path.as_deref().unwrap_or("<ephemeral-only>"),
+            no_daemon = self.no_daemon,
+            "initializing hyper engine"
+        );
+        let engine = if self.no_daemon {
+            Engine::new_no_daemon(self.workspace_path.clone())?
+        } else {
+            Engine::new(self.workspace_path.clone())?
+        };
+        tracing::info!(
+            ephemeral_path = %engine.ephemeral_path().display(),
+            persistent_path = ?engine.persistent_path(),
+            log_dir = %engine.log_dir().display(),
+            "engine ready"
+        );
+        // Replay any attachments tracked across the previous engine's lifetime
+        // before handing the engine out to a tool. This work stays outside the
+        // public engine mutex because it may issue SQL / I/O.
+        if let Err(e) = self.attachments.replay_all(&engine) {
+            tracing::warn!(err = %e.message, "failed to replay attachments on new engine");
+        }
+
         let mut guard = self
             .engine
             .lock()
             .map_err(|_| McpError::new(ErrorCode::InternalError, "Lock poisoned"))?;
-        if guard.is_none() {
-            tracing::info!(
-                persistent_db = self.workspace_path.as_deref().unwrap_or("<ephemeral-only>"),
-                no_daemon = self.no_daemon,
-                "initializing hyper engine"
-            );
-            let engine = if self.no_daemon {
-                Engine::new_no_daemon(self.workspace_path.clone())?
-            } else {
-                Engine::new(self.workspace_path.clone())?
-            };
-            tracing::info!(
-                ephemeral_path = %engine.ephemeral_path().display(),
-                persistent_path = ?engine.persistent_path(),
-                log_dir = %engine.log_dir().display(),
-                "engine ready"
-            );
-            // Replay any attachments tracked across the previous
-            // engine's lifetime *before* handing the engine out to a
-            // tool — otherwise the first post-reconnect tool call
-            // would see the attachments missing from Hyper's view even
-            // though the registry still lists them. Logs replay
-            // failures; those entries are dropped from the registry
-            // inside `replay_all` so a single stale attachment doesn't
-            // block recovery.
-            if let Err(e) = self.attachments.replay_all(&engine) {
-                tracing::warn!(err = %e.message, "failed to replay attachments on new engine");
-            }
-            *guard = Some(engine);
-            // New engine → catalog may need to be created/reconciled
-            // even if we already did it against a prior (now-dead)
-            // engine.
-            if let Ok(mut ready) = self.catalog_ready.lock() {
-                *ready = false;
-            }
+        debug_assert!(
+            guard.is_none(),
+            "single-flight initializer lost engine ownership"
+        );
+        *guard = Some(engine);
+        // New engine → catalog may need to be created/reconciled even if we
+        // already did it against a prior (now-dead) engine. Preserve the
+        // existing engine-then-catalog lock order.
+        if let Ok(mut ready) = self.catalog_ready.lock() {
+            *ready = false;
         }
+        drop(initialization);
         Ok(guard)
     }
 
@@ -1486,46 +1625,52 @@ impl HyperMcpServer {
     where
         F: FnOnce(&Engine) -> Result<R, McpError>,
     {
-        let mut guard = self.ensure_engine()?;
-        let engine = guard.as_ref().expect("ensure_engine guarantees Some");
-        // Bootstrap the catalog exactly once per engine. Intentionally
-        // runs *inside* `with_engine` (not `ensure_engine`) so the
-        // catalog SQL can see errors classified via the normal error
-        // path. No-op in bare or read-only mode.
-        self.ensure_catalog_ready(engine);
-        // In daemon mode, send a heartbeat so the daemon knows we're still active.
-        // Debounced to avoid per-call TCP overhead (only sends if >60s since last).
-        // Pass the health port from the engine we already hold — calling
-        // self.engine.lock() here would deadlock (we already hold that mutex).
-        if !self.no_daemon {
-            self.maybe_send_heartbeat(engine.daemon_health_port());
-        }
-        let result = f(engine);
-        if let Err(e) = &result {
-            tracing::debug!(code = ?e.code, message = %e.message, "tool call returned error");
-            if e.code == ErrorCode::ConnectionLost {
-                tracing::warn!(
-                    // Matches both the "hyperd crashed / socket closed" family
-                    // and the "wire desynchronized" family — see
-                    // [`crate::error::is_connection_lost`] for the full
-                    // classifier and both triggers.
-                    "connection to hyperd lost or desynchronized ({}); \
-                     dropping engine so next call reconnects",
-                    e.message
-                );
-                *guard = None;
-                // Reset so the next call re-bootstraps the catalog
-                // against the fresh engine.
-                if let Ok(mut ready) = self.catalog_ready.lock() {
-                    *ready = false;
-                }
-                // Tell the daemon hyperd looks dead from over here. The daemon
-                // will pick up the flag on its next monitor tick and restart.
-                // Skipped in --no-daemon mode because there's no daemon to tell.
-                if !self.no_daemon {
-                    crate::daemon::health::report_hyperd_error_to_daemon();
+        let (result, daemon_health_port, connection_lost) = {
+            let mut guard = self.ensure_engine()?;
+            let engine = guard.as_ref().expect("ensure_engine guarantees Some");
+            let daemon_health_port = engine.daemon_health_port();
+            // Bootstrap the catalog exactly once per engine. Intentionally
+            // runs *inside* `with_engine` (not `ensure_engine`) so the
+            // catalog SQL can see errors classified via the normal error
+            // path. No-op in bare or read-only mode.
+            self.ensure_catalog_ready(engine);
+            let result = f(engine);
+            let connection_lost = result
+                .as_ref()
+                .is_err_and(|e| e.code == ErrorCode::ConnectionLost);
+            if let Err(e) = &result {
+                tracing::debug!(code = ?e.code, message = %e.message, "tool call returned error");
+                if connection_lost {
+                    tracing::warn!(
+                        // Matches both the "hyperd crashed / socket closed" family
+                        // and the "wire desynchronized" family — see
+                        // [`crate::error::is_connection_lost`] for the full
+                        // classifier and both triggers.
+                        "connection to hyperd lost or desynchronized ({}); \
+                         dropping engine so next call reconnects",
+                        e.message
+                    );
+                    *guard = None;
+                    // Reset so the next call re-bootstraps the catalog
+                    // against the fresh engine.
+                    if let Ok(mut ready) = self.catalog_ready.lock() {
+                        *ready = false;
+                    }
                 }
             }
+            drop(guard);
+            (result, daemon_health_port, connection_lost)
+        };
+
+        // Health-plane TCP I/O must not hold the engine mutex. The captured
+        // port is authoritative for the daemon this engine actually uses;
+        // `None` means local fallback and therefore no daemon report.
+        if connection_lost {
+            if let Some(port) = daemon_health_port {
+                crate::daemon::health::report_hyperd_error_to_daemon(port);
+            }
+        } else {
+            self.maybe_send_heartbeat(daemon_health_port);
         }
         result
     }
@@ -1534,22 +1679,26 @@ impl HyperMcpServer {
     /// Debounced: only sends if more than 60 seconds have elapsed since the last heartbeat,
     /// avoiding a new TCP connection on every tool call.
     ///
-    /// Accepts the daemon health port directly (from the caller's already-held
-    /// engine reference) to avoid re-locking `self.engine` — which would deadlock
-    /// since `with_engine` holds that mutex when calling us.
+    /// Accepts the daemon health port captured while the engine was locked so
+    /// this method never needs to re-lock `self.engine` after guard release.
     fn maybe_send_heartbeat(&self, daemon_health_port: Option<u16>) {
         const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
-        let should_send = self
-            .last_heartbeat
-            .lock()
-            .is_ok_and(|guard| guard.elapsed() >= HEARTBEAT_INTERVAL);
-        if should_send {
-            if let Some(port) = daemon_health_port {
-                let _ = crate::daemon::health::send_command(port, "HEARTBEAT");
-                if let Ok(mut guard) = self.last_heartbeat.lock() {
-                    *guard = std::time::Instant::now();
-                }
+        let Some(port) = daemon_health_port else {
+            return;
+        };
+
+        let should_send = self.last_heartbeat.lock().is_ok_and(|mut guard| {
+            if guard.elapsed() < HEARTBEAT_INTERVAL {
+                return false;
             }
+            // Reserve the interval before I/O. Concurrent callers observe this
+            // timestamp and return, and a failed best-effort send still avoids
+            // an immediate retry storm.
+            *guard = std::time::Instant::now();
+            true
+        });
+        if should_send {
+            let _ = crate::daemon::health::send_command(port, "HEARTBEAT");
         }
     }
 
@@ -1565,7 +1714,7 @@ impl HyperMcpServer {
     ///
     /// Clients should check `engine_busy: true` and retry `status` later if
     /// they need the full stats, or wait for the in-progress operation to finish.
-    fn status_degraded(&self) -> Value {
+    fn status_degraded(&self) -> Result<Value, McpError> {
         // Use discover() — NOT find_running_daemon(). discover() reads the
         // daemon.json file + one PING to the known health port (~1ms if alive,
         // 300ms timeout if dead). find_running_daemon() adds a 16-port scan on
@@ -1606,17 +1755,60 @@ impl HyperMcpServer {
             .map(super::attach::AttachedDb::to_json)
             .collect();
 
-        json!({
-            "engine_busy": true,
-            "hyperd_running": hyperd_running,
-            "persistent_path": persistent_path,
-            "has_persistent": self.workspace_path.is_some(),
-            "engine": engine_block,
-            "hyper_rust_api_version": crate::version::mcp_version_string(),
-            "watchers": self.watchers.to_json(),
-            "read_only": self.read_only,
-            "attachments": attachments,
-        })
+        self.augment_status_response(
+            json!({
+                "hyperd_running": hyperd_running,
+                "persistent_path": persistent_path,
+                "has_persistent": self.workspace_path.is_some(),
+                "engine": engine_block,
+            }),
+            true,
+            attachments,
+        )
+    }
+
+    /// Add server-owned status facts to either a full engine response or the
+    /// lock-contended degraded response. Engine-owned metrics remain intact.
+    fn augment_status_response(
+        &self,
+        mut status: Value,
+        engine_busy: bool,
+        attachments: Vec<Value>,
+    ) -> Result<Value, McpError> {
+        let installation = crate::diagnostics::current_installation_identity().map_err(|e| {
+            McpError::new(
+                ErrorCode::InternalError,
+                format!("Could not identify the current MCP installation: {e}"),
+            )
+        })?;
+        let installation = serde_json::to_value(installation).map_err(|e| {
+            McpError::new(
+                ErrorCode::InternalError,
+                format!("Could not serialize MCP installation identity: {e}"),
+            )
+        })?;
+        let status = status.as_object_mut().ok_or_else(|| {
+            McpError::new(
+                ErrorCode::InternalError,
+                "Status response must be a JSON object",
+            )
+        })?;
+
+        status.insert("engine_busy".into(), json!(engine_busy));
+        status.insert(
+            "mcp_version".into(),
+            json!(crate::version::mcp_version_string()),
+        );
+        status.insert(
+            "hyper_rust_api_version".into(),
+            json!(crate::version::hyper_api_version_string()),
+        );
+        status.insert("installation".into(), installation);
+        status.insert("default_database".into(), json!("local"));
+        status.insert("watchers".into(), self.watchers.to_json());
+        status.insert("read_only".into(), json!(self.read_only));
+        status.insert("attachments".into(), Value::Array(attachments));
+        Ok(status.clone().into())
     }
 
     /// Run a closure that accesses the saved-query store.
@@ -1805,9 +1997,9 @@ impl HyperMcpServer {
         }
     }
 
-    /// Load inline data (JSON or CSV) into a named workspace table.
+    /// Load inline data (JSON or CSV) into a named database table.
     #[tool(
-        description = "Load inline data (JSON or CSV) into a named workspace table. Supports partial `schema` overrides keyed by column name — only list the columns you want to correct, the rest keep their inferred type. On SchemaMismatch / numeric overflow, follow the error's suggestion (typically widen an INT column to BIGINT or NUMERIC(38,0))."
+        description = "Load inline data (JSON or CSV) into a named table in local, persistent, or an attached database. Supports partial `schema` overrides keyed by column name — only list columns to correct; the rest keep their inferred type. On SchemaMismatch / numeric overflow, follow the error suggestion (typically widen INT to BIGINT or NUMERIC(38,0))."
     )]
     fn load_data(
         &self,
@@ -1874,11 +2066,14 @@ impl HyperMcpServer {
                 );
             }
 
-            Ok(json!({
-                "rows": ingest_result.rows,
-                "schema": schema_json,
-                "stats": ingest_result.stats.to_json(),
-            }))
+            Self::with_resolved_database(
+                json!({
+                    "rows": ingest_result.rows,
+                    "schema": schema_json,
+                    "stats": ingest_result.stats.to_json(),
+                }),
+                target_db.as_deref(),
+            )
         });
 
         match result {
@@ -1896,9 +2091,9 @@ impl HyperMcpServer {
         }
     }
 
-    /// Load a file (CSV, JSON, JSONL, Parquet, Arrow IPC) into a named workspace table.
+    /// Load a file (CSV, JSON, JSONL, Parquet, Arrow IPC) into a named database table.
     #[tool(
-        description = "Load a CSV / JSON / JSONL / NDJSON / Parquet / Arrow IPC file into a named workspace table. Format is auto-detected from extension (or content for JSON vs CSV).\n\nWhen choosing a format for *new* data going into Hyper, prefer in this order:\n  1. **Parquet** (fastest, server-side): hyperd reads the file directly via `external()`. Types, NUMERIC precision, DATE / TIMESTAMP, and Snappy/ZSTD compression all preserved. This is the recommended format for large imports.\n  2. **CSV**: server-side `COPY FROM` — also fast, but types are inferred from a header + full-file numeric widening pass (CSV has no embedded type info), and empty unquoted cells load as SQL NULL per PostgreSQL CSV default.\n  3. **Arrow IPC** (.arrow / .ipc / .feather, File or Stream format, auto-detected): read in Rust and streamed into hyperd via the binary COPY protocol with zero value-level decoding. Fast but not quite as fast as Parquet, and schema overrides are rejected (the Arrow schema is authoritative).\n  4. **JSON / JSONL / NDJSON**: parsed in Rust (hyperd has no native JSON reader), with per-row insertion. Use for small / irregular data; large JSON should be converted to Parquet first.\n\nFor Apache Iceberg tables use `load_iceberg` instead — it takes a directory path rather than a single file.\n\nSupports partial `schema` overrides keyed by column name (`{\"col\":\"BIGINT\"}`) — only list columns you want to correct; unlisted columns keep their inferred type. Overrides are supported for Parquet, CSV, and JSON; rejected for Arrow IPC. Call `inspect_file` first when unsure about types or to debug a prior failure; the inspector reports per-column min/max/null_count using the exact same inference logic. Use `json_extract_path` to extract a nested data array from a JSON wrapper file — dot-separated path, numeric segments index into arrays, string values are parsed as JSON.\n\n**Mode**: `replace` (default — drops + recreates the table), `append` (adds rows to an existing table), or `merge` (upserts rows by `merge_key`). In merge mode, set `merge_key` to a column name (`\"job_id\"`) or list of names (`[\"cell\",\"job_id\"]`); rows with a matching key are replaced, rows with no match are inserted. New columns in the incoming file are auto-added via `ALTER TABLE ADD COLUMN`. Type changes on existing columns are rejected — use `replace` for breaking schema changes."
+        description = "Load a CSV / JSON / JSONL / NDJSON / Parquet / Arrow IPC file into a named table in local, persistent, or an attached database. Format is auto-detected from extension (or content for JSON vs CSV).\n\nWhen choosing a format for *new* data going into Hyper, prefer in this order:\n  1. **Parquet** (fastest, server-side): hyperd reads the file directly via `external()`. Types, NUMERIC precision, DATE / TIMESTAMP, and Snappy/ZSTD compression all preserved. This is the recommended format for large imports.\n  2. **CSV**: server-side `COPY FROM` — also fast, but types are inferred from a header + full-file numeric widening pass (CSV has no embedded type info), and empty unquoted cells load as SQL NULL per PostgreSQL CSV default.\n  3. **Arrow IPC** (.arrow / .ipc / .feather, File or Stream format, auto-detected): read in Rust and streamed into hyperd via the binary COPY protocol with zero value-level decoding. Fast but not quite as fast as Parquet, and schema overrides are rejected (the Arrow schema is authoritative).\n  4. **JSON / JSONL / NDJSON**: parsed in Rust (hyperd has no native JSON reader), with per-row insertion. Use for small / irregular data; large JSON should be converted to Parquet first.\n\nFor Apache Iceberg tables use `load_iceberg` instead — it takes a directory path rather than a single file.\n\nSupports partial `schema` overrides keyed by column name (`{\"col\":\"BIGINT\"}`) — only list columns you want to correct; unlisted columns keep their inferred type. Overrides are supported for Parquet, CSV, and JSON; rejected for Arrow IPC. Call `inspect_file` first when unsure about types or to debug a prior failure; the inspector reports per-column min/max/null_count using the exact same inference logic. Use `json_extract_path` to extract a nested data array from a JSON wrapper file — dot-separated path, numeric segments index into arrays, string values are parsed as JSON.\n\n**Mode**: `replace` (default — drops + recreates the table), `append` (adds rows to an existing table), or `merge` (upserts rows by `merge_key`). In merge mode, set `merge_key` to a column name (`\"job_id\"`) or list of names (`[\"cell\",\"job_id\"]`); rows with a matching key are replaced, rows with no match are inserted. New columns in the incoming file are auto-added via `ALTER TABLE ADD COLUMN`. Type changes on existing columns are rejected — use `replace` for breaking schema changes."
     )]
     fn load_file(
         &self,
@@ -1992,14 +2187,16 @@ impl HyperMcpServer {
                 );
             }
 
-            Ok((
+            let payload = Self::with_resolved_database(
                 json!({
                     "rows": ingest_result.rows,
                     "schema": schema_json,
                     "stats": ingest_result.stats.to_json(),
                 }),
-                schema_changed,
-            ))
+                target_db.as_deref(),
+            )?;
+
+            Ok((payload, schema_changed))
         });
 
         match result {
@@ -2374,21 +2571,24 @@ impl HyperMcpServer {
         let success_count = outcomes.iter().filter(|o| o.ok.is_some()).count();
         let failure_count = outcomes.len() - success_count;
 
-        Self::ok_content(json!({
-            "results": results_json,
-            "summary": {
-                "total": outcomes.len(),
-                "succeeded": success_count,
-                "failed": failure_count,
-                "concurrency": concurrency,
-            }
-        }))
+        Self::ok_content_with_resolved_database(
+            json!({
+                "results": results_json,
+                "summary": {
+                    "total": outcomes.len(),
+                    "succeeded": success_count,
+                    "failed": failure_count,
+                    "concurrency": concurrency,
+                }
+            }),
+            target_db.as_deref(),
+        )
     }
 
-    /// Ingest an Apache Iceberg table directory into a workspace table
+    /// Ingest an Apache Iceberg table directory into a local table
     /// using hyperd's native `external(..., format => 'iceberg')` reader.
     #[tool(
-        description = "Ingest an Apache Iceberg table into a workspace table using hyperd's native Iceberg reader. `path` must be an absolute path to the Iceberg table *root directory* (the one containing the `metadata/` and `data/` subdirs). Hyperd resolves the latest snapshot by default; pass `metadata_filename` (e.g. `v2.metadata.json`) or `version_as_of` to pin a specific snapshot or version. Mode is `replace` (default) or `append`. Single SQL statement under the hood — no Rust-side Arrow decode, no per-row INSERTs."
+        description = "Ingest an Apache Iceberg table into a local database table using hyperd's native Iceberg reader. `path` must be an absolute table-root directory containing `metadata/` and `data/`. Hyperd resolves the latest snapshot by default; use `metadata_filename` or `version_as_of` to pin one. Mode is `replace` (default) or `append`."
     )]
     fn load_iceberg(
         &self,
@@ -2462,7 +2662,7 @@ impl HyperMcpServer {
 
     /// Run a read-only SQL query (SELECT, WITH, EXPLAIN, SHOW, VALUES).
     #[tool(
-        description = "Run a read-only SQL query (SELECT, WITH, EXPLAIN, SHOW, VALUES) against the workspace. For DDL/DML use the execute tool."
+        description = "Run a read-only SQL query (SELECT, WITH, EXPLAIN, SHOW, VALUES) against local (default), persistent, or an attached database. Successful results include canonical `resolved_database`. For DDL/DML use execute."
     )]
     fn query(
         &self,
@@ -2497,10 +2697,14 @@ impl HyperMcpServer {
             let elapsed = timer.elapsed_ms();
             let stats = crate::stats::QueryStats {
                 operation: "query".into(),
-                rows_returned: rows.len() as u64,
+                rows_returned: u64::try_from(rows.len())
+                    .expect("usize query result count always fits in u64"),
                 rows_scanned: 0,
                 elapsed_ms: elapsed,
-                result_size_bytes: serde_json::to_string(&rows).map_or(0, |s| s.len() as u64),
+                result_size_bytes: serde_json::to_string(&rows).map_or(0, |serialized| {
+                    u64::try_from(serialized.len())
+                        .expect("usize serialized query size always fits in u64")
+                }),
                 tables_touched: vec![],
             };
             let payload = if truncated {
@@ -2522,7 +2726,8 @@ impl HyperMcpServer {
                     "stats": stats.to_json(),
                 })
             };
-            Ok((params.sql.clone(), payload))
+            Self::with_resolved_database(payload, target_db.as_deref())
+                .map(|payload| (params.sql.clone(), payload))
         });
 
         match result {
@@ -2648,12 +2853,12 @@ impl HyperMcpServer {
             if any_structural {
                 self.after_execute_catalog_update(engine, target_db.as_deref());
             }
-            Ok(json!({
+            Self::with_resolved_database(json!({
                 "statements": per_statement.len(),
                 "affected_rows": affected_total,
                 "per_statement": per_statement,
                 "stats": { "operation": operation, "elapsed_ms": elapsed },
-            }))
+            }), target_db.as_deref())
         });
 
         match result {
@@ -2692,7 +2897,7 @@ impl HyperMcpServer {
                     json!({ "operation": "sample", "elapsed_ms": elapsed }),
                 );
             }
-            Ok(sample)
+            Self::with_resolved_database(sample, target_db.as_deref())
         });
 
         match result {
@@ -2703,7 +2908,7 @@ impl HyperMcpServer {
 
     /// Render a chart (PNG or SVG) from a SQL query.
     #[tool(
-        description = "Render a chart (bar, line, scatter, or histogram) from a SQL query. Returns the PNG/SVG image inline by default so MCP clients can display it directly. Set `inline=false` to skip the inline bytes and write to disk only (keeps the MCP transcript small for batch workflows). Combine `inline=true` with `output_path` to get both.\n\n**Data shape:** The query must return long-format data with one numeric `y` column. For multi-series charts, use a `series` column to split by category. If your data is wide-format (multiple value columns), reshape it with `UNION ALL` into (label, series, value) tuples before charting.\n\n**DATE/TIMESTAMP x-axis:** Line and scatter charts auto-detect non-numeric x columns. DATE, TIMESTAMP, and TIMESTAMPTZ values render with a **proportional time axis** — gaps between data points reflect real wall-clock time (4.5 h gap and 17 h gap don't look the same). Tick labels are formatted in the input kind: `%Y-%m-%d` for DATE, `%Y-%m-%d %H:%M:%S` for TIMESTAMP, with the originating timezone offset preserved for TIMESTAMPTZ. TEXT x columns fall back to evenly-spaced categorical mode. Set `x_as_category: true` to force categorical layout on temporal data (useful when even spacing reads better than proportional gaps).\n\n- `output_path`: explicit destination file path. Parent directory is created automatically (no need to pre-create it). If omitted and `inline=true` (default), no file is written. If omitted and `inline=false`, a file is auto-generated under the system temp dir as `hyperdb-charts/chart-<ts>-<pid>-<n>.<ext>`.\n- `inline`: when true (default), return the image bytes inline. Without `output_path`, suppresses the disk write entirely. With `output_path`, writes to disk AND returns inline. Set to false for disk-only output.\n- `format`: \"png\" (default) or \"svg\". Auto-derived from `output_path` extension when omitted. A mismatch between `format` and the path extension returns `INVALID_ARGUMENT`.\n- `overwrite`: default true. Set false to refuse overwriting an existing file (returns `PERMISSION_DENIED`).\n- `x_range` / `y_range`: fix axis extents across multiple charts (e.g. x_range=[0,1500], y_range=[0,1]).\n- `color_map`: stable per-series hex colors (e.g. {\"India\":\"#e41a1c\",\"China\":\"#ff7f0e\"}).\n- `label_points=true`: annotate each point with its series name instead of showing a legend — best when each series has exactly one point."
+        description = "Quick diagnostic: render one bar, line, scatter, or histogram from a SQL query. Returns PNG/SVG inline by default; `output_path` writes plus returns inline, while `inline=false` is disk-only.\n\n**Data shape:** Return long-format data with one numeric `y` column and optional `series`; reshape wide data with `UNION ALL`.\n\n**Temporal x:** Line/scatter DATE, TIMESTAMP, and TIMESTAMPTZ use proportional time spacing. TEXT is categorical; `x_as_category=true` deliberately forces even spacing. Bars are always categorical.\n\n- `format`: \"png\" (default) or \"svg\"; path extension and explicit format must agree.\n- `x_range` / `y_range`: finite, strictly increasing, representable extents; y applies to bars.\n- `bar_orientation`: \"vertical\" (default) or \"horizontal\" for bars.\n- `label_values=true`: label bars with each original y scalar.\n- `show_legend`: true by default; false hides the legend.\n- `y_scale`: \"linear\" or positive \"log\"; no log histograms, and explicit log ranges must contain every value.\n- `label_points=true`: label line/scatter points and suppress their legend."
     )]
     fn chart(
         &self,
@@ -2728,6 +2933,14 @@ impl HyperMcpServer {
                 params.format.as_deref(),
                 params.output_path.as_deref(),
             )?;
+            let chart_type = ChartType::parse(&params.chart_type)?;
+            let presentation = ChartPresentation::from_mcp(
+                chart_type,
+                params.bar_orientation.as_deref(),
+                params.label_values,
+                params.show_legend,
+                params.y_scale.as_deref(),
+            )?;
 
             // Optional database routing — temporarily redirect search_path
             // so unqualified names in the chart SQL resolve there.
@@ -2738,7 +2951,12 @@ impl HyperMcpServer {
             };
 
             let timer = crate::stats::StatsTimer::start();
-            let rows = engine.execute_query_to_json(&params.sql)?;
+            let measure_column = match chart_type {
+                ChartType::Histogram => params.x.as_deref().or(params.y.as_deref()),
+                ChartType::Bar | ChartType::Line | ChartType::Scatter => params.y.as_deref(),
+            };
+            let chart_rows =
+                engine.execute_chart_query_to_json(&params.sql, measure_column)?;
 
             // Parse color_map: skip entries whose hex string is malformed,
             // logging them via the description rather than hard-failing.
@@ -2756,7 +2974,7 @@ impl HyperMcpServer {
                 .unwrap_or_default();
 
             let opts = ChartOptions {
-                chart_type: ChartType::parse(&params.chart_type)?,
+                chart_type,
                 x_column: params.x.clone(),
                 y_column: params.y.clone(),
                 series_column: params.series.clone(),
@@ -2772,7 +2990,12 @@ impl HyperMcpServer {
                 label_points: params.label_points.unwrap_or(false),
             };
 
-            let chart = render_chart(&rows, &opts)?;
+            let chart = render_chart_with_measure_metadata(
+                &chart_rows.rows,
+                &opts,
+                presentation,
+                &chart_rows.measures,
+            )?;
 
             // Decide disk vs inline vs both. Write to disk *before*
             // building the content vec so an I/O failure surfaces as a
@@ -2788,11 +3011,11 @@ impl HyperMcpServer {
             }
 
             let elapsed = timer.elapsed_ms();
-            Ok((chart, elapsed, opts, disposition))
+            Ok((chart, elapsed, opts, disposition, target_db))
         });
 
         match result {
-            Ok((chart, elapsed_ms, opts, disposition)) => {
+            Ok((chart, elapsed_ms, opts, disposition, target_db)) => {
                 let format_str = match opts.format {
                     ChartFormat::Png => "png",
                     ChartFormat::Svg => "svg",
@@ -2812,8 +3035,14 @@ impl HyperMcpServer {
                 if let Some(p) = output_path_str {
                     stats.insert("output_path".into(), json!(p));
                 }
-                let stats_text =
-                    serde_json::to_string_pretty(&Value::Object(stats)).unwrap_or_default();
+                let stats = match Self::with_resolved_database(
+                    Value::Object(stats),
+                    target_db.as_deref(),
+                ) {
+                    Ok(stats) => stats,
+                    Err(e) => return Self::err_content(e),
+                };
+                let stats_text = serde_json::to_string_pretty(&stats).unwrap_or_default();
 
                 let mut content = Vec::with_capacity(2);
                 if wants_inline {
@@ -2874,7 +3103,7 @@ impl HyperMcpServer {
             Some(self.subscriptions_handle()),
             path.clone(),
             params.table.clone(),
-            target_db,
+            target_db.clone(),
             options,
         );
         match result {
@@ -2889,7 +3118,7 @@ impl HyperMcpServer {
                         "files_failed": stats.files_failed,
                     },
                 });
-                Self::ok_content(body)
+                Self::ok_content_with_resolved_database(body, target_db.as_deref())
             }
             Err(e) => Self::err_content(e),
         }
@@ -2911,10 +3140,10 @@ impl HyperMcpServer {
         }
     }
 
-    /// Describe workspace tables. With `table` set, returns just that
+    /// Describe tables in the selected database. With `table` set, returns just that
     /// table's columns and row count; without it, lists every public table.
     #[tool(
-        description = "Describe workspace tables. With `table` set, returns that single table's columns and row count (TABLE_NOT_FOUND if missing). Without `table`, lists every public table."
+        description = "Describe tables in local (default), persistent, or an attached database. With `table`, returns that table's columns and row count; without it, lists every public table. Successful results include canonical `resolved_database`."
     )]
     fn describe(
         &self,
@@ -2922,16 +3151,17 @@ impl HyperMcpServer {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let result = self.with_engine(|engine| {
             let target_db = self.resolve_db(engine, params.database.as_deref(), None, false)?;
-            match params.table.as_deref() {
+            let tables = match params.table.as_deref() {
                 Some(name) => engine
                     .describe_table_in(target_db.as_deref(), name)
                     .map(|t| vec![t]),
                 None => engine.describe_tables_in(target_db.as_deref()),
-            }
+            }?;
+            Self::with_resolved_database(json!({"tables": tables}), target_db.as_deref())
         });
 
         match result {
-            Ok(tables) => Self::ok_content(json!({"tables": tables})),
+            Ok(val) => Self::ok_content(val),
             Err(e) => Self::err_content(e),
         }
     }
@@ -3038,12 +3268,15 @@ impl HyperMcpServer {
                 source_db: target_db.clone(),
             };
             let export_result = export_to_file(engine, &opts)?;
-            Ok(json!({
-                "output_path": export_result.stats.output_path,
-                "rows": export_result.rows,
-                "file_size_bytes": export_result.stats.file_size_bytes,
-                "stats": export_result.stats.to_json(),
-            }))
+            Self::with_resolved_database(
+                json!({
+                    "output_path": export_result.stats.output_path,
+                    "rows": export_result.rows,
+                    "file_size_bytes": export_result.stats.file_size_bytes,
+                    "stats": export_result.stats.to_json(),
+                }),
+                target_db.as_deref(),
+            )
         });
 
         match result {
@@ -3056,7 +3289,7 @@ impl HyperMcpServer {
     /// exposed as two MCP resources — see the struct-level docs on
     /// [`SaveQueryParams`] for the full URI pattern.
     #[tool(
-        description = "Save a named read-only SQL query. Creates two resources: `hyper://queries/{name}/definition` (sql + metadata JSON) and `hyper://queries/{name}/result` (re-runs the SQL on every read). Persisted in the workspace when `--workspace` is set; session-only otherwise. Rejects non-read-only SQL and duplicate names; delete first to overwrite."
+        description = "Save a named read-only SQL query. Creates `hyper://queries/{name}/definition` and `/result` resources. With the normal persistent attachment it survives restarts; under `--ephemeral-only` it is session-only. Rejects non-read-only SQL and duplicate names; delete first to overwrite."
     )]
     fn save_query(
         &self,
@@ -3173,22 +3406,23 @@ impl HyperMcpServer {
             // would also fail at the Hyper layer, but the resolve_db
             // error is more actionable).
             let target_db = self.resolve_db(engine, params.database.as_deref(), None, true)?;
-            crate::table_catalog::set_metadata_in(
+            let entry = crate::table_catalog::set_metadata_in(
                 engine,
                 &table_name,
                 &fields,
                 target_db.as_deref(),
-            )
+            )?;
+            Self::with_resolved_database(entry.to_json(), target_db.as_deref())
         });
         match result {
-            Ok(entry) => Self::ok_content(entry.to_json()),
+            Ok(body) => Self::ok_content(body),
             Err(e) => Self::err_content(e),
         }
     }
 
     /// Read a value from the KV scratchpad by store + key.
     #[tool(
-        description = "Read a value from the KV scratchpad by store + key. Returns {found, value}; `value` is null when the key is absent (not an error). Omit `database` to read the ephemeral store; pass \"persistent\" (or persist=true) or an attached alias to read elsewhere."
+        description = "Read a value from the KV scratchpad by store + key. Returns {found, value}; `value` is null when the key is absent (not an error). Omit `database` to read the local store; pass \"persistent\" (or persist=true) or an attached alias to read elsewhere."
     )]
     fn kv_get(
         &self,
@@ -3197,17 +3431,21 @@ impl HyperMcpServer {
         let result = self.with_engine(|engine| {
             let db = self.resolve_db(engine, p.database.as_deref(), p.persist, true)?;
             let kv = Self::kv_open(engine, db.as_deref(), &p.store)?;
-            kv.get(&p.key).map_err(McpError::from)
+            let value = kv.get(&p.key).map_err(McpError::from)?;
+            Ok((value, db))
         });
         match result {
-            Ok(value) => Self::ok_content(json!({ "found": value.is_some(), "value": value })),
+            Ok((value, db)) => Self::ok_content_with_resolved_database(
+                json!({ "found": value.is_some(), "value": value }),
+                db.as_deref(),
+            ),
             Err(e) => Self::err_content(e),
         }
     }
 
-    /// Save a value under store + key (upsert). Ephemeral unless routed.
+    /// Save a value under store + key (upsert). Local unless routed.
     #[tool(
-        description = "KV scratchpad. Save a variable, state, summary, or JSON config under store + key to remember later without creating a database table. IMPORTANT: without `database` the value is written to the EPHEMERAL database and is LOST when the server restarts. To persist across restarts, pass database=\"persistent\" (or persist=true). Returns {stored, created, value_bytes}; `created:false` means an existing value was overwritten. Pass overwrite=false to avoid clobbering (skips + returns stored:false, existed:true). Pass value_path=<absolute path> to store a file's contents server-side instead of `value` (exactly one of value/value_path; reads any server-readable path — no sandbox; files over 64 MiB are rejected before reading)."
+        description = "KV scratchpad. Save a variable, state, summary, or JSON config under store + key to remember later without creating a database table. IMPORTANT: without `database` the value is written to the local database and is LOST when the server restarts. To persist across restarts, pass database=\"persistent\" (or persist=true). Returns {stored, created, value_bytes}; `created:false` means an existing value was overwritten. Pass overwrite=false to avoid clobbering (skips + returns stored:false, existed:true). Pass value_path=<absolute path> to store a file's contents server-side instead of `value` (exactly one of value/value_path; reads any server-readable path — no sandbox; files over 64 MiB are rejected before reading)."
     )]
     fn kv_set(
         &self,
@@ -3258,18 +3496,17 @@ impl HyperMcpServer {
         let result = self.with_engine(|engine| {
             let db = self.resolve_db(engine, p.database.as_deref(), p.persist, true)?;
             let kv = Self::kv_open(engine, db.as_deref(), &p.store)?;
-            if overwrite {
-                kv.set(&p.key, &value)
-                    .map(|o| (true, o.created))
-                    .map_err(McpError::from)
+            let (stored, created) = if overwrite {
+                let outcome = kv.set(&p.key, &value).map_err(McpError::from)?;
+                (true, outcome.created)
             } else {
-                kv.set_if_absent(&p.key, &value)
-                    .map(|written| (written, written))
-                    .map_err(McpError::from)
-            }
+                let written = kv.set_if_absent(&p.key, &value).map_err(McpError::from)?;
+                (written, written)
+            };
+            Ok((stored, created, db))
         });
         match result {
-            Ok((stored, created)) => {
+            Ok((stored, created, db)) => {
                 let mut body = json!({
                     "stored": stored,
                     "created": created,
@@ -3283,7 +3520,7 @@ impl HyperMcpServer {
                 if let Some(w) = Self::kv_size_warning(value_bytes) {
                     body["warning"] = json!(w);
                 }
-                Self::ok_content(body)
+                Self::ok_content_with_resolved_database(body, db.as_deref())
             }
             Err(e) => Self::err_content(e),
         }
@@ -3291,7 +3528,7 @@ impl HyperMcpServer {
 
     /// Atomic batch write to the KV scratchpad.
     #[tool(
-        description = "Write multiple KV pairs atomically. All keys validated before the transaction opens, so an invalid key aborts the whole batch. Returns {stored, created, overwritten, total_bytes} when overwrite=true (default); returns {stored, created, skipped, total_bytes} when overwrite=false (guard mode — skips existing keys). Empty `entries` is an error. Omit `database` to write to the ephemeral store; pass \"persistent\" (or persist=true) or an attached alias to write elsewhere."
+        description = "Write multiple KV pairs atomically. All keys validated before the transaction opens, so an invalid key aborts the whole batch. Returns {stored, created, overwritten, total_bytes} when overwrite=true (default); returns {stored, created, skipped, total_bytes} when overwrite=false (guard mode — skips existing keys). Empty `entries` is an error. Omit `database` to write to the local store; pass \"persistent\" (or persist=true) or an attached alias to write elsewhere."
     )]
     fn kv_set_many(
         &self,
@@ -3323,41 +3560,44 @@ impl HyperMcpServer {
         }
 
         // Shape the outcome JSON *inside* each branch so the `with_engine`
-        // closure returns a single type (`Result<Value, McpError>`). The two
-        // batch primitives return different outcome structs (`BatchSetOutcome`
-        // vs `BatchGuardOutcome`), so a bare `if`/`else` returning both would
-        // not type-check — a closure, like any block, needs one return type.
+        // closure returns a single type
+        // (`Result<(Value, Option<String>), McpError>`). The two batch
+        // primitives return different outcome structs (`BatchSetOutcome` vs
+        // `BatchGuardOutcome`), so a bare `if`/`else` returning both would not
+        // type-check — a closure, like any block, needs one return type.
         // `total_bytes` and `warnings` are engine-independent (computed above),
-        // so they are spliced into the object after the closure returns. This
-        // mirrors the single-type-closure pattern used by `kv_list` (Task 11).
+        // so they are spliced into the object after the closure returns; the
+        // database alias is carried out for `resolved_database` metadata. This
+        // mirrors the single-type-closure pattern used by `kv_list`.
         let overwrite = p.overwrite.unwrap_or(true);
         let result = self.with_engine(|engine| {
             let db = self.resolve_db(engine, p.database.as_deref(), p.persist, true)?;
             let kv = Self::kv_open(engine, db.as_deref(), &p.store)?;
-            if overwrite {
+            let body = if overwrite {
                 let o = kv.set_batch(&pairs).map_err(McpError::from)?;
-                Ok(json!({
+                json!({
                     "stored": o.created + o.overwritten,
                     "created": o.created,
                     "overwritten": o.overwritten,
-                }))
+                })
             } else {
                 let o = kv.set_batch_if_absent(&pairs).map_err(McpError::from)?;
-                Ok(json!({
+                json!({
                     "stored": o.written,
                     "created": o.written,
                     "skipped": o.skipped,
-                }))
-            }
+                })
+            };
+            Ok((body, db))
         });
 
         match result {
-            Ok(mut body) => {
+            Ok((mut body, db)) => {
                 body["total_bytes"] = json!(total_bytes);
                 if !warnings.is_empty() {
                     body["warnings"] = json!(warnings);
                 }
-                Self::ok_content(body)
+                Self::ok_content_with_resolved_database(body, db.as_deref())
             }
             Err(e) => Self::err_content(e),
         }
@@ -3365,7 +3605,7 @@ impl HyperMcpServer {
 
     /// Delete a key from the scratchpad.
     #[tool(
-        description = "Delete a key from the KV scratchpad. Returns {deleted: true} when the key existed, {deleted: false} otherwise (no error). Omit `database` for the ephemeral store, or route with \"persistent\"/persist=true/an attached alias."
+        description = "Delete a key from the KV scratchpad. Returns {deleted: true} when the key existed, {deleted: false} otherwise (no error). Omit `database` for the local store, or route with \"persistent\"/persist=true/an attached alias."
     )]
     fn kv_delete(
         &self,
@@ -3377,19 +3617,21 @@ impl HyperMcpServer {
         let result = self.with_engine(|engine| {
             let db = self.resolve_db(engine, p.database.as_deref(), p.persist, true)?;
             let kv = Self::kv_open(engine, db.as_deref(), &p.store)?;
-            kv.delete(&p.key).map_err(McpError::from)
+            let deleted = kv.delete(&p.key).map_err(McpError::from)?;
+            Ok((deleted, db))
         });
         match result {
-            Ok(deleted) => {
-                Self::ok_content(json!({ "deleted": deleted, "store": p.store, "key": p.key }))
-            }
+            Ok((deleted, db)) => Self::ok_content_with_resolved_database(
+                json!({ "deleted": deleted, "store": p.store, "key": p.key }),
+                db.as_deref(),
+            ),
             Err(e) => Self::err_content(e),
         }
     }
 
     /// List all keys in a scratchpad store, sorted ascending.
     #[tool(
-        description = "List all keys in a KV scratchpad store, sorted ascending. Omit `database` for the ephemeral store, or route with \"persistent\"/persist=true/an attached alias. Pass values=true to return full (key, value) pairs as an `entries` array instead of just keys — useful for reading a whole store without N×kv_get."
+        description = "List all keys in a KV scratchpad store, sorted ascending. Omit `database` for the local store, or route with \"persistent\"/persist=true/an attached alias. Pass values=true to return full (key, value) pairs as an `entries` array instead of just keys — useful for reading a whole store without N×kv_get."
     )]
     fn kv_list(
         &self,
@@ -3400,23 +3642,28 @@ impl HyperMcpServer {
             let db = self.resolve_db(engine, p.database.as_deref(), p.persist, true)?;
             let kv = Self::kv_open(engine, db.as_deref(), &p.store)?;
             if with_values {
-                kv.entries().map(|pairs| (Some(pairs), None))
+                let entries = kv.entries().map_err(McpError::from)?;
+                Ok((Some(entries), None, db))
             } else {
-                kv.keys().map(|keys| (None, Some(keys)))
+                let keys = kv.keys().map_err(McpError::from)?;
+                Ok((None, Some(keys), db))
             }
-            .map_err(McpError::from)
         });
         match result {
-            Ok((Some(entries), None)) => {
+            Ok((Some(entries), None, db)) => {
                 let arr: Vec<Value> = entries
                     .into_iter()
                     .map(|(k, v)| json!({ "key": k, "value": v }))
                     .collect();
-                Self::ok_content(json!({ "store": p.store, "entries": arr }))
+                Self::ok_content_with_resolved_database(
+                    json!({ "store": p.store, "entries": arr }),
+                    db.as_deref(),
+                )
             }
-            Ok((None, Some(keys))) => {
-                Self::ok_content(json!({ "store": p.store, "count": keys.len(), "keys": keys }))
-            }
+            Ok((None, Some(keys), db)) => Self::ok_content_with_resolved_database(
+                json!({ "store": p.store, "count": keys.len(), "keys": keys }),
+                db.as_deref(),
+            ),
             Ok(_) => unreachable!("exactly one of entries/keys is Some"),
             Err(e) => Self::err_content(e),
         }
@@ -3424,7 +3671,7 @@ impl HyperMcpServer {
 
     /// List all scratchpad store namespaces that hold data in a database.
     #[tool(
-        description = "List all KV scratchpad store namespaces that currently hold data in a database. Omit `database` for the ephemeral store, or route with \"persistent\"/persist=true/an attached alias. Each database has its own isolated set of stores. A store drops off this list once its last key is removed — there is no separate registry."
+        description = "List all KV scratchpad store namespaces that currently hold data in a database. Omit `database` for the local store, or route with \"persistent\"/persist=true/an attached alias. Each database has its own isolated set of stores. A store drops off this list once its last key is removed — there is no separate registry."
     )]
     fn kv_list_stores(
         &self,
@@ -3432,21 +3679,25 @@ impl HyperMcpServer {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let result = self.with_engine(|engine| {
             let db = self.resolve_db(engine, p.database.as_deref(), p.persist, true)?;
-            match db.as_deref() {
+            let stores = match db.as_deref() {
                 Some(alias) => engine.connection().kv_list_stores_in(alias),
                 None => engine.connection().kv_list_stores(),
             }
-            .map_err(McpError::from)
+            .map_err(McpError::from)?;
+            Ok((stores, db))
         });
         match result {
-            Ok(stores) => Self::ok_content(json!({ "count": stores.len(), "stores": stores })),
+            Ok((stores, db)) => Self::ok_content_with_resolved_database(
+                json!({ "count": stores.len(), "stores": stores }),
+                db.as_deref(),
+            ),
             Err(e) => Self::err_content(e),
         }
     }
 
     /// Count the keys in a scratchpad store.
     #[tool(
-        description = "Returns {store, size, bytes} where `size` is the key count and `bytes` is the total `OCTET_LENGTH` of all values (0 for empty stores). Omit `database` for the ephemeral store, or route with \"persistent\"/persist=true/an attached alias."
+        description = "Returns {store, size, bytes} where `size` is the key count and `bytes` is the total `OCTET_LENGTH` of all values (0 for empty stores). Omit `database` for the local store, or route with \"persistent\"/persist=true/an attached alias."
     )]
     fn kv_size(
         &self,
@@ -3457,14 +3708,17 @@ impl HyperMcpServer {
             let kv = Self::kv_open(engine, db.as_deref(), &p.store)?;
             let key_count = kv.size().map_err(McpError::from)?;
             let value_bytes = kv.byte_size().map_err(McpError::from)?;
-            Ok(json!({
-                "store": p.store,
-                "size": key_count,
-                "bytes": value_bytes,
-            }))
+            Ok((
+                json!({
+                    "store": p.store,
+                    "size": key_count,
+                    "bytes": value_bytes,
+                }),
+                db,
+            ))
         });
         match result {
-            Ok(val) => Self::ok_content(val),
+            Ok((body, db)) => Self::ok_content_with_resolved_database(body, db.as_deref()),
             Err(e) => Self::err_content(e),
         }
     }
@@ -3472,7 +3726,7 @@ impl HyperMcpServer {
     /// Destructively read-and-remove the lowest-keyed entry in lexicographic
     /// key order (atomic).
     #[tool(
-        description = "Destructively read-and-remove the lowest-keyed entry (lexicographic key order, not insertion order) from a KV store (peek+delete in one transaction, atomic within a single server process — useful as a work queue for one session; two separate server processes popping a shared persistent store could double-serve an entry). Returns {found, key, value}; {found: false} on an empty store. Omit `database` for the ephemeral store, or route with \"persistent\"/persist=true/an attached alias."
+        description = "Destructively read-and-remove the lowest-keyed entry (lexicographic key order, not insertion order) from a KV store (peek+delete in one transaction, atomic within a single server process — useful as a work queue for one session; two separate server processes popping a shared persistent store could double-serve an entry). Returns {found, key, value}; {found: false} on an empty store. Omit `database` for the local store, or route with \"persistent\"/persist=true/an attached alias."
     )]
     fn kv_pop(
         &self,
@@ -3484,20 +3738,24 @@ impl HyperMcpServer {
         let result = self.with_engine(|engine| {
             let db = self.resolve_db(engine, p.database.as_deref(), p.persist, true)?;
             let kv = Self::kv_open(engine, db.as_deref(), &p.store)?;
-            kv.pop().map_err(McpError::from)
+            let entry = kv.pop().map_err(McpError::from)?;
+            Ok((entry, db))
         });
         match result {
-            Ok(Some((key, value))) => {
-                Self::ok_content(json!({ "found": true, "key": key, "value": value }))
+            Ok((Some((key, value)), db)) => Self::ok_content_with_resolved_database(
+                json!({ "found": true, "key": key, "value": value }),
+                db.as_deref(),
+            ),
+            Ok((None, db)) => {
+                Self::ok_content_with_resolved_database(json!({ "found": false }), db.as_deref())
             }
-            Ok(None) => Self::ok_content(json!({ "found": false })),
             Err(e) => Self::err_content(e),
         }
     }
 
     /// Delete all keys in a scratchpad store.
     #[tool(
-        description = "Delete all keys in a KV scratchpad store. Returns the number of keys removed. Omit `database` for the ephemeral store, or route with \"persistent\"/persist=true/an attached alias."
+        description = "Delete all keys in a KV scratchpad store. Returns the number of keys removed. Omit `database` for the local store, or route with \"persistent\"/persist=true/an attached alias."
     )]
     fn kv_clear(
         &self,
@@ -3509,19 +3767,22 @@ impl HyperMcpServer {
         let result = self.with_engine(|engine| {
             let db = self.resolve_db(engine, p.database.as_deref(), p.persist, true)?;
             let kv = Self::kv_open(engine, db.as_deref(), &p.store)?;
-            kv.clear().map_err(McpError::from)
+            let removed = kv.clear().map_err(McpError::from)?;
+            Ok((removed, db))
         });
         match result {
-            Ok(removed) => Self::ok_content(json!({ "store": p.store, "removed": removed })),
+            Ok((removed, db)) => Self::ok_content_with_resolved_database(
+                json!({ "store": p.store, "removed": removed }),
+                db.as_deref(),
+            ),
             Err(e) => Self::err_content(e),
         }
     }
 
-    /// Returns plugin health, workspace info, table count, total rows, disk
-    /// usage, the backing `hyperd` connection (mode, endpoint, daemon health
-    /// port), and the list of active directory watchers with their stats.
+    /// Returns installation identity, local/persistent database state, engine
+    /// health, attachments, watchers, and full or degraded statistics.
     #[tool(
-        description = "Returns plugin health, workspace info, table count, total rows, disk usage, the backing hyperd connection (engine.mode, engine.hyperd_endpoint, engine.daemon_health_port), and active directory watchers."
+        description = "Returns MCP/Rust API installation identity, `default_database: local`, read-only state, attachments, watchers, and Hyper/daemon health. `engine_busy:false` includes full SQL statistics; `engine_busy:true` is a prompt partial response, so omitted statistics and `hyperd_running:false` are inconclusive—retry later."
     )]
     fn status(&self) -> Result<CallToolResult, rmcp::ErrorData> {
         // Use try_lock so `status` never hangs behind a stalled/slow data-plane
@@ -3537,29 +3798,32 @@ impl HyperMcpServer {
         // hyperd was down at startup, or a ConnectionLost just dropped it), we
         // report the degraded response honestly rather than blocking to init.
         let Ok(guard) = self.engine.try_lock() else {
-            return Self::ok_content(self.status_degraded());
+            return match self.status_degraded() {
+                Ok(status) => Self::ok_content(status),
+                Err(e) => Self::err_content(e),
+            };
         };
         let Some(engine) = guard.as_ref() else {
-            return Self::ok_content(self.status_degraded());
+            return match self.status_degraded() {
+                Ok(status) => Self::ok_content(status),
+                Err(e) => Self::err_content(e),
+            };
         };
         self.ensure_catalog_ready(engine);
         let result = engine.status();
 
         match result {
-            Ok(mut val) => {
-                if let Some(obj) = val.as_object_mut() {
-                    obj.insert("engine_busy".into(), json!(false));
-                    obj.insert("watchers".into(), self.watchers.to_json());
-                    obj.insert("read_only".into(), json!(self.read_only));
-                    let attachments: Vec<Value> = self
-                        .attachments
-                        .list()
-                        .iter()
-                        .map(super::attach::AttachedDb::to_json)
-                        .collect();
-                    obj.insert("attachments".into(), Value::Array(attachments));
+            Ok(val) => {
+                let attachments = self
+                    .attachments
+                    .list()
+                    .iter()
+                    .map(super::attach::AttachedDb::to_json)
+                    .collect();
+                match self.augment_status_response(val, false, attachments) {
+                    Ok(status) => Self::ok_content(status),
+                    Err(e) => Self::err_content(e),
                 }
-                Self::ok_content(val)
             }
             Err(e) => Self::err_content(e),
         }
@@ -3589,7 +3853,7 @@ impl HyperMcpServer {
     /// Attach an additional `.hyper` database under a user-chosen
     /// alias so its tables can participate in cross-database queries.
     #[tool(
-        description = "Attach an additional .hyper database under a chosen alias. Tables in the attachment are addressable as `{alias}.public.{table}` in any subsequent SELECT; tables in the primary workspace remain addressable as `local.public.{table}` or by their file stem. Default is read-only; pass writable:true to allow mutations (still respects --read-only). Set on_missing='create' (with writable:true) to create an empty .hyper file at the target path first and then attach it — useful for scratch databases without a separate file-creation step; the parent directory must already exist. Only kind='local_file' is supported today; 'tcp' and 'grpc' (Data 360) are planned. The alias 'local' is reserved for the primary workspace."
+        description = "Attach a .hyper database under a canonical lowercase alias. Its tables are `{alias}.public.{table}`; local tables are `local.public.{table}` or unqualified. Default is read-only. `writable:true` and `on_missing:'create'` permit writes only when the server is not `--read-only`; read-only attachment remains available. Only `kind:'local_file'` is supported; `local` is reserved."
     )]
     fn attach_database(
         &self,
@@ -3759,7 +4023,7 @@ impl HyperMcpServer {
     /// `append`, `replace`) are explicit — the target's actual
     /// existence must match the chosen mode.
     #[tool(
-        description = "Run a SELECT (or WITH / VALUES) across local and attached databases and insert the result into a target table. Required `mode`: 'create' (target must not exist, creates via CREATE TABLE AS), 'append' (target must exist, INSERT INTO ... SELECT), or 'replace' (drops and recreates atomically). `target_database` defaults to the primary workspace ('local' also accepted); any other value must be an attachment registered with writable:true. Optional `temp_attach` attaches additional databases for this call only and detaches them on exit (even on failure). Disabled in read-only mode."
+        description = "Run SELECT/WITH/VALUES across local and attached databases and insert into a target table. `mode` is `create`, `append`, or `replace`. `target_database` defaults to local; another alias must be attached writable. `temp_attach` lasts only for this call. Success retains `target_database` and adds canonical `resolved_database`. Disabled in read-only mode."
     )]
     fn copy_query(
         &self,
@@ -3902,7 +4166,7 @@ impl HyperMcpServer {
                 );
             }
 
-            copy_outcome
+            copy_outcome.and_then(|outcome| Self::with_resolved_database(outcome, target_db))
         });
 
         match result {
@@ -4307,8 +4571,8 @@ impl HyperMcpServer {
     }
 
     /// Build the `hyper://readme` markdown body: a human-friendly overview
-    /// of the current workspace, its tables, and pointers to the other
-    /// resources and tools an LLM might reach for.
+    /// of the local and persistent databases, local tables, and pointers to
+    /// the other resources and tools an LLM might reach for.
     ///
     /// Designed to be dropped into an LLM context block so the model can
     /// orient itself in a single resource read without first calling
@@ -4319,31 +4583,32 @@ impl HyperMcpServer {
             .with_engine(super::engine::Engine::describe_tables)
             .unwrap_or_default();
 
-        let workspace_mode = status
-            .get("workspace_mode")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
-        let workspace_path = status
-            .get("workspace_path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let read_only = status
-            .get("read_only")
+        let has_persistent = status
+            .get("has_persistent")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
+        let persistent_path = status
+            .get("persistent_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let table_count = tables.len();
 
         let mut md = String::new();
-        md.push_str("# HyperDB workspace\n\n");
+        md.push_str("# HyperDB databases\n\n");
         let _ = writeln!(
             md,
-            "- Mode: **{workspace_mode}**{}\n",
-            if read_only { " (read-only)" } else { "" }
+            "- Local database: **ephemeral** (default){}",
+            if self.read_only { " (read-only)" } else { "" }
         );
-        if !workspace_path.is_empty() {
-            let _ = writeln!(md, "- Path: `{workspace_path}`\n");
+        if has_persistent {
+            md.push_str("- Persistent database: **attached**\n");
+            if !persistent_path.is_empty() {
+                let _ = writeln!(md, "- Persistent path: `{persistent_path}`");
+            }
+        } else {
+            md.push_str("- Persistent database: **disabled**\n");
         }
-        let _ = write!(md, "- Tables: **{table_count}**\n\n");
+        let _ = write!(md, "- Local tables: **{table_count}**\n\n");
 
         if tables.is_empty() {
             md.push_str(
@@ -4352,7 +4617,7 @@ impl HyperMcpServer {
                  first if you're unsure of the schema.\n",
             );
         } else {
-            md.push_str("## Tables\n\n");
+            md.push_str("## Local tables\n\n");
             md.push_str("| Table | Rows | Columns |\n");
             md.push_str("|---|---:|---|\n");
             for t in &tables {
@@ -4661,7 +4926,7 @@ Full SQL reference: https://developer.salesforce.com/docs/data/data-cloud-query-
         Ok(())
     }
 
-    /// List MCP resources: the workspace, the tables list, a markdown
+    /// List MCP resources: database status, the local tables list, a markdown
     /// readme, the KV store schema, and three entries per existing table
     /// (schema, JSON sample, CSV sample). Calling this lazily starts the
     /// engine, so it doubles as a "wake up" signal for MCP clients that
@@ -4674,9 +4939,13 @@ Full SQL reference: https://developer.salesforce.com/docs/data/data-cloud-query-
         let mut resources = vec![
             RawResource {
                 uri: "hyper://workspace".into(),
-                name: "Workspace Info".into(),
-                title: Some("Hyper Workspace".into()),
-                description: Some("Workspace mode, table count, total rows, disk usage".into()),
+                name: "Local and Persistent Database Info".into(),
+                title: Some("HyperDB local and persistent databases".into()),
+                description: Some(
+                    "Local/default database and persistent attachment state, table count, \
+                     total rows, and disk usage"
+                        .into(),
+                ),
                 mime_type: Some("application/json".into()),
                 size: None,
                 icons: None,
@@ -4696,11 +4965,11 @@ Full SQL reference: https://developer.salesforce.com/docs/data/data-cloud-query-
             .no_annotation(),
             RawResource {
                 uri: "hyper://readme".into(),
-                name: "Workspace Readme".into(),
-                title: Some("HyperDB workspace readme".into()),
+                name: "Database Readme".into(),
+                title: Some("HyperDB local and persistent database readme".into()),
                 description: Some(
-                    "Markdown overview of the workspace: tables, row counts, related \
-                     resources, and tool hints for LLMs orienting themselves."
+                    "Markdown overview of local/default and persistent databases: local \
+                     tables, row counts, related resources, and tool hints for LLMs."
                         .into(),
                 ),
                 mime_type: Some("text/markdown".into()),
@@ -4715,7 +4984,7 @@ Full SQL reference: https://developer.salesforce.com/docs/data/data-cloud-query-
                 title: Some("Key-value scratchpad schema".into()),
                 description: Some(
                     "Schema of the _hyperdb_kv_store table backing the kv_* tools, the \
-                     ephemeral-vs-persistent durability rule, and the LEFT JOIN enrichment \
+                     local-vs-persistent durability rule, and the LEFT JOIN enrichment \
                      pattern for joining KV metadata onto analytical tables."
                         .into(),
                 ),
@@ -5439,6 +5708,275 @@ mod kv_value_path_size_tests {
             err.message.contains("hard limit"),
             "message should name the hard limit: {}",
             err.message
+        );
+    }
+}
+
+#[cfg(test)]
+mod heartbeat_debounce_tests {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::mpsc::{self, Receiver, Sender};
+    use std::sync::{Arc, Barrier};
+    use std::thread::JoinHandle;
+    use std::time::{Duration, Instant};
+
+    use super::HyperMcpServer;
+
+    struct HeldHeartbeatPeer {
+        port: u16,
+        release: Option<Sender<()>>,
+        handle: Option<JoinHandle<Result<Vec<String>, String>>>,
+    }
+
+    impl HeldHeartbeatPeer {
+        fn spawn() -> Self {
+            let listener =
+                TcpListener::bind(("127.0.0.1", 0)).expect("bind controlled heartbeat listener");
+            listener
+                .set_nonblocking(true)
+                .expect("make controlled heartbeat listener nonblocking");
+            let port = listener
+                .local_addr()
+                .expect("controlled heartbeat listener address")
+                .port();
+            let (release_tx, release_rx) = mpsc::channel();
+            let handle =
+                std::thread::spawn(move || hold_heartbeat_responses(&listener, &release_rx));
+            Self {
+                port,
+                release: Some(release_tx),
+                handle: Some(handle),
+            }
+        }
+
+        fn release_and_join(mut self) -> Result<Vec<String>, String> {
+            if let Some(release) = self.release.take() {
+                let _ = release.send(());
+            }
+            self.handle
+                .take()
+                .expect("controlled heartbeat listener handle must exist")
+                .join()
+                .map_err(|payload| format!("controlled heartbeat listener panicked: {payload:?}"))?
+        }
+    }
+
+    impl Drop for HeldHeartbeatPeer {
+        fn drop(&mut self) {
+            if let Some(release) = self.release.take() {
+                let _ = release.send(());
+            }
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    fn hold_heartbeat_responses(
+        listener: &TcpListener,
+        release: &Receiver<()>,
+    ) -> Result<Vec<String>, String> {
+        let hard_deadline = Instant::now() + Duration::from_secs(5);
+        let mut streams = Vec::new();
+        loop {
+            loop {
+                match listener.accept() {
+                    Ok((stream, _)) => streams.push(stream),
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(error) => {
+                        return Err(format!("controlled heartbeat accept failed: {error}"));
+                    }
+                }
+            }
+
+            match release.try_recv() {
+                Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+            if Instant::now() >= hard_deadline {
+                return Err("controlled heartbeat listener was never released".to_string());
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        // Accept any connections already queued when the release signal won
+        // the race with the nonblocking accept above.
+        let drain_deadline = Instant::now() + Duration::from_millis(50);
+        while Instant::now() < drain_deadline {
+            match listener.accept() {
+                Ok((stream, _)) => streams.push(stream),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => return Err(format!("heartbeat queue drain failed: {error}")),
+            }
+        }
+
+        let mut commands = Vec::with_capacity(streams.len());
+        for mut stream in streams {
+            commands.push(read_heartbeat_command(&stream)?);
+            stream
+                .write_all(b"OK\n")
+                .map_err(|error| format!("acknowledge held heartbeat: {error}"))?;
+        }
+        Ok(commands)
+    }
+
+    fn read_heartbeat_command(stream: &TcpStream) -> Result<String, String> {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .map_err(|error| format!("set heartbeat read timeout: {error}"))?;
+        stream
+            .set_write_timeout(Some(Duration::from_secs(1)))
+            .map_err(|error| format!("set heartbeat write timeout: {error}"))?;
+        let reader = stream
+            .try_clone()
+            .map_err(|error| format!("clone heartbeat stream: {error}"))?;
+        let mut command = String::new();
+        BufReader::new(reader)
+            .read_line(&mut command)
+            .map_err(|error| format!("read heartbeat command: {error}"))?;
+        Ok(command)
+    }
+
+    fn collect_immediate_heartbeats(
+        listener: &TcpListener,
+        window: Duration,
+    ) -> Result<Vec<String>, String> {
+        listener
+            .set_nonblocking(true)
+            .map_err(|error| format!("make follow-up listener nonblocking: {error}"))?;
+        let deadline = Instant::now() + window;
+        let mut commands = Vec::new();
+        while Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    commands.push(read_heartbeat_command(&stream)?);
+                    stream
+                        .write_all(b"OK\n")
+                        .map_err(|error| format!("acknowledge follow-up heartbeat: {error}"))?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                Err(error) => return Err(format!("follow-up heartbeat accept failed: {error}")),
+            }
+        }
+        Ok(commands)
+    }
+
+    #[test]
+    fn heartbeat_reservation_is_atomic_and_survives_send_failure() {
+        const CALLERS: usize = 4;
+        const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
+
+        let server = Arc::new(HyperMcpServer::with_no_daemon(None, false, false));
+        *server
+            .last_heartbeat
+            .lock()
+            .expect("heartbeat timestamp mutex") = Instant::now()
+            .checked_sub(HEARTBEAT_INTERVAL)
+            .expect("60-second heartbeat interval fits before current instant");
+
+        let peer = HeldHeartbeatPeer::spawn();
+        let barrier = Arc::new(Barrier::new(CALLERS + 1));
+        let (completed_tx, completed_rx) = mpsc::channel();
+        let mut callers = Vec::with_capacity(CALLERS);
+        for _ in 0..CALLERS {
+            let server = Arc::clone(&server);
+            let barrier = Arc::clone(&barrier);
+            let completed = completed_tx.clone();
+            let port = peer.port;
+            callers.push(std::thread::spawn(move || {
+                barrier.wait();
+                server.maybe_send_heartbeat(Some(port));
+                let _ = completed.send(());
+            }));
+        }
+        drop(completed_tx);
+        barrier.wait();
+
+        // With an atomic reservation, all but the single sender return while
+        // that sender remains blocked on the held response. The old split
+        // check/update lets every caller enter network I/O instead.
+        let early_deadline = Instant::now() + Duration::from_secs(2);
+        let mut early_completions = 0;
+        while early_completions < CALLERS - 1 {
+            let remaining = early_deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match completed_rx.recv_timeout(remaining) {
+                Ok(()) => early_completions += 1,
+                Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected) => {
+                    break;
+                }
+            }
+        }
+
+        let concurrent_commands = peer.release_and_join();
+        let caller_results: Vec<_> = callers.into_iter().map(JoinHandle::join).collect();
+
+        // Preserve the existing best-effort rule: even a refused connection
+        // consumes the debounce interval, so an immediate retry does not
+        // create a heartbeat storm while the daemon is unavailable.
+        let reservation =
+            TcpListener::bind(("127.0.0.1", 0)).expect("reserve a closed heartbeat port");
+        let failed_port = reservation
+            .local_addr()
+            .expect("closed heartbeat port address")
+            .port();
+        drop(reservation);
+        *server
+            .last_heartbeat
+            .lock()
+            .expect("heartbeat timestamp mutex") = Instant::now()
+            .checked_sub(HEARTBEAT_INTERVAL)
+            .expect("60-second heartbeat interval fits before current instant");
+        server.maybe_send_heartbeat(Some(failed_port));
+
+        let follow_up_listener = TcpListener::bind(("127.0.0.1", failed_port))
+            .expect("bind follow-up listener on refused heartbeat port");
+        let follow_up = std::thread::spawn(move || {
+            collect_immediate_heartbeats(&follow_up_listener, Duration::from_millis(300))
+        });
+        server.maybe_send_heartbeat(Some(failed_port));
+        let follow_up_commands = follow_up.join();
+
+        let mut failures = Vec::new();
+        match concurrent_commands {
+            Ok(commands) if commands == ["HEARTBEAT\n"] => {}
+            Ok(commands) => failures.push(format!(
+                "concurrent callers sent {} commands instead of one: {commands:?}",
+                commands.len()
+            )),
+            Err(error) => failures.push(error),
+        }
+        if early_completions != CALLERS - 1 {
+            failures.push(format!(
+                "only {early_completions} of {} non-senders returned before the held heartbeat was released",
+                CALLERS - 1
+            ));
+        }
+        for (index, result) in caller_results.into_iter().enumerate() {
+            if let Err(payload) = result {
+                failures.push(format!("heartbeat caller {index} panicked: {payload:?}"));
+            }
+        }
+        match follow_up_commands {
+            Ok(Ok(commands)) if commands.is_empty() => {}
+            Ok(Ok(commands)) => failures.push(format!(
+                "a failed heartbeat did not reserve the debounce interval; immediate retry sent {commands:?}"
+            )),
+            Ok(Err(error)) => failures.push(error),
+            Err(payload) => failures.push(format!("follow-up heartbeat peer panicked: {payload:?}")),
+        }
+
+        assert!(
+            failures.is_empty(),
+            "heartbeat reservation failures:\n{}",
+            failures.join("\n")
         );
     }
 }

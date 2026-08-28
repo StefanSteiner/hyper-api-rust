@@ -77,6 +77,26 @@ pub struct PersistentAttachOutcome {
     pub file_was_created: bool,
 }
 
+/// Typed view of the selected chart measure before JSON materialization can
+/// erase SQL nullability, non-finite floating-point state, or exact decimal
+/// display text.
+#[derive(Debug, Clone)]
+pub(crate) enum ChartMeasureValue {
+    Finite { coordinate: f64, display: String },
+    NonFinite,
+    Null,
+    NonNumeric,
+}
+
+/// JSON rows plus a row-aligned typed sidecar for the chart's measure column.
+/// This remains crate-private so ordinary query results keep their established
+/// JSON shapes.
+#[derive(Debug)]
+pub(crate) struct ChartQueryRows {
+    pub(crate) rows: Vec<Value>,
+    pub(crate) measures: Vec<ChartMeasureValue>,
+}
+
 /// Attach the persistent database under the reserved `"persistent"`
 /// alias on `connection`, creating the underlying `.hyper` file if it
 /// doesn't yet exist. Also pins `schema_search_path` to `primary_db_name`
@@ -93,24 +113,18 @@ fn attach_default_persistent(
             "CREATE DATABASE IF NOT EXISTS {}",
             escape_sql_path(&path_str)
         );
-        connection.execute_command(&create_sql).map_err(|e| {
-            McpError::new(
-                ErrorCode::InternalError,
-                format!("Failed to create persistent database: {e}"),
-            )
-        })?;
+        connection
+            .execute_command(&create_sql)
+            .map_err(|e| persistent_attach_error(e, persistent_path))?;
     }
     let attach_sql = format!(
         "ATTACH DATABASE {path} AS \"{alias}\"",
         path = escape_sql_path(&path_str),
         alias = PERSISTENT_ALIAS,
     );
-    connection.execute_command(&attach_sql).map_err(|e| {
-        McpError::new(
-            ErrorCode::InternalError,
-            format!("Failed to attach persistent database: {e}"),
-        )
-    })?;
+    connection
+        .execute_command(&attach_sql)
+        .map_err(|e| persistent_attach_error(e, persistent_path))?;
     // Pin search_path to the primary so unqualified SQL keeps routing
     // there even with the persistent attachment present. Mirrors the
     // logic AttachRegistry uses for user-attached databases.
@@ -125,6 +139,58 @@ fn attach_default_persistent(
         )
     })?;
     Ok(PersistentAttachOutcome { file_was_created })
+}
+
+/// True when a Hyper error from an `ATTACH DATABASE`-class statement means
+/// the target `.hyper` file is locked or already owned by another process.
+///
+/// SQLSTATE `55006` carries this meaning only in the attach context — the
+/// generic `From<hyperdb_api::Error>` conversion in [`crate::error`]
+/// deliberately leaves it as `SqlError` elsewhere. Older hyperd versions
+/// omit the structured code and emit only a human-readable lock phrase, so
+/// both spellings are checked.
+fn is_attach_lock_conflict(err: &hyperdb_api::Error) -> bool {
+    err.sqlstate() == Some("55006") || crate::error::is_resource_busy(&err.to_string())
+}
+
+/// Converts a Hyper error from the reserved persistent-attachment path.
+///
+/// SQLSTATE `55006` has enough meaning to be a lock conflict only here: the
+/// reserved persistent database is being created or attached. Older hyperd
+/// versions omit the structured SQLSTATE, so retain the established wording
+/// fallback for that boundary too.
+fn persistent_attach_error(err: hyperdb_api::Error, persistent_path: &Path) -> McpError {
+    if is_attach_lock_conflict(&err) {
+        let raw_error = err.to_string();
+        return McpError::new(
+            ErrorCode::ResourceBusy,
+            format!(
+                "Failed to attach persistent database {}: {raw_error}",
+                persistent_path.display()
+            ),
+        )
+        .with_suggestion(
+            "The persistent database may be held by another process. Run `hyperdb-mcp doctor` to inspect the configuration and possible owner, then close the possible owner or copy the file before retrying.",
+        );
+    }
+
+    McpError::from(err)
+}
+
+/// Converts a Hyper error from a user-facing `attach_database` on a
+/// caller-supplied `.hyper` file. Mirrors [`persistent_attach_error`] for
+/// the user attach path so a lock conflict surfaces as
+/// [`ErrorCode::ResourceBusy`] — with the default doctor-oriented recovery
+/// suggestion from [`crate::error`] — instead of a generic `SqlError`.
+fn attach_lock_error(err: hyperdb_api::Error, path: &Path) -> McpError {
+    if is_attach_lock_conflict(&err) {
+        return McpError::new(
+            ErrorCode::ResourceBusy,
+            format!("Failed to attach database {}: {err}", path.display()),
+        );
+    }
+
+    McpError::from(err)
 }
 
 /// File-stem of a `.hyper` path as the unqualified database name Hyper
@@ -256,7 +322,7 @@ impl Engine {
         // Resolve persistent path (if requested) and pre-create its parent dir.
         let persistent_path = match persistent_db_path.as_deref() {
             Some(p) => {
-                let path = PathBuf::from(shellexpand_tilde(p));
+                let path = crate::paths::effective_persistent_db_path(std::ffi::OsStr::new(p));
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent).map_err(|e| {
                         McpError::new(
@@ -394,7 +460,7 @@ impl Engine {
             // The daemon's discovery file points at this endpoint but we can't
             // reach it — hyperd is likely dead. Tell the daemon so it can
             // restart it on its next monitor tick.
-            daemon::health::report_hyperd_error_to_daemon();
+            daemon::health::report_hyperd_error_to_daemon(info.health_port);
             McpError::new(
                 ErrorCode::InternalError,
                 format!("Failed to connect to daemon hyperd at {endpoint}: {e}"),
@@ -697,6 +763,27 @@ impl Engine {
         self.connection.execute_command(sql).map_err(McpError::from)
     }
 
+    /// Execute an `ATTACH DATABASE` statement for a user-supplied `.hyper`
+    /// file, mapping a lock conflict (SQLSTATE `55006`, or a legacy
+    /// "already attached"/"file is locked" phrase from older hyperd) to
+    /// [`ErrorCode::ResourceBusy`] with actionable recovery guidance.
+    ///
+    /// The generic [`Engine::execute_command`] conversion deliberately
+    /// leaves `55006` as [`ErrorCode::SqlError`] because the code only means
+    /// "held by another owner" inside the attach context; this method is the
+    /// attach-context counterpart to `persistent_attach_error` for the
+    /// user-facing `attach_database` tool.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorCode::ResourceBusy`] on a lock conflict, otherwise the
+    /// same error [`Engine::execute_command`] would produce.
+    pub fn execute_attach_command(&self, sql: &str, path: &Path) -> Result<u64, McpError> {
+        self.connection
+            .execute_command(sql)
+            .map_err(|err| attach_lock_error(err, path))
+    }
+
     /// Run the given closure inside a database transaction.
     ///
     /// Issues `BEGIN TRANSACTION` before calling `f`. If `f` returns `Ok`,
@@ -843,6 +930,49 @@ impl Engine {
             }
         }
         Ok(rows_json)
+    }
+
+    /// Execute a chart query while retaining the selected measure's typed
+    /// state alongside the ordinary JSON rows. The sidecar is row-aligned and
+    /// is consumed only by the MCP chart renderer.
+    pub(crate) fn execute_chart_query_to_json(
+        &self,
+        sql: &str,
+        measure_column: Option<&str>,
+    ) -> Result<ChartQueryRows, McpError> {
+        let mut result = self.connection.execute_query(sql).map_err(McpError::from)?;
+
+        let mut rows_json = Vec::new();
+        let mut measures = Vec::new();
+        let mut schema_opt = None;
+        while let Some(chunk) = result.next_chunk().map_err(McpError::from)? {
+            if schema_opt.is_none() {
+                schema_opt = result.schema();
+            }
+            if let Some(ref schema) = schema_opt {
+                let columns = schema.columns();
+                // JSON object insertion keeps the last duplicate column name,
+                // so select the same occurrence for the typed sidecar.
+                let measure = measure_column
+                    .and_then(|name| columns.iter().rev().find(|column| column.name() == name));
+                for row in &chunk {
+                    let measure_value = measure.map_or(ChartMeasureValue::NonNumeric, |column| {
+                        chart_measure_value(row, column.index(), &column.sql_type())
+                    });
+                    let mut obj = serde_json::Map::new();
+                    for col in columns {
+                        let val = row_value_to_json(row, col.index(), &col.sql_type());
+                        obj.insert(col.name().to_string(), val);
+                    }
+                    rows_json.push(Value::Object(obj));
+                    measures.push(measure_value);
+                }
+            }
+        }
+        Ok(ChartQueryRows {
+            rows: rows_json,
+            measures,
+        })
     }
 
     /// Create a table from a schema definition.
@@ -1509,7 +1639,7 @@ impl Engine {
 /// | `BOOL` | `true`/`false` |
 /// | `SMALL_INT` / `INT` / `BIG_INT` | number |
 /// | `DOUBLE` / `FLOAT` | number |
-/// | `NUMERIC` | number when losslessly representable as `f64`, else string |
+/// | `NUMERIC` | number when representable as a finite `f64`, else string |
 /// | `DATE` | ISO 8601 date string (`YYYY-MM-DD`) |
 /// | `TIMESTAMP` / `TIMESTAMP_TZ` | ISO 8601 timestamp string |
 /// | `TEXT` / `VARCHAR` | string |
@@ -1565,12 +1695,12 @@ fn row_value_to_json(row: &hyperdb_api::Row, idx: usize, sql_type: &SqlType) -> 
         // handled inside `hyperdb-api`; this function only needs to pick
         // the JSON shape.
         //
-        // `Numeric::to_string()` uses the decoded scale, so round-trip
-        // through `f64` is only used for JSON compactness — if the
-        // value doesn't fit in `f64` losslessly (`serde_json::Number::
-        // from_f64` returns `None` for NaN/Infinity, and we can't
-        // always represent large i128 exactly as `f64`), fall back to
-        // the string form so the caller sees the exact value.
+        // `Numeric::to_string()` uses the decoded scale. Ordinary query
+        // results retain their established compact JSON shape: any value
+        // parseable as a finite `f64` becomes a JSON number, even when that
+        // conversion rounds, while values outside that domain remain exact
+        // strings. The chart-only materializer below retains the exact text
+        // separately for display labels.
         return row.get::<Numeric>(idx).map_or(Value::Null, |n| {
             let s = n.to_string();
             s.parse::<f64>()
@@ -1604,6 +1734,66 @@ fn row_value_to_json(row: &hyperdb_api::Row, idx: usize, sql_type: &SqlType) -> 
     // — add explicit branches above when those start appearing in
     // real queries.
     row.get::<String>(idx).map_or(Value::Null, Value::String)
+}
+
+fn chart_measure_value(
+    row: &hyperdb_api::Row,
+    idx: usize,
+    sql_type: &SqlType,
+) -> ChartMeasureValue {
+    use hyperdb_api::oids;
+    use hyperdb_api::Numeric;
+
+    if row.is_null(idx) {
+        return ChartMeasureValue::Null;
+    }
+
+    let oid = sql_type.internal_oid();
+    if oid == oids::DOUBLE.0 || oid == oids::FLOAT.0 {
+        return match row.get::<f64>(idx) {
+            Some(value) if value.is_finite() => ChartMeasureValue::Finite {
+                coordinate: value,
+                display: serde_json::Number::from_f64(value)
+                    .map_or_else(|| value.to_string(), |number| number.to_string()),
+            },
+            Some(_) => ChartMeasureValue::NonFinite,
+            None => ChartMeasureValue::NonNumeric,
+        };
+    }
+    if oid == oids::NUMERIC.0 {
+        return row
+            .get::<Numeric>(idx)
+            .map_or(ChartMeasureValue::NonNumeric, |numeric| {
+                let coordinate = numeric.to_f64();
+                if coordinate.is_finite() {
+                    ChartMeasureValue::Finite {
+                        coordinate,
+                        display: numeric.to_string(),
+                    }
+                } else {
+                    ChartMeasureValue::NonFinite
+                }
+            });
+    }
+
+    let json_value = row_value_to_json(row, idx, sql_type);
+    match json_value {
+        Value::Bool(value) => ChartMeasureValue::Finite {
+            coordinate: if value { 1.0 } else { 0.0 },
+            display: value.to_string(),
+        },
+        Value::Number(number) => number
+            .as_f64()
+            .map_or(ChartMeasureValue::NonNumeric, |value| {
+                ChartMeasureValue::Finite {
+                    coordinate: value,
+                    display: number.to_string(),
+                }
+            }),
+        Value::Null | Value::String(_) | Value::Array(_) | Value::Object(_) => {
+            ChartMeasureValue::NonNumeric
+        }
+    }
 }
 
 /// Name of the client-side log file written in [`resolve_log_dir`].
@@ -1650,7 +1840,7 @@ pub fn is_internal_table(name: &str) -> bool {
 pub fn resolve_log_dir(persistent_db_path: Option<&str>) -> PathBuf {
     match persistent_db_path {
         Some(p) => {
-            let expanded = PathBuf::from(shellexpand_tilde(p));
+            let expanded = crate::paths::effective_persistent_db_path(std::ffi::OsStr::new(p));
             expanded
                 .parent()
                 .map_or_else(|| PathBuf::from("."), std::path::Path::to_path_buf)
@@ -1916,47 +2106,6 @@ fn bootstrap_public_schema(connection: &Connection) -> Result<(), McpError> {
         })
 }
 
-/// Minimal `~/` (and `~\` on Windows) expansion. Resolves the home
-/// directory via `$HOME` on Unix and `%USERPROFILE%` (falling back to
-/// `%HOMEDRIVE%%HOMEPATH%`) on Windows. `~username/` is not supported —
-/// callers who need that should expand their paths themselves.
-fn shellexpand_tilde(path: &str) -> String {
-    let rest = if let Some(r) = path.strip_prefix("~/") {
-        Some(r)
-    } else if cfg!(windows) {
-        path.strip_prefix("~\\")
-    } else {
-        None
-    };
-    let Some(rest) = rest else {
-        return path.to_string();
-    };
-    let Some(home) = home_dir() else {
-        return path.to_string();
-    };
-    let sep = std::path::MAIN_SEPARATOR;
-    format!("{}{sep}{rest}", home.to_string_lossy())
-}
-
-/// Resolve the user's home directory across platforms. Unix uses `$HOME`;
-/// Windows prefers `%USERPROFILE%` and falls back to `%HOMEDRIVE%%HOMEPATH%`.
-fn home_dir() -> Option<PathBuf> {
-    if cfg!(windows) {
-        if let Some(profile) = std::env::var_os("USERPROFILE") {
-            if !profile.is_empty() {
-                return Some(PathBuf::from(profile));
-            }
-        }
-        let drive = std::env::var_os("HOMEDRIVE")?;
-        let rel = std::env::var_os("HOMEPATH")?;
-        let mut combined = PathBuf::from(drive);
-        combined.push(PathBuf::from(rel));
-        Some(combined)
-    } else {
-        std::env::var_os("HOME").map(PathBuf::from)
-    }
-}
-
 #[cfg(test)]
 mod statement_helper_tests {
     use super::*;
@@ -2014,6 +2163,116 @@ mod statement_helper_tests {
         assert_eq!(
             classify_statement("-- pretend to be readonly\nINSERT INTO t VALUES (1)"),
             StatementKind::Dml
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A lock conflict on a user-facing `attach_database` call must surface
+    /// as `RESOURCE_BUSY` (with doctor-oriented guidance), mirroring the
+    /// reserved persistent-attach path — the generic `From` conversion leaves
+    /// such a `55006` as `SqlError`, so the attach-context mapper is the only
+    /// place that reclassifies it for the user attach path.
+    #[test]
+    fn user_attach_55006_maps_resource_busy() {
+        let attach_path = PathBuf::from("/tmp/task-user-attach.hyper");
+        let upstream = hyperdb_api::Error::server(
+            Some("55006".to_string()),
+            "database is already attached by another client connection",
+            None,
+            None,
+        );
+
+        let mapped = attach_lock_error(upstream, &attach_path);
+
+        assert_eq!(mapped.code, ErrorCode::ResourceBusy);
+        assert!(
+            mapped.message.contains("55006"),
+            "must retain SQLSTATE evidence: {}",
+            mapped.message
+        );
+        assert!(
+            mapped.message.contains("already attached"),
+            "must retain Hyper's raw diagnostic: {}",
+            mapped.message
+        );
+        assert!(
+            mapped.message.contains(attach_path.to_str().unwrap()),
+            "must name the attach path: {}",
+            mapped.message
+        );
+        let guidance = mapped
+            .suggestion
+            .expect("RESOURCE_BUSY needs recovery guidance");
+        assert!(
+            guidance.to_lowercase().contains("doctor"),
+            "guidance must direct callers to doctor: {guidance}"
+        );
+    }
+
+    /// An unrelated `55006` from ordinary SQL (not an attach) must keep its
+    /// generic mapping even through the attach-context mapper — only genuine
+    /// attach-lock phrasing / the attach call site should reclassify.
+    #[test]
+    fn user_attach_maps_non_lock_error_generically() {
+        let upstream = hyperdb_api::Error::server(
+            Some("42601".to_string()),
+            "syntax error at or near \"ATTACH\"",
+            None,
+            None,
+        );
+
+        let mapped = attach_lock_error(upstream, &PathBuf::from("/tmp/task-user-attach.hyper"));
+
+        assert_eq!(mapped.code, ErrorCode::SqlError);
+        assert_ne!(mapped.code, ErrorCode::ResourceBusy);
+    }
+
+    /// SQLSTATE 55006 is only a lock conflict in the reserved persistent
+    /// attachment path. The conversion must retain Hyper's diagnostics while
+    /// adding actionable, non-accusatory recovery guidance for that path.
+    #[test]
+    fn persistent_attach_55006_maps_resource_busy() {
+        let persistent_path = PathBuf::from("/tmp/task7-persistent-workspace.hyper");
+        let upstream = hyperdb_api::Error::server(
+            Some("55006".to_string()),
+            "database is already attached by another client connection",
+            None,
+            None,
+        );
+
+        let mapped = persistent_attach_error(upstream, &persistent_path);
+
+        assert_eq!(mapped.code, ErrorCode::ResourceBusy);
+        assert!(
+            mapped.message.contains("55006"),
+            "must retain SQLSTATE evidence: {}",
+            mapped.message
+        );
+        assert!(
+            mapped.message.contains("already attached"),
+            "must retain Hyper's raw diagnostic: {}",
+            mapped.message
+        );
+        assert!(
+            mapped.message.contains(persistent_path.to_str().unwrap()),
+            "must name the exact effective persistent path: {}",
+            mapped.message
+        );
+        let guidance = mapped
+            .suggestion
+            .expect("RESOURCE_BUSY needs recovery guidance");
+        let lower = guidance.to_lowercase();
+        assert!(
+            lower.contains("doctor"),
+            "guidance must direct callers to doctor: {guidance}"
+        );
+        assert!(
+            lower.contains("possible") && (lower.contains("owner") || lower.contains("process")),
+            "guidance must describe a possible owner without accusing one: {guidance}"
         );
     }
 }
