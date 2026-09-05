@@ -1867,8 +1867,8 @@ impl InsertChunk {
 // ChunkSender - Mutex-protected sender for InsertChunks
 // =============================================================================
 
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 /// A thread-safe sender for [`InsertChunk`]s.
 ///

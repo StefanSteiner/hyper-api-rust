@@ -13,9 +13,9 @@
 use regex::Regex;
 use std::collections::HashMap;
 
+use crate::Error;
 use crate::platform::Platform;
 use crate::release::PinnedRelease;
-use crate::Error;
 
 const RELEASES_URL: &str = "https://tableau.github.io/hyper-db/docs/releases";
 

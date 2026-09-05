@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use hyperdb_api::pool::{create_pool, PoolConfig};
+use hyperdb_api::pool::{PoolConfig, create_pool};
 use hyperdb_api::{CreateMode, HyperProcess, Result};
 
 #[tokio::main]

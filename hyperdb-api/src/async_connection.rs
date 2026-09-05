@@ -9,13 +9,13 @@
 use std::any::Any;
 use std::sync::{Arc, Mutex};
 
+use crate::CreateMode;
 use crate::async_result::AsyncRowset;
 use crate::async_transport::{AsyncTcpTransport, AsyncTransport};
 use crate::error::{Error, Result};
 use crate::names::escape_sql_path;
 use crate::query_stats::{QueryStats, QueryStatsProvider};
 use crate::result::{Row, RowValue};
-use crate::CreateMode;
 
 /// An async connection to a Hyper database.
 ///
@@ -435,7 +435,7 @@ impl AsyncConnection {
     pub fn stream_as<'a, T: crate::FromRow + 'a>(
         &'a self,
         query: &str,
-    ) -> impl futures_core::Stream<Item = Result<T>> + 'a {
+    ) -> impl futures_core::Stream<Item = Result<T>> + 'a + use<'a, T> {
         // Own the query string so the stream doesn't borrow the &str arg
         // across await points.
         let query = query.to_owned();
@@ -563,7 +563,7 @@ impl AsyncConnection {
         &'a self,
         query: &str,
         params: &[&dyn crate::params::ToSqlParam],
-    ) -> impl futures_core::Stream<Item = Result<T>> + 'a {
+    ) -> impl futures_core::Stream<Item = Result<T>> + 'a + use<'a, T> {
         // `&[&dyn ToSqlParam]` can't cross the `try_stream!` await points, so
         // own the query string and encode params up front (encoding needs no
         // connection). The prepare+execute sequence below mirrors

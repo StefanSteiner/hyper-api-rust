@@ -386,11 +386,11 @@ pub fn ping_identified(
 
 #[cfg(test)]
 mod tests {
-    use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
+    use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
     use std::sync::mpsc::{self, Receiver, Sender};
     use std::thread::JoinHandle;
 
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     use crate::diagnostics::ReportedPath;
 

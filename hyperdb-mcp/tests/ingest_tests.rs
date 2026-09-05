@@ -7,8 +7,8 @@
 mod common;
 use common::TestEngine;
 use hyperdb_mcp::ingest::{
-    detect_file_format, extract_json_path, ingest_csv, ingest_csv_file, ingest_json,
-    ingest_json_file, InferredFileFormat, IngestOptions,
+    InferredFileFormat, IngestOptions, detect_file_format, extract_json_path, ingest_csv,
+    ingest_csv_file, ingest_json, ingest_json_file,
 };
 use std::io::Write;
 use tempfile::TempPath;

@@ -11,7 +11,7 @@ use std::io::{BufRead as _, BufReader, Write as _};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::{mpsc, Arc, Mutex, OnceLock, TryLockError};
+use std::sync::{Arc, Mutex, OnceLock, TryLockError, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -19,7 +19,7 @@ use common::TestEngine;
 use hyperdb_api::{HyperProcess, Parameters, TransportMode};
 use hyperdb_mcp::daemon::discovery::{self, DaemonInfo};
 use hyperdb_mcp::daemon::health;
-use hyperdb_mcp::error::{is_connection_lost, ErrorCode};
+use hyperdb_mcp::error::{ErrorCode, is_connection_lost};
 use hyperdb_mcp::server::HyperMcpServer;
 
 const SLOW_HEALTH_CHILD_ENV: &str = "HYPERDB_MCP_SLOW_HEALTH_CHILD";

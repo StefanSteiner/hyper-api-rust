@@ -4,8 +4,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use napi::bindgen_prelude::*;
 use napi::Unknown;
+use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 #[allow(

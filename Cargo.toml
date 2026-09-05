@@ -1,5 +1,5 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
     "hyperdb-api-core",
     "hyperdb-api",
@@ -27,7 +27,7 @@ exclude = ["hyperdb-compile-check"]
 
 [workspace.package]
 version = "0.7.3"
-edition = "2021"
+edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/tableau/hyper-api-rust"

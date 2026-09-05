@@ -106,7 +106,7 @@ fn query_after_abandoned_result_stream() -> Result<()> {
             .connection
             .execute_query("SELECT * FROM many ORDER BY i")?;
         let _first = rs.next_chunk()?; // partial read
-                                       // `rs` is dropped here — drain must happen in Drop impl.
+        // `rs` is dropped here — drain must happen in Drop impl.
     }
 
     // Fresh query on the same connection must produce correct result.

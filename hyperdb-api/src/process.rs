@@ -65,8 +65,8 @@ use std::io::Read;
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -1105,7 +1105,7 @@ impl HyperProcess {
                             thread::sleep(Duration::from_millis(100));
                         }
                         Err(e) => {
-                            break Err(Error::connection_with_io("Failed to wait for hyperd", e))
+                            break Err(Error::connection_with_io("Failed to wait for hyperd", e));
                         }
                     }
                 }

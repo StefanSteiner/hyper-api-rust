@@ -397,7 +397,7 @@ impl DataCloudToken {
 
 /// Decodes a base64url-encoded string.
 fn base64_url_decode(input: &str) -> SalesforceAuthResult<Vec<u8>> {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 
     // Handle both padded and unpadded base64url
     let padded = match input.len() % 4 {

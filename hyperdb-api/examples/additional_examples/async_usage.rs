@@ -126,8 +126,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error + Send + Sy
 // Part 1: AsyncConnection API
 // =============================================================================
 
-async fn demonstrate_async_connection(
-) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn demonstrate_async_connection()
+-> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Initialize logging (optional)
     // tracing_subscriber::fmt()
     //     .with_env_filter("hyperdb_api=debug")
@@ -188,8 +188,8 @@ async fn demonstrate_async_connection(
 // Part 2: Tokio Integration with spawn_blocking
 // =============================================================================
 
-async fn demonstrate_spawn_blocking(
-) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn demonstrate_spawn_blocking()
+-> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Setup database
     println!("Setting up database (blocking operation)...");
 

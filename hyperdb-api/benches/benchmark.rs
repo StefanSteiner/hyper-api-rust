@@ -36,8 +36,8 @@ use hyperdb_api::{
     SqlType, TableDefinition, TransportMode,
 };
 use std::env;
-use std::sync::mpsc;
 use std::sync::Arc;
+use std::sync::mpsc;
 use std::thread;
 
 use common::{ResourceMonitor, ResourceStats, SAMPLE_INTERVAL_MS};

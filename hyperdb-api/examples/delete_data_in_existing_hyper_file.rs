@@ -13,8 +13,8 @@
 //! Run with: cargo run -p hyperdb-api --example `delete_data_in_existing_hyper_file`
 
 use hyperdb_api::{
-    escape_name, escape_string_literal, Catalog, Connection, CreateMode, Date, HyperProcess,
-    Inserter, Result, SqlType, TableDefinition,
+    Catalog, Connection, CreateMode, Date, HyperProcess, Inserter, Result, SqlType,
+    TableDefinition, escape_name, escape_string_literal,
 };
 
 /// Creates the Orders table definition.

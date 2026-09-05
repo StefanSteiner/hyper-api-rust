@@ -10,13 +10,13 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::Error;
 use crate::download::download_and_verify;
 use crate::extract::extract_hyperd;
 use crate::platform::Platform;
 use crate::release::PinnedRelease;
 use crate::scrape::scrape_latest;
 use crate::url::build_download_url;
-use crate::Error;
 
 /// Default directory (relative to CWD) used when [`InstallOptions::dest_root`]
 /// is left at its default. Laid out as

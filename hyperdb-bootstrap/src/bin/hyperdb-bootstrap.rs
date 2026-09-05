@@ -16,8 +16,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{ArgGroup, Args, Parser, Subcommand};
 use hyperdb_bootstrap::{
-    install, verify_release, InstallOptions, InstalledHyperd, PinnedRelease, Platform,
-    VersionSource, DEFAULT_DEST_ROOT,
+    DEFAULT_DEST_ROOT, InstallOptions, InstalledHyperd, PinnedRelease, Platform, VersionSource,
+    install, verify_release,
 };
 
 // CARGO_PKG_VERSION + git short hash captured by build.rs. Both are

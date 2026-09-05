@@ -112,14 +112,14 @@ use std::pin::Pin;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use deadpool::managed::{self, Manager, Metrics, RecycleError, RecycleResult, Timeouts};
 use deadpool::Runtime;
+use deadpool::managed::{self, Manager, Metrics, RecycleError, RecycleResult, Timeouts};
 use tokio::sync::Mutex as AsyncMutex;
 
+use crate::CreateMode;
 use crate::async_connection::AsyncConnection;
 use crate::connection::Connection;
 use crate::error::{Error, Result};
-use crate::CreateMode;
 
 /// Future returned by pool lifecycle hooks.
 pub type HookFuture<'a> = Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>;

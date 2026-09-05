@@ -303,8 +303,7 @@ mod tests {
 
         const CHILD_SENTINEL: &str = "HYPERDB_MCP_PATHS_NESTED_TILDE_CHILD";
         const CHILD_SENTINEL_VALUE: &str = "nested-tilde-source-child-v1";
-        const TEST_NAME: &str =
-            "paths::tests::nested_tilde_source_resolution_preserves_raw_input_for_one_runtime_expansion";
+        const TEST_NAME: &str = "paths::tests::nested_tilde_source_resolution_preserves_raw_input_for_one_runtime_expansion";
 
         if std::env::var(CHILD_SENTINEL).as_deref() == Ok(CHILD_SENTINEL_VALUE) {
             let legacy = resolve_persistent_db_path(Some("~/data.hyper"));

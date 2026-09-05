@@ -328,7 +328,7 @@ mod tests {
         let hyper = OffsetTimestamp::new(ts, 120); // +02:00
         let chrono: DateTime<chrono::FixedOffset> = hyper.try_into().unwrap();
         assert_eq!(chrono.offset().local_minus_utc(), 7200); // 120 minutes = 7200 seconds
-                                                             // Local time should be 12:30 (+02:00 from 10:30 UTC)
+        // Local time should be 12:30 (+02:00 from 10:30 UTC)
         assert_eq!(chrono.hour(), 12);
         assert_eq!(chrono.minute(), 30);
     }

@@ -502,8 +502,8 @@ async fn load_files_runs_parallel_parquet_ingests() {
     use arrow::array::Int64Array;
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use hyperdb_api::pool::{create_pool, PoolConfig};
     use hyperdb_api::CreateMode;
+    use hyperdb_api::pool::{PoolConfig, create_pool};
     use hyperdb_mcp::ingest_arrow::ingest_parquet_file_async;
     use parquet::arrow::ArrowWriter;
     use std::fs::File;

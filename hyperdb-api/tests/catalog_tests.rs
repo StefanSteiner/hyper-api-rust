@@ -174,22 +174,28 @@ fn test_catalog_has_schema() {
     let catalog = Catalog::new(&test.connection);
 
     // 'public' schema should exist by default
-    assert!(catalog
-        .has_schema("public")
-        .expect("Failed to check schema"));
+    assert!(
+        catalog
+            .has_schema("public")
+            .expect("Failed to check schema")
+    );
 
     // Non-existent schema
-    assert!(!catalog
-        .has_schema("nonexistent")
-        .expect("Failed to check schema"));
+    assert!(
+        !catalog
+            .has_schema("nonexistent")
+            .expect("Failed to check schema")
+    );
 
     // Create a new schema
     test.execute_command("CREATE SCHEMA newschema")
         .expect("Failed to create schema");
 
-    assert!(catalog
-        .has_schema("newschema")
-        .expect("Failed to check schema"));
+    assert!(
+        catalog
+            .has_schema("newschema")
+            .expect("Failed to check schema")
+    );
 }
 
 #[test]
@@ -199,16 +205,20 @@ fn test_catalog_has_table() {
     let catalog = Catalog::new(&test.connection);
 
     // Table doesn't exist yet
-    assert!(!catalog
-        .has_table("my_table")
-        .expect("Failed to check table"));
+    assert!(
+        !catalog
+            .has_table("my_table")
+            .expect("Failed to check table")
+    );
 
     // Create the table
     test.execute_command("CREATE TABLE my_table (id INT)")
         .expect("Failed to create table");
 
     // Now it should exist
-    assert!(catalog
-        .has_table("my_table")
-        .expect("Failed to check table"));
+    assert!(
+        catalog
+            .has_table("my_table")
+            .expect("Failed to check table")
+    );
 }

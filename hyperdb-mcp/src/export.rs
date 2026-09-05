@@ -139,7 +139,7 @@ pub fn export_to_file(engine: &Engine, opts: &ExportOptions) -> Result<ExportRes
             return Err(McpError::new(
                 ErrorCode::SqlError,
                 "Either sql or table must be provided",
-            ))
+            ));
         }
     };
 
@@ -593,7 +593,7 @@ fn list_user_tables(
 #[cfg(test)]
 mod tests {
     use super::{render_copy_with_clause, validate_option_key};
-    use serde_json::{json, Map, Value};
+    use serde_json::{Map, Value, json};
 
     #[test]
     fn render_clause_without_extras_returns_base() {

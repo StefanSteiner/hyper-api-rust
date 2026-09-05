@@ -3,8 +3,8 @@
 
 //! Configuration for Salesforce Data Cloud authentication.
 
-use rsa::pkcs8::DecodePrivateKey;
 use rsa::RsaPrivateKey;
+use rsa::pkcs8::DecodePrivateKey;
 use url::Url;
 use zeroize::Zeroizing;
 

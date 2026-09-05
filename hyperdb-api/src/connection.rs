@@ -17,7 +17,7 @@ use hyperdb_api_core::client::Client;
 use crate::error::{Error, Result};
 use crate::names::escape_sql_path;
 use crate::process::HyperProcess;
-use crate::result::{Row, Rowset, DEFAULT_BINARY_CHUNK_SIZE};
+use crate::result::{DEFAULT_BINARY_CHUNK_SIZE, Row, Rowset};
 use crate::transport::Transport;
 
 use std::any::Any;
@@ -837,7 +837,10 @@ impl Connection {
     /// succeeded.
     ///
     /// [`FromRow`]: crate::FromRow
-    pub fn stream_as<'a, T>(&'a self, query: &str) -> Result<impl Iterator<Item = Result<T>> + 'a>
+    pub fn stream_as<'a, T>(
+        &'a self,
+        query: &str,
+    ) -> Result<impl Iterator<Item = Result<T>> + 'a + use<'a, T>>
     where
         T: crate::FromRow + 'a,
     {
@@ -1002,7 +1005,7 @@ impl Connection {
         &'a self,
         query: &str,
         params: &[&dyn crate::params::ToSqlParam],
-    ) -> Result<impl Iterator<Item = Result<T>> + 'a>
+    ) -> Result<impl Iterator<Item = Result<T>> + 'a + use<'a, T>>
     where
         T: crate::FromRow + 'a,
     {

@@ -26,8 +26,8 @@
 use crate::engine::Engine;
 use crate::error::{ErrorCode, McpError};
 use crate::schema::{
-    apply_schema_override, infer_csv_schema, infer_json_schema, json_type_name,
-    widen_csv_numeric_columns, ColumnSchema,
+    ColumnSchema, apply_schema_override, infer_csv_schema, infer_json_schema, json_type_name,
+    widen_csv_numeric_columns,
 };
 use crate::stats::{IngestStats, StatsTimer};
 use hyperdb_api::AsyncConnection;

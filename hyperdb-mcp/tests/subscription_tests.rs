@@ -12,7 +12,7 @@
 //! whenever an MCP handler hits them indirectly.
 
 use hyperdb_mcp::subscriptions::{
-    uris_for_table_change, uris_for_workspace_change, SubscriptionRegistry,
+    SubscriptionRegistry, uris_for_table_change, uris_for_workspace_change,
 };
 
 #[test]
@@ -72,9 +72,10 @@ fn uris_for_table_change_interpolates_the_table_name_verbatim() {
     let uris = uris_for_table_change("sales_2023");
     assert!(uris.iter().any(|u| u == "hyper://tables/sales_2023/schema"));
     assert!(uris.iter().any(|u| u == "hyper://tables/sales_2023/sample"));
-    assert!(uris
-        .iter()
-        .any(|u| u == "hyper://tables/sales_2023/csv-sample"));
+    assert!(
+        uris.iter()
+            .any(|u| u == "hyper://tables/sales_2023/csv-sample")
+    );
 }
 
 #[test]

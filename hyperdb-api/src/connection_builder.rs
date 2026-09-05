@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crate::connection::{Connection, CreateMode};
 use crate::error::{Error, Result};
-use crate::transport::{detect_transport_type, Transport, TransportType};
+use crate::transport::{Transport, TransportType, detect_transport_type};
 use hyperdb_api_core::client::Config;
 
 /// A builder for creating database connections.
@@ -283,7 +283,7 @@ impl ConnectionBuilder {
             match endpoint {
                 ConnectionEndpoint::DomainSocket { directory, name } => directory.join(&name),
                 ConnectionEndpoint::Tcp { .. } => {
-                    return Err(Error::config("expected Unix domain socket endpoint"))
+                    return Err(Error::config("expected Unix domain socket endpoint"));
                 }
             }
         } else {

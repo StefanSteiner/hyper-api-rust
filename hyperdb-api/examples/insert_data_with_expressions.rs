@@ -14,8 +14,8 @@
 //! Run with: cargo run -p hyperdb-api --example `insert_data_with_expressions`
 
 use hyperdb_api::{
-    escape_name, escape_string_literal, Catalog, ColumnMapping, Connection, CreateMode,
-    HyperProcess, Inserter, Result, SqlType, TableDefinition,
+    Catalog, ColumnMapping, Connection, CreateMode, HyperProcess, Inserter, Result, SqlType,
+    TableDefinition, escape_name, escape_string_literal,
 };
 
 /// Creates the Extract table definition (target table).

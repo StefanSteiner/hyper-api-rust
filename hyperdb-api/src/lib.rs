@@ -194,7 +194,7 @@ mod proofs;
 pub use arrow_inserter::ArrowInserter;
 pub use arrow_reader::ArrowReader;
 pub use arrow_result::{
-    parse_arrow_ipc, ArrowChunk, ArrowRow, ArrowRowset, ChunkSource, FromArrowValue,
+    ArrowChunk, ArrowRow, ArrowRowset, ChunkSource, FromArrowValue, parse_arrow_ipc,
 };
 pub use async_arrow_inserter::{AsyncArrowInserter, AsyncArrowInserterOwned};
 pub use async_connection::AsyncConnection;
@@ -216,7 +216,7 @@ pub use hyperdb_api_core::client::{Notice, NoticeReceiver};
 pub use inserter::{ChunkSender, ColumnMapping, InsertChunk, Inserter, IntoValue, MappedInserter};
 pub use kv_store::{BatchGuardOutcome, BatchSetOutcome, KvStore, SetOutcome};
 pub use names::{
-    escape_name, escape_sql_path, escape_string_literal, DatabaseName, Name, SchemaName, TableName,
+    DatabaseName, Name, SchemaName, TableName, escape_name, escape_sql_path, escape_string_literal,
 };
 pub use process::{HyperProcess, ListenMode, Parameters, TransportMode};
 pub use query_stats::{LogFileStatsProvider, QueryStats, QueryStatsProvider};

@@ -4,7 +4,7 @@
 //! Integration tests for hyperd-bootstrap URL and install flows.
 
 use hyperdb_bootstrap::{
-    install, url::build_download_url, InstallOptions, PinnedRelease, Platform, VersionSource,
+    InstallOptions, PinnedRelease, Platform, VersionSource, install, url::build_download_url,
 };
 
 #[test]
@@ -13,9 +13,11 @@ fn builtin_release_builds_a_valid_url() {
     let url = build_download_url(&r, Platform::LinuxX86_64);
     assert!(url.starts_with("https://downloads.tableau.com/tssoftware/"));
     assert!(url.contains("java-linux-x86_64"));
-    assert!(std::path::Path::new(&url)
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("zip")));
+    assert!(
+        std::path::Path::new(&url)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
+    );
     assert!(url.contains(&r.version));
     assert!(url.contains(&r.build_id));
 }
@@ -41,11 +43,13 @@ fn install_end_to_end_with_builtin() {
     })
     .expect("install should succeed");
     assert!(installed.binary_path.exists());
-    assert!(installed
-        .binary_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|n| n.starts_with("hyperd")));
+    assert!(
+        installed
+            .binary_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("hyperd"))
+    );
 }
 
 #[test]

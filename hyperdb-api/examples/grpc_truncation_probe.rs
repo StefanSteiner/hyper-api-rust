@@ -20,8 +20,8 @@
 )]
 
 use hyperdb_api::{
-    grpc::TransferMode, Connection, ConnectionBuilder, CreateMode, HyperProcess, ListenMode,
-    Parameters,
+    Connection, ConnectionBuilder, CreateMode, HyperProcess, ListenMode, Parameters,
+    grpc::TransferMode,
 };
 use std::net::TcpListener;
 

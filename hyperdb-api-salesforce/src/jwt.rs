@@ -9,7 +9,7 @@
 //! See: <https://help.salesforce.com/s/articleView?id=xcloud.remoteaccess_oauth_jwt_flow.htm>
 
 use chrono::{Duration, Utc};
-use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use rsa::RsaPrivateKey;
 use serde::Serialize;
 
@@ -142,7 +142,7 @@ mod tests {
         assert_eq!(parts.len(), 3);
 
         // Verify we can decode the header
-        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
         let header_json = URL_SAFE_NO_PAD.decode(parts[0]).unwrap();
         let header: serde_json::Value = serde_json::from_slice(&header_json).unwrap();
         assert_eq!(header["alg"], "RS256");

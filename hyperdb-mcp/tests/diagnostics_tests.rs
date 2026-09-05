@@ -6,10 +6,10 @@
 use std::ffi::{OsStr, OsString};
 
 use hyperdb_mcp::diagnostics::{
-    installation_identity_from_parts, parse_launcher_identity, IdentityWarning, PathEncoding,
-    ReportedPath,
+    IdentityWarning, PathEncoding, ReportedPath, installation_identity_from_parts,
+    parse_launcher_identity,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 fn launcher_json(
     wrapper_name: &str,

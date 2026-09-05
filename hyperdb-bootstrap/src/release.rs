@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::platform::Platform;
 use crate::Error;
+use crate::platform::Platform;
 
 const BUILTIN_TOML: &str = include_str!("../hyperd-version.toml");
 

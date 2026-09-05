@@ -6,8 +6,8 @@
 use crate::async_connection::AsyncConnection;
 use crate::error::{Error, Result};
 use crate::kv_store::{
-    kv_create_table_sql, kv_target_prefix, validate_kv_name, BatchGuardOutcome, BatchSetOutcome,
-    SetOutcome, KV_TABLE,
+    BatchGuardOutcome, BatchSetOutcome, KV_TABLE, SetOutcome, kv_create_table_sql,
+    kv_target_prefix, validate_kv_name,
 };
 
 /// A handle to one named key-value store over an [`AsyncConnection`].

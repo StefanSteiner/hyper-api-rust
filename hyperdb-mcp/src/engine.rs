@@ -53,9 +53,9 @@ use crate::daemon;
 use crate::error::{ErrorCode, McpError};
 use crate::schema::ColumnSchema;
 use hyperdb_api::{
-    escape_sql_path, Catalog, Connection, CreateMode, HyperProcess, Parameters, SqlType,
+    Catalog, Connection, CreateMode, HyperProcess, Parameters, SqlType, escape_sql_path,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1741,8 +1741,8 @@ fn chart_measure_value(
     idx: usize,
     sql_type: &SqlType,
 ) -> ChartMeasureValue {
-    use hyperdb_api::oids;
     use hyperdb_api::Numeric;
+    use hyperdb_api::oids;
 
     if row.is_null(idx) {
         return ChartMeasureValue::Null;

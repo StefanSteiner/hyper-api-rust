@@ -19,7 +19,7 @@ use crate::protocol::message::backend::Message;
 use tracing::warn;
 
 use super::cancel::Cancellable;
-use super::connection::{parse_error_response, RawConnection};
+use super::connection::{RawConnection, parse_error_response};
 use super::error::Result;
 use super::row::StreamRow;
 use super::statement::Column;

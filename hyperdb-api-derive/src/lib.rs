@@ -51,8 +51,8 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{
-    parse_macro_input, spanned::Spanned, Data, DataStruct, DeriveInput, Field, Fields,
-    GenericArgument, LitInt, LitStr, PathArguments, Type, TypePath,
+    Data, DataStruct, DeriveInput, Field, Fields, GenericArgument, LitInt, LitStr, PathArguments,
+    Type, TypePath, parse_macro_input, spanned::Spanned,
 };
 
 /// How a field maps to a column. Either by name (the default or
@@ -122,7 +122,7 @@ pub fn query_as(input: TokenStream) -> TokenStream {
 }
 
 fn expand_query_as(input: &TokenStream2) -> syn::Result<TokenStream2> {
-    use syn::{parse::Parser, punctuated::Punctuated, Expr, Token};
+    use syn::{Expr, Token, parse::Parser, punctuated::Punctuated};
 
     // Parse: Type, "sql_literal" [, expr, expr, ...]
     let parser = Punctuated::<Expr, Token![,]>::parse_terminated;
@@ -202,7 +202,7 @@ pub fn query_scalar(input: TokenStream) -> TokenStream {
 }
 
 fn expand_query_scalar(input: &TokenStream2) -> syn::Result<TokenStream2> {
-    use syn::{parse::Parser, punctuated::Punctuated, Expr, Token};
+    use syn::{Expr, Token, parse::Parser, punctuated::Punctuated};
 
     let parser = Punctuated::<Expr, Token![,]>::parse_terminated;
     let args = parser.parse2(input.clone())?;

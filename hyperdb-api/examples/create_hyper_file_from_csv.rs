@@ -13,8 +13,8 @@
 //! Run with: cargo run -p hyperdb-api --example `create_hyper_file_from_csv`
 
 use hyperdb_api::{
-    escape_string_literal, Catalog, Connection, CreateMode, HyperProcess, Parameters, Result,
-    SqlType, TableDefinition,
+    Catalog, Connection, CreateMode, HyperProcess, Parameters, Result, SqlType, TableDefinition,
+    escape_string_literal,
 };
 
 /// Creates the Customer table definition.
@@ -73,7 +73,9 @@ fn run_create_hyper_file_from_csv() -> Result<()> {
             //
             // The parameters of the COPY command are documented in the Tableau Hyper SQL documentation
             // (https://tableau.github.io/hyper-db/docs/sql/command/copy_from).
-            println!("Issuing the SQL COPY command to load the csv file into the table. Since the first line");
+            println!(
+                "Issuing the SQL COPY command to load the csv file into the table. Since the first line"
+            );
             println!(
                 "of our csv file contains the column names, we use the `header` option to skip it."
             );

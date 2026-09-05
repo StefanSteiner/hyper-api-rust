@@ -181,8 +181,8 @@ pub mod rustls_impl {
     use rustls::pki_types::pem::PemObject;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
     use tokio::net::TcpStream;
-    use tokio_rustls::rustls::{ClientConfig, RootCertStore};
     use tokio_rustls::TlsConnector;
+    use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 
     use crate::client::error::{Error, ErrorKind, Result};
 

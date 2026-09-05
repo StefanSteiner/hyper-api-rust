@@ -51,15 +51,15 @@ use crate::attach::{AttachRegistry, AttachSource};
 use crate::engine::Engine;
 use crate::error::{ErrorCode, McpError};
 use crate::ingest::{
-    detect_file_format, ingest_csv_file_async, ingest_json_file_async, InferredFileFormat,
-    IngestOptions,
+    InferredFileFormat, IngestOptions, detect_file_format, ingest_csv_file_async,
+    ingest_json_file_async,
 };
 use crate::ingest_arrow::{ingest_arrow_ipc_file_async, ingest_parquet_file_async};
-use crate::subscriptions::{uris_for_table_change, SubscriptionRegistry};
-use hyperdb_api::pool::{create_pool, Pool, PoolConfig};
+use crate::subscriptions::{SubscriptionRegistry, uris_for_table_change};
 use hyperdb_api::CreateMode;
+use hyperdb_api::pool::{Pool, PoolConfig, create_pool};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};

@@ -8,7 +8,7 @@ mod common;
 
 use common::TestEngine;
 use hyperdb_mcp::engine::Engine;
-use hyperdb_mcp::ingest::{ingest_json, IngestOptions};
+use hyperdb_mcp::ingest::{IngestOptions, ingest_json};
 use serde_json::Value;
 
 /// Run a SELECT and return the rows. A known pre-existing wire-protocol

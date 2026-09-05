@@ -9,13 +9,13 @@
 
 mod common;
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use common::{test_hyper_params, test_result_path};
 use hyperdb_api::pool::{
-    create_pool, ConnectionPool, PoolConfig, RecycleStrategy, SyncPoolConfig, SyncRecycleStrategy,
+    ConnectionPool, PoolConfig, RecycleStrategy, SyncPoolConfig, SyncRecycleStrategy, create_pool,
 };
 use hyperdb_api::{CreateMode, HyperProcess, Result};
 

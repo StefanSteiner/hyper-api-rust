@@ -19,7 +19,7 @@ use rmcp::service::{RoleClient, RunningService};
 use rmcp::{ClientHandler, ServiceExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
@@ -3440,10 +3440,12 @@ async fn resolved_database_data_success_shapes() -> TestResult {
                 &["files_failed", "files_ingested"],
             );
             if payload["directory"]
-                != serde_json::json!(canonical_watch_dir
-                    .as_deref()
-                    .unwrap_or_else(|| watch_dir.path())
-                    .to_string_lossy())
+                != serde_json::json!(
+                    canonical_watch_dir
+                        .as_deref()
+                        .unwrap_or_else(|| watch_dir.path())
+                        .to_string_lossy()
+                )
                 || payload["table"] != serde_json::json!("file_attached")
                 || payload["status"] != serde_json::json!("watching")
                 || payload["max_concurrent"] != serde_json::json!(1)

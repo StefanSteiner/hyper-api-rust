@@ -26,8 +26,8 @@
     reason = "example harness: demo counts narrow by construction"
 )]
 
-use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
+use std::sync::mpsc::{self, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 

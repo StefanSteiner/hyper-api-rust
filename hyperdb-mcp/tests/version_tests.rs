@@ -12,7 +12,7 @@
 //!   commit can be told apart),
 //! * `unknown` (no git binary at build time).
 
-use hyperdb_mcp::version::{hyper_api_version_string, mcp_version_string, GIT_HASH, MCP_VERSION};
+use hyperdb_mcp::version::{GIT_HASH, MCP_VERSION, hyper_api_version_string, mcp_version_string};
 
 /// `YYYYMMDDTHHMMSSZ` — 16 chars, all digits except a `T` at position
 /// 8 and a `Z` at position 15. Deliberately strict so a malformed

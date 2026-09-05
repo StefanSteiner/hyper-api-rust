@@ -16,9 +16,9 @@ use tracing::{error, info, warn};
 
 use hyperdb_api::{HyperProcess, Parameters, TransportMode};
 
+use super::ENV_IDLE_TIMEOUT;
 use super::discovery::{self, DaemonInfo};
 use super::health::{DaemonState, HealthListener};
-use super::ENV_IDLE_TIMEOUT;
 
 /// Configuration for the daemon process.
 #[derive(Debug)]

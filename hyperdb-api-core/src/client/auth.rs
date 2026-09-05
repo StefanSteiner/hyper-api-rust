@@ -44,7 +44,7 @@
 //! derived key material. See the `NOTICE` file at the repo root for the full
 //! upstream copyright and reproduced license text.
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use hmac::{Hmac, KeyInit, Mac};
 use md5::{Digest, Md5};
 use pbkdf2::pbkdf2_hmac;

@@ -27,11 +27,11 @@ use hyperdb_mcp::daemon::discovery;
 use hyperdb_mcp::daemon::health;
 use hyperdb_mcp::daemon::run::DaemonConfig;
 use hyperdb_mcp::diagnostics::{self, DoctorOptions};
-use hyperdb_mcp::engine::{resolve_log_dir, CLIENT_LOG_FILE_NAME};
+use hyperdb_mcp::engine::{CLIENT_LOG_FILE_NAME, resolve_log_dir};
 use hyperdb_mcp::paths;
 use hyperdb_mcp::server::HyperMcpServer;
 use rmcp::ServiceExt;
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 // Both MCP_VERSION and HYPERDB_GIT_HASH are env! string literals, so this
 // concat! resolves at compile time into a single &'static str — exactly

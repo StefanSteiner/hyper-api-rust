@@ -433,7 +433,9 @@ pub(crate) fn records_to_json(records: &[BenchRecord], env: &HostEnv) -> String 
     );
     out.push_str("},\n  \"records\": [\n");
     for (i, r) in records.iter().enumerate() {
-        let _ = writeln!(out, "    {{\"workload\": {:?}, \"variant\": {:?}, \"flavor\": {:?}, \"rows\": {}, \"bytes\": {}, \"elapsed_secs\": {:.6}, \"rows_per_sec\": {:.3}, \"mb_per_sec\": {:.3}}}{}\n",
+        let _ = writeln!(
+            out,
+            "    {{\"workload\": {:?}, \"variant\": {:?}, \"flavor\": {:?}, \"rows\": {}, \"bytes\": {}, \"elapsed_secs\": {:.6}, \"rows_per_sec\": {:.3}, \"mb_per_sec\": {:.3}}}{}\n",
             r.workload,
             r.variant,
             r.flavor,
@@ -442,7 +444,8 @@ pub(crate) fn records_to_json(records: &[BenchRecord], env: &HostEnv) -> String 
             r.elapsed_secs,
             r.rows_per_sec(),
             r.mb_per_sec(),
-            if i + 1 < records.len() { "," } else { "" });
+            if i + 1 < records.len() { "," } else { "" }
+        );
     }
     out.push_str("  ]\n}\n");
     out

@@ -70,7 +70,7 @@
 //! [`AsyncConnection`](crate::AsyncConnection) equivalents).
 
 use hyperdb_api_core::types::{
-    oids, Date, Interval, Numeric, OffsetTimestamp, Oid, Time, Timestamp,
+    Date, Interval, Numeric, OffsetTimestamp, Oid, Time, Timestamp, oids,
 };
 
 /// Trait for types that can be used as parameters in parameterized SQL queries.

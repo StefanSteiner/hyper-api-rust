@@ -66,7 +66,7 @@
 
 use std::fmt::Write as _;
 
-use crate::engine::{is_internal_table, Engine};
+use crate::engine::{Engine, is_internal_table};
 use crate::error::{ErrorCode, McpError};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

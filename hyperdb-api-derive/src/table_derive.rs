@@ -80,11 +80,7 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
             .filter_map(|f| {
                 let ident = f.ident.as_ref()?;
                 let col = column_name_for(f, ident).ok()?;
-                if col.is_empty() {
-                    None
-                } else {
-                    Some(col)
-                }
+                if col.is_empty() { None } else { Some(col) }
             })
             .collect();
         hyperdb_compile_check::registry::register(
