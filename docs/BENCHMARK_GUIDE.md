@@ -136,6 +136,13 @@ Contributions welcome for additional platforms — paste the
 summary table under the appropriate section and include the host
 block from the suite's stdout.
 
+> **Units.** `MB/sec` means **decimal** megabytes per second — 10^6 bytes/s —
+> matching what `benches/common.rs` emits and the conventional unit for I/O
+> throughput. Every other unit the harness prints (`fmt_count`, `fmt_rate`,
+> `fmt_size`) is decimal too. The one exception in this document is flagged
+> inline: the [native Windows tables](#platform-windows-x86_64-native) predate
+> the harness fix and are still in MiB/s.
+
 ### Platform: macOS (Apple Silicon)
 
 **Hardware / software**
@@ -332,7 +339,20 @@ unchanged — opt into `ArrowInserter` and `executeQueryColumnar` /
 
 #### Rust suite — 100M rows per workload, 4 parallel workers, TCP loopback
 
-| Workload | Variant | Flavor | Rows | Time (s) | Rows/sec | MB/sec |
+> **The `MB/sec` column below is MiB/s (2^20 B/s), not decimal MB/s.** These
+> numbers were captured on 2026-05-02, when the harness divided byte counts by
+> 1024² while labelling the result `MB`. That has since been corrected to
+> decimal, so this table reads **4.86% low** against every other table here.
+>
+> The cells are left exactly as measured rather than multiplied by 1.048576.
+> The run is also stale on three other axes — `hyperdb-api` 0.1.0-rc.1, rustc
+> 1.92.0, and an unrecorded `hyperd` predating the current `0.0.26479` pin — so
+> it needs re-measuring regardless, and an arithmetic conversion would make
+> stale data look freshly sampled. **These figures will be restated from a real
+> run the next time the suite is executed on native Windows**; until then,
+> compare them only against each other, never against the macOS tables.
+
+| Workload | Variant | Flavor | Rows | Time (s) | Rows/sec | MiB/sec |
 |---|---|---|---:|---:|---:|---:|
 | insert.bulk | AsyncArrowInserter | async | 100.00M | 18.563 | 5.39 M/s | 123.3 |
 | insert.bulk | AsyncArrowInserter × 4 | async | 100.00M | 4.931 | 20.28 M/s | 464.1 |
@@ -351,7 +371,7 @@ unchanged — opt into `ArrowInserter` and `executeQueryColumnar` /
 
 **Headline takeaways (Rust, native Windows / i9-10980XE):**
 
-- **Parallel async inserts** are the throughput-dominant path — `spawn_blocking + ChunkSender × 4` reaches **20.9 M rows/s / 479 MB/s**, ~2× faster than sync inserts and within ~30% of the TCP loopback ceiling on this box. The 4-way parallel insert numbers are roughly on par with macOS / M3 Max in absolute throughput, suggesting hyperd's ingest path is *not* the bottleneck here.
+- **Parallel async inserts** are the throughput-dominant path — `spawn_blocking + ChunkSender × 4` reaches **20.9 M rows/s / 479 MiB/s**, ~2× faster than sync inserts and within ~30% of the TCP loopback ceiling on this box. The 4-way parallel insert numbers are roughly on par with macOS / M3 Max in absolute throughput, suggesting hyperd's ingest path is *not* the bottleneck here.
 - **Single-connection sync query** went from 2.89 M/s (pre-2026-05 tuning) to **7.08 M/s** — a 2.5× improvement — after the read-window + TCP-buffer changes documented below.
 - **Single-connection sync inserts on Windows lag** native Linux/macOS by ~5× even after tuning. This is a residual `hyperd`-side gap; the parallel paths hide it because they exercise multiple ingest threads.
 
