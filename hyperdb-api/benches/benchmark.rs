@@ -40,7 +40,7 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
 
-use common::{ResourceMonitor, ResourceStats, SAMPLE_INTERVAL_MS};
+use common::{BYTES_PER_MB, ResourceMonitor, ResourceStats, SAMPLE_INTERVAL_MS};
 
 // Default 10M rows for comparison with C++ benchmark
 const DEFAULT_ROW_COUNT: i64 = 10_000_000;
@@ -98,12 +98,12 @@ fn bytes_per_row() -> usize {
     24
 }
 
-/// Calculates MB/sec from bytes and elapsed time.
+/// Calculates decimal MB/sec from bytes and elapsed time.
 fn mb_per_sec(bytes: f64, elapsed_secs: f64) -> f64 {
     if elapsed_secs <= 0.0 {
         return 0.0;
     }
-    bytes / elapsed_secs / (1024.0 * 1024.0)
+    bytes / elapsed_secs / BYTES_PER_MB
 }
 
 /// Result of a benchmark run including timing and resource stats.
@@ -1223,7 +1223,7 @@ fn main() -> Result<()> {
     // Print database file size before deletion
     if let Ok(metadata) = std::fs::metadata(db_path) {
         let size_bytes = metadata.len();
-        let size_mb = size_bytes as f64 / (1024.0 * 1024.0);
+        let size_mb = size_bytes as f64 / BYTES_PER_MB;
         println!("\nDatabase file size: {size_mb:.2} MB ({size_bytes} bytes)");
     }
 

@@ -43,6 +43,11 @@ use hyperdb_api::{
     HyperProcess, Parameters, Result, SqlType, TableDefinition, TransportMode,
 };
 
+/// Bytes in one megabyte — decimal (10^6), matching the rest of the bench
+/// suite. This benchmark is standalone (it does not pull in `common.rs`), so
+/// it carries its own copy of the constant.
+const BYTES_PER_MB: f64 = 1_000_000.0;
+
 const DEFAULT_ROW_COUNT: usize = 10_000_000;
 const BATCH_SIZE: usize = 100_000;
 
@@ -158,7 +163,7 @@ fn main() -> Result<()> {
 
     // Print database file size
     if let Ok(metadata) = std::fs::metadata(async_db_path) {
-        let size_mb = metadata.len() as f64 / (1024.0 * 1024.0);
+        let size_mb = metadata.len() as f64 / BYTES_PER_MB;
         println!("\nDatabase file size: {size_mb:.2} MB");
     }
 
@@ -237,10 +242,10 @@ fn main() -> Result<()> {
 
         let tcp_rows_per_sec = tcp_result.rows as f64 / tcp_result.elapsed.as_secs_f64();
         let tcp_mb_per_sec =
-            tcp_result.total_bytes as f64 / (1024.0 * 1024.0) / tcp_result.elapsed.as_secs_f64();
+            tcp_result.total_bytes as f64 / BYTES_PER_MB / tcp_result.elapsed.as_secs_f64();
         let ipc_rows_per_sec = ipc_result.rows as f64 / ipc_result.elapsed.as_secs_f64();
         let ipc_mb_per_sec =
-            ipc_result.total_bytes as f64 / (1024.0 * 1024.0) / ipc_result.elapsed.as_secs_f64();
+            ipc_result.total_bytes as f64 / BYTES_PER_MB / ipc_result.elapsed.as_secs_f64();
         let speedup = tcp_result.elapsed.as_secs_f64() / ipc_result.elapsed.as_secs_f64();
 
         println!(
@@ -386,7 +391,7 @@ fn run_benchmark(
         format_number(rows as usize),
         elapsed.as_secs_f64(),
         rows as f64 / elapsed.as_secs_f64(),
-        total_bytes as f64 / (1024.0 * 1024.0) / elapsed.as_secs_f64()
+        total_bytes as f64 / BYTES_PER_MB / elapsed.as_secs_f64()
     );
 
     Ok(BenchmarkResult {
@@ -398,7 +403,7 @@ fn run_benchmark(
 
 fn print_result_row_wide(name: &str, result: &BenchmarkResult, speedup: f64) {
     let rows_per_sec = result.rows as f64 / result.elapsed.as_secs_f64();
-    let mb_per_sec = result.total_bytes as f64 / (1024.0 * 1024.0) / result.elapsed.as_secs_f64();
+    let mb_per_sec = result.total_bytes as f64 / BYTES_PER_MB / result.elapsed.as_secs_f64();
 
     println!(
         "║ {:29} │ {:8.2} │ {:11} │ {:6.1} │ {:8.2}x ║",
@@ -566,7 +571,7 @@ async fn run_async_benchmark(
         format_number(rows as usize),
         elapsed.as_secs_f64(),
         rows as f64 / elapsed.as_secs_f64(),
-        total_bytes as f64 / (1024.0 * 1024.0) / elapsed.as_secs_f64()
+        total_bytes as f64 / BYTES_PER_MB / elapsed.as_secs_f64()
     );
 
     Ok(BenchmarkResult {
