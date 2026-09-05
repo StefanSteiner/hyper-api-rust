@@ -14,6 +14,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **`getInt32()` and `getInt32Column()` now throw instead of silently
+  truncating an out-of-range `BIGINT`.** Previously an `Int64` value that did
+  not fit an `Int32` was wrapped with a narrowing cast, returning a
+  plausible-looking but wrong number. Returning `null` was considered and
+  rejected because it is indistinguishable from a SQL NULL. Use `getBigInt()`
+  for lossless row access, or `getInt64Column()` to widen instead of narrow
+  (noting that it returns `number`, which itself loses precision above 2^53).
+- **Inserting an out-of-range integer into a `SMALLINT` or `INT` column is now
+  rejected** rather than silently truncated. The previous code claimed Hyper
+  would reject an oversized value at `execute()` time, which was not true for
+  the narrowing paths: a wrapped value is a valid encoding of the wrong number,
+  so it was accepted and the `.hyper` file held corrupt data.
+
+  Float-to-integer coercions are unchanged. Those *saturate* in Rust rather
+  than wrapping — an out-of-range float clamps to the type's bounds and `NaN`
+  becomes 0 — so they are lossy but bounded, and remain the documented
+  coercion for these paths.
+
 ### Fixed
 
 - `NUMERIC` columns are now decoded correctly. Previously the bindings read

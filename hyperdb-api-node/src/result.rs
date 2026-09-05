@@ -155,22 +155,32 @@ impl RowData {
 
     /// Gets a 32-bit integer value at the given column index.
     ///
-    /// Documented as a narrowing coercion: I64/F32/F64 cells are truncated
-    /// to i32. Callers that need lossless access should use `getBigInt()`
-    /// (for I64) or `getFloat64()` (for F32/F64).
+    /// F32/F64/Numeric cells are coerced by *saturating* to `i32` — an
+    /// out-of-range float clamps to `i32::MIN`/`MAX` and `NaN` becomes 0.
+    /// Callers wanting the unrounded value should use `getFloat64()`.
+    ///
+    /// An I64 cell that does not fit `i32` **throws** rather than wrapping.
+    /// Truncating would return a plausible-looking wrong number, and returning
+    /// `null` would be indistinguishable from a SQL NULL. Use `getBigInt()`
+    /// for lossless access to `BIGINT` columns.
+    ///
+    /// # Errors
+    ///
+    /// Throws if the cell holds an I64 value outside the range of `i32`.
     #[napi]
-    pub fn get_int32(&self, index: u32) -> Option<i32> {
-        match self.values.get(index as usize)? {
+    pub fn get_int32(&self, index: u32) -> Result<Option<i32>> {
+        let Some(cell) = self.values.get(index as usize) else {
+            return Ok(None);
+        };
+        Ok(match cell {
             CellValue::I16(v) => Some(i32::from(*v)),
             CellValue::I32(v) => Some(*v),
-            CellValue::I64(v) => {
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "caller-selected column coercion: I64 cell narrowed to i32 per get_int32 contract"
-                )]
-                let x = *v as i32;
-                Some(x)
-            }
+            CellValue::I64(v) => Some(i32::try_from(*v).map_err(|_| {
+                Error::from_reason(format!(
+                    "value {v} in column {index} does not fit an Int32; \
+                     use getBigInt({index}) for lossless access"
+                ))
+            })?),
             CellValue::F32(v) => {
                 #[expect(
                     clippy::cast_possible_truncation,
@@ -190,13 +200,13 @@ impl RowData {
             CellValue::Numeric(n) => {
                 #[expect(
                     clippy::cast_possible_truncation,
-                    reason = "caller-selected column coercion: Numeric cell narrowed to i32 per get_int32 contract"
+                    reason = "saturating f64->i32 coercion: clamps at i32::MIN/MAX rather than wrapping, per get_int32 contract"
                 )]
                 let x = n.to_f64() as i32;
                 Some(x)
             }
             _ => None,
-        }
+        })
     }
 
     /// Gets a 64-bit integer value at the given column index.

@@ -454,8 +454,75 @@ async function main() {
   await conn.executeCommand('DROP TABLE numeric_test');
   console.log('   All NUMERIC tests passed ✓');
 
-  // 19. Clean up
-  console.log('\n19. Cleaning up...');
+  // 19. Integer narrowing must throw, not silently wrap.
+  //
+  // getInt32 on an out-of-range BIGINT used to truncate, returning a
+  // plausible-looking wrong number. It now throws. Returning null was
+  // rejected as an option because it is indistinguishable from a SQL NULL.
+  console.log('\n19. Integer narrowing rejects instead of wrapping...');
+  // IF EXISTS so a failure mid-block does not poison the next run.
+  await conn.executeCommand('DROP TABLE IF EXISTS narrow_test');
+  await conn.executeCommand('DROP TABLE IF EXISTS narrow_ins');
+  await conn.executeCommand(
+    'CREATE TABLE narrow_test (big BIGINT NOT NULL, small BIGINT NOT NULL)'
+  );
+  // 2^33 does not fit an Int32; 7 does.
+  await conn.executeCommand('INSERT INTO narrow_test VALUES (8589934592, 7)');
+
+  const narrowRows = await conn.executeQuery('SELECT big, small FROM narrow_test');
+  assert.equal(narrowRows.length, 1);
+
+  assert.throws(
+    () => narrowRows[0].getInt32(0),
+    /does not fit an Int32/,
+    'getInt32 on an out-of-range BIGINT must throw'
+  );
+  // The in-range column still works, so the check is value-based not type-based.
+  assert.equal(narrowRows[0].getInt32(1), 7, 'in-range BIGINT still narrows fine');
+  // And the lossless accessor the error recommends actually works.
+  assert.equal(
+    narrowRows[0].getBigInt(0),
+    8589934592n,
+    'getBigInt gives lossless access to the same cell'
+  );
+
+  // Same contract on the columnar path.
+  const narrowStream = conn.executeQueryColumnar('SELECT big FROM narrow_test');
+  const narrowChunk = await narrowStream.nextChunk();
+  assert.throws(
+    () => narrowChunk.getInt32Column(0),
+    /does not fit an Int32/,
+    'getInt32Column on an out-of-range Int64 column must throw'
+  );
+  // getInt64Column widens rather than narrowing. It returns `number`, not
+  // BigInt, so it is exact only below 2^53 — 2^33 is comfortably inside that.
+  assert.equal(
+    narrowChunk.getInt64Column(0)[0],
+    8589934592,
+    'getInt64Column widens the same column instead of narrowing it'
+  );
+
+  // Insert-side narrowing is rejected too, so the .hyper file cannot hold a
+  // silently truncated value.
+  const narrowInsDef = new TableDefinition('narrow_ins');
+  narrowInsDef.addColumn('v', SqlType.smallInt(), false);
+  await catalog.createTable(narrowInsDef);
+  const narrowIns = new RowInserter(conn, narrowInsDef);
+  await assert.rejects(
+    async () => {
+      narrowIns.addRow([70000]); // outside SMALLINT range
+      await narrowIns.execute();
+    },
+    /does not fit the destination SMALLINT column/,
+    'inserting an out-of-range value into SMALLINT must be rejected'
+  );
+
+  await conn.executeCommand('DROP TABLE narrow_ins');
+  await conn.executeCommand('DROP TABLE narrow_test');
+  console.log('   All narrowing tests passed ✓');
+
+  // 20. Clean up
+  console.log('\n20. Cleaning up...');
   await catalog.dropTable('test_users');
   await catalog.dropTable('arrow_t');
   await conn.close();

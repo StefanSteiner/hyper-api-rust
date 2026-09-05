@@ -218,6 +218,14 @@ export declare class ColumnarChunk {
    * Returns an entire column as an array of 32-bit integers.
    *
    * Null values are represented as 0. Use `getNulls(index)` to distinguish nulls.
+   *
+   * Float64 columns are coerced by saturating: out-of-range values clamp to
+   * the Int32 bounds and `NaN` becomes 0.
+   *
+   * @throws If the column is Int64 and any value does not fit an Int32.
+   * Truncating would yield a plausible-looking wrong number, so this rejects
+   * instead. Use `getInt64Column(index)` to widen instead of narrow — noting
+   * that it returns `number`, which itself loses precision above 2^53.
    */
   getInt32Column(index: number): Array<number>
   /**
@@ -593,7 +601,18 @@ export declare class RowData {
   isNull(index: number): boolean
   /** Gets a boolean value at the given column index. */
   getBool(index: number): boolean | null
-  /** Gets a 32-bit integer value at the given column index. */
+  /**
+   * Gets a 32-bit integer value at the given column index.
+   *
+   * Float and Numeric cells are coerced by saturating: out-of-range values
+   * clamp to the Int32 bounds and `NaN` becomes 0. Use `getFloat64(index)` for
+   * the unrounded value.
+   *
+   * @throws If the cell holds a BIGINT outside the range of an Int32.
+   * Truncating would return a plausible-looking wrong number, and returning
+   * `null` would be indistinguishable from a SQL NULL. Use
+   * `getBigInt(index)` for lossless access.
+   */
   getInt32(index: number): number | null
   /**
    * Gets a 64-bit integer value at the given column index.

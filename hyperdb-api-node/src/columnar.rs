@@ -82,11 +82,21 @@ impl ColumnarChunk {
     pub fn get_int32_column(&self, index: u32) -> Result<Vec<i32>> {
         match self.columns.get(index as usize) {
             Some(ColumnData::Int32(v)) => Ok(v.clone()),
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "caller-selected column coercion: `get_int32_column` is documented to narrow Int64/Float64 columns into Int32"
-            )]
-            Some(ColumnData::Int64(v)) => Ok(v.iter().map(|&x| x as i32).collect()),
+            // Int64 -> Int32 is integer narrowing, which `as` would wrap
+            // silently. Reject instead: a wrapped value is indistinguishable
+            // from a real one on the JS side.
+            Some(ColumnData::Int64(v)) => v
+                .iter()
+                .map(|&x| {
+                    i32::try_from(x).map_err(|_| {
+                        Error::from_reason(format!(
+                            "value {x} in column {index} does not fit an Int32; \
+                             use getInt64Column({index}), which widens to Int64 \
+                             (note JS numbers lose precision above 2^53)"
+                        ))
+                    })
+                })
+                .collect(),
             #[expect(
                 clippy::cast_possible_truncation,
                 reason = "caller-selected column coercion: `get_int32_column` is documented to narrow Int64/Float64 columns into Int32"
