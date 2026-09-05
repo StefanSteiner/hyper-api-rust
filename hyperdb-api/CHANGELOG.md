@@ -31,6 +31,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **BREAKING:** the `arrow` dependency moved from **58** to **59**. Arrow types
+  appear in this crate's public API (`ArrowReader`, `ArrowInserter`,
+  `AsyncArrowInserter`, `ArrowResult` and the Arrow IPC paths), so a consumer
+  must move to `arrow` 59 in lockstep — mixing 58 and 59 in one binary yields
+  two incompatible `RecordBatch` types. No source change was needed on our
+  side; the workspace builds and its 1568 tests pass unchanged.
+
+  This also **removes the `thrift` dependency**, and with it the Apache Thrift
+  "Memory Allocation with Excessive Size Value" advisory. `parquet` 58.x
+  required `thrift ^0.17`, which pinned the vulnerable 0.17.0 and could not be
+  updated in isolation; `parquet` 59 dropped thrift altogether. That closes an
+  advisory this workspace had previously been unable to resolve.
+
 - **BREAKING:** the minimum supported Rust version is now **1.88**, up from
   1.81, and the crate is compiled with **edition 2024**. 1.88 is the version
   Red Hat Enterprise Linux 9.7 ships as `rust-toolset`, so the declared MSRV

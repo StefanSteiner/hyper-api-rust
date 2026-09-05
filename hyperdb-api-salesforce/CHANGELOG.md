@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **BREAKING:** the `arrow` dependency moved from **58** to **59**, matching
+  `hyperdb-api`. Arrow IPC types cross this crate's API surface, so consumers
+  must move in lockstep.
+
 - **BREAKING:** the minimum supported Rust version is now **1.88**, up from
   1.81, and the crate is compiled with **edition 2024**. 1.88 is the version
   Red Hat Enterprise Linux 9.7 ships as `rust-toolset`.

@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- The `arrow` and `parquet` dependencies moved from **58** to **59**. Not a
+  library-API change (this crate ships a binary), but it removes the `thrift`
+  dependency and the Apache Thrift excessive-size-allocation advisory with it:
+  `parquet` 58.x pinned `thrift ^0.17`, and `parquet` 59 dropped thrift
+  entirely.
+
 - `Engine::execute_in_transaction` now calls `hyperdb-api`'s `*_unguarded`
   transaction methods instead of the deprecated `begin_transaction` / `commit`
   / `rollback`, which 1.0.0 removed. No behavior change: the helper still takes
