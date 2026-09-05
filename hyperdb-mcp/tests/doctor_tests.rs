@@ -978,7 +978,10 @@ fn doctor_cli_json_and_human_smoke_is_side_effect_free() {
         daemon_state,
         env!("CARGO_PKG_VERSION"),
     ] {
-        let normalized_fact = core_fact.replace('_', " ");
+        // Normalize the needle exactly as the haystack was. The `-` matters:
+        // a prerelease version like `1.0.0-rc.1` renders as `1.0.0 rc.1` after
+        // normalization, so replacing only `_` here would never match it.
+        let normalized_fact = normalized_human_text(core_fact);
         assert!(
             normalized.contains(&normalized_fact),
             "JSON/human reports disagree about core fact `{core_fact}`:\n{human}"

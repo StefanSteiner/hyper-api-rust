@@ -147,7 +147,16 @@ jobs:
       # workflows (libfontconfig1-dev, mold, protobuf-compiler).
       - name: Sync Cargo.lock with bumped workspace versions
         if: ${{ steps.release.outputs.pr != '' }}
-        run: cargo metadata --format-version=1 > /dev/null
+        # Two lockfiles need this, not one. hyperdb-compile-check declares its
+        # own [workspace] so it has a separate Cargo.lock, and it is in
+        # release-please's extra-files — so its version gets bumped while its
+        # lockfile still records the previous one. Left unsynced, every release
+        # PR fails the `msrv` job, which is the only gate that builds that
+        # crate with --locked.
+        run: |
+          cargo metadata --format-version=1 > /dev/null
+          cargo metadata --format-version=1 \
+            --manifest-path hyperdb-compile-check/Cargo.toml > /dev/null
 
       # Sentinel: fail loudly if the lockfile diff touches anything
       # other than workspace-member version rows. Two-layer check:
@@ -222,8 +231,9 @@ jobs:
         if: ${{ steps.release.outputs.pr != '' }}
         run: |
           set -euo pipefail
-          if git diff --quiet -- Cargo.lock; then
-            echo "Cargo.lock already in sync — no commit needed."
+          LOCKFILES="Cargo.lock hyperdb-compile-check/Cargo.lock"
+          if git diff --quiet -- $LOCKFILES; then
+            echo "Lockfiles already in sync — no commit needed."
             exit 0
           fi
           # github-actions[bot] is the canonical identity for
@@ -234,7 +244,7 @@ jobs:
           # is unambiguous and reads correctly in the PR history.
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Cargo.lock
+          git add $LOCKFILES
           git commit -m "chore: sync Cargo.lock with bumped workspace versions"
           # Explicit refspec — don't rely on actions/checkout's
           # tracking branch staying the default in future versions.
