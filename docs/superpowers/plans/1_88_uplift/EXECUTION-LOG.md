@@ -23,12 +23,12 @@ AGENTS.md reminder 10 — no green is recorded without real output.
 | 2 | 2.1 let chains | **Done — via clippy, 127 sites** |
 | 2 | 2.3 `use<..>` precise capturing | **Done — applied by `cargo fix`** |
 | 1 | 1.4 drop-order triage, napi verify | **Done — no code changes** |
-| 1 | 1.5 doc/config sweep | Deferred (see below) |
+| 1 | 1.5 doc/config sweep | **Done** |
 | 2 | 2.2 async-closure spike | **Done — NO-GO, documented** |
 | 2 | 2.5 API modernization | **Done — 1 bug fixed, 3 rejected** |
 | 2 | 2.6 node cast conversions | **Done — 5 fixed, ~20 exempt** |
 | 3 | 3.0 probe, 3.1 workflow, 3.3 Makefile | **Done — verified end-to-end** |
-| 3 | 3.2 README section, 3.4 doc gap | Deferred (see below) |
+| 3 | 3.2 README section, 3.4 doc gap | **Done** |
 | 4 | 4.0 benchmark gate | Next |
 
 | 4 | 4.1-4.3 RC, API audit, 1.0.0 | Not started |
@@ -503,7 +503,49 @@ because "the chart still renders correctly" is a visual property the test suite
 does not cover — unlike the aws-lc removal, where four real HTTPS requests
 proved equivalence.
 
-## Deferred: all existing-doc updates
+## 2026-09-05 — Batched docs pass: done (`018b6f8`)
+
+All deferred existing-doc updates landed in one pass, after the code was
+settled so every claim reflects what was verified rather than planned.
+
+**The rustdoc gate now passes for the first time.** It was red for two
+independent reasons. Six public doc comments in `hyperdb-mcp` linked to private
+items; downgraded to code spans, since making internal helpers public to
+satisfy a doc link would be backwards. And four links in `hyperdb-api-derive`
+referenced `hyperdb_api` types that crate deliberately does not depend on (the
+cycle break) — given explicit link-reference definitions to docs.rs, matching
+the pattern already present in its crate-level docs.
+
+`make doc` also now sets `RUSTDOCFLAGS="-D warnings"` and covers all seven
+publishable crates. `hyperdb-api-derive` and `hyperdb-bootstrap` were omitted
+before, which is exactly why their rustdoc had never been checked.
+
+**Eight CHANGELOG entries, written per crate rather than boilerplate**, each
+recording what changed for that crate's consumers. Created
+`hyperdb-api-derive/CHANGELOG.md`, which did not exist despite the crate being
+published and version-managed by release-please — an inconsistency with
+AGENTS.md reminder 8, which lists it.
+
+**README Enterprise Compatibility section** documents the empirically verified
+prerequisite list, including the two surprises: `protoc` is not packaged for
+UBI at all, and the C/C++ requirement comes from the plotters chart font stack
+rather than anything in this workspace' own code.
+
+**Two stale claims corrected that had misled this plan.** `CONTRIBUTING.md` and
+`docs/GITHUB_OPERATIONS.md` both said release-please creates the tag and GitHub
+Release; it does not, and that error is what caused Task 4.1 to omit the manual
+tag step in an earlier draft. Also registered `rhel-compatibility` in the
+operations table, which still claimed four workflows when there were five.
+
+**Two broken config entries fixed**, both of which could only ever fail:
+`cargo download-hyperd` referenced a package name that has not existed since
+the crate rename, and `make test-redirect` invoked a `redirect` feature no
+crate defines.
+
+Gates after the pass: `fmt`, `clippy -D warnings`, `cargo deny`, and
+`make doc` all exit 0.
+
+## Previously deferred (now complete)
 
 By decision on 2026-09-04, every change to *existing* docs is batched into one
 pass at the end of coding, since the migration will generate many of them.
