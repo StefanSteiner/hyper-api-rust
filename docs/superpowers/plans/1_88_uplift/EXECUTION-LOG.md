@@ -707,6 +707,47 @@ region was read to confirm it is end-to-end (typed-array fill, Arrow build,
 IPC serialize, execute), so the number is fair. The guide frames it as "the
 Arrow path costs you nothing at 10M" rather than a language ranking.
 
+### Security and dependency sweep (pre-RC)
+
+Requested before cutting `1.0.0-rc.1`. Starting state: 5 open Dependabot PRs,
+3 Dependabot security advisories, and 43 open code-scanning alerts.
+
+**The thrift advisory is fixed, and the reason it was previously stuck is
+worth recording.** `parquet` 58.x requires `thrift ^0.17`, which caps
+resolution at the vulnerable 0.17.0 — no amount of updating our own
+dependencies could move it, which is why earlier attempts failed. `parquet` 59
+dropped thrift entirely (its 38 normal dependencies no longer list it), so
+bumping arrow/parquet 58 → 59 removes the crate and the advisory together.
+`cargo audit` now scans 503 crates rather than 519.
+
+That bump is **breaking for consumers**: arrow types cross `hyperdb-api`'s
+public API, and arrow 58 and 59 cannot coexist in one binary. No source change
+was needed on our side, and `cargo test --workspace` is unchanged at 1568
+passed. `hyperdb-compile-check`'s lockfile needed regenerating for arrow 59 —
+caught by the new `msrv` job, which is the first thing that has ever compiled
+that crate with `--locked`.
+
+A plain `cargo update` satisfied all 5 Dependabot PRs (deadpool 0.13.1, tokio
+1.53.1, geo-types 0.7.20, trybuild 1.0.120, napi 3.12.2). The 1.88 floor
+survived both that and the arrow bump.
+
+**`qs` could not be fixed.** It is patched in 6.16.0, but the registry enforces
+a release-age cutoff that makes anything newer than 2026-08-29 uninstallable,
+and every installable version (≤ 6.15.3) is affected. An `overrides` pin was
+tried and reverted because it broke `npm install` outright — worse than a
+moderate advisory in an example that ships in no published package.
+`postcss-selector-parser` was fixed by `npm audit fix` (now 6.1.4).
+
+**All 43 code-scanning alerts were dismissed with per-alert reasons**, after
+verifying each rather than bulk-dismissing. 40 were `cleartext-logging` in
+tests, examples and benches — non-shipped targets. The 2 `critical`
+hard-coded-cryptographic-value alerts are inside `pool.rs`'s `#[cfg(test)]`
+module, which begins at line 1163, so they are unit-test fixtures rather than
+shipped credentials. The last, `arrow_result.rs:919`, is a taint mislabel: that
+file contains no password, secret or credential anywhere, and the flagged line
+is Arrow IPC decoder logic. CodeQL here uses **default setup**, so a
+`paths-ignore` config is not available — dismissal is the only mechanism.
+
 ## Previously deferred (now complete)
 
 By decision on 2026-09-04, every change to *existing* docs is batched into one
