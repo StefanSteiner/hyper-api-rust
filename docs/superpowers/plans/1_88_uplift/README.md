@@ -8,6 +8,9 @@ to edition 2024, and adding a RHEL 9.7 `rust-toolset` compatibility gate.
 
 ## Documents
 
+* [`EXECUTION-LOG.md`](EXECUTION-LOG.md) — **live progress.** Status board,
+  per-task results with captured exit codes, gate status, and findings
+  discovered but held out of scope. Read this first to see where things stand.
 * [`2026-09-04-rust-188-edition-2024-uplift.md`](2026-09-04-rust-188-edition-2024-uplift.md)
   — the implementation plan. Task-by-task, checkbox-tracked, with the exact
   file paths and line numbers each task touches. Start here when executing.

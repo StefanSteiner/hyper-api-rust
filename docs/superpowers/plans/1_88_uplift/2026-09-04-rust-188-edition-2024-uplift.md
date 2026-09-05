@@ -26,6 +26,17 @@ container via Docker or Podman; real `hyperd` via
 **Final integration base:** `origin/main` @ `28c8813`
 **Branch:** `feat/upgrade-to-188-RHEL97`
 
+---
+
+## Execution log
+
+Progress, captured exit codes, and discovered-but-out-of-scope findings live in
+[`EXECUTION-LOG.md`](EXECUTION-LOG.md), kept separate so this plan stays a
+stable brief rather than growing with every task.
+
+
+---
+
 **Prerequisite, already done:**
 [`docs/RUST_GUIDELINES.md`](../../../RUST_GUIDELINES.md) was re-synced against
 the Microsoft Pragmatic Rust Guidelines **version 2026.6** on 2026-09-04,
