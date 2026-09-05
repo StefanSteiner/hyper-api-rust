@@ -24,7 +24,8 @@ AGENTS.md reminder 10 — no green is recorded without real output.
 | 2 | 2.3 `use<..>` precise capturing | **Done — applied by `cargo fix`** |
 | 1 | 1.4 drop-order triage, napi verify | **Done — no code changes** |
 | 1 | 1.5 doc/config sweep | Deferred (see below) |
-| 2 | 2.2 async-closure spike, 2.5, 2.6 | Not started |
+| 2 | 2.2 async-closure spike | **Done — NO-GO, documented** |
+| 2 | 2.5 API modernization, 2.6 node casts | Next |
 | 3 | RHEL CI (3.0–3.4) | Not started |
 | 4 | Benchmark gate, RC, API audit, 1.0.0 | Not started |
 
@@ -204,6 +205,50 @@ is the actual basis for closing this task.
 The napi half of Task 1.4 is also satisfied: Phase 0 proved the 148 `#[napi]`
 attributes expand under 2024, and the full-workspace build at 2024 includes
 `hyperdb-api-node` and exits 0.
+
+## 2026-09-04 — Task 2.2 async closures: NO-GO, confirmed by spike
+
+The plan review predicted this would fail and named the reason. Both hold. Four
+approaches were compiled against a real edition-2024 crate; all four fail:
+
+1. **`AsyncFn` + boxed `Send` future** — `E0277`:
+   `<F as AsyncFnMut<(&Conn,)>>::CallRefFuture<'_> cannot be sent between
+   threads safely`. Naming that associated type requires unstable
+   `async_fn_traits`.
+2. **Return-type notation** (`F(&Conn): Send`) — `E0214`: "parenthesized type
+   parameters may only be used with a `Fn` trait". Not available for `AsyncFn`
+   on stable.
+3. **Current `Box::pin` form** — compiles. (Control.)
+4. **Generic `F: for<'a> Fn(&'a Conn) -> Fut` with internal boxing** —
+   `E0308`, with rustc pointing at `-> Fut`: "the lifetime requirement is
+   introduced here". `Fut` would have to depend on the higher-ranked lifetime,
+   which is exactly the case needing return-type notation or GATs.
+
+Root cause, stated once: the hook future must be **both** `Send` (the pool runs
+on multi-threaded runtimes) **and** able to borrow the `&AsyncConnection` it is
+given. Stable Rust cannot express both together.
+
+**The hard constraint held** — no `+ Send` was removed from `HookFuture`,
+`AfterConnectHook`, `BeforeAcquireHook`, or `RecycleCheck`. That was the
+failure mode the review flagged as most dangerous, since dropping it is the
+obvious way to make the code compile and would silently regress thread safety
+in a connection pool.
+
+### This reverses one of the plan's assumptions
+
+The plan treated the rustdoc example at `pool.rs:101` as outdated guidance to
+be rewritten: "the rustdoc example currently *teaches*
+`.after_connect(|conn| Box::pin(async move {` — update it; docs are how this
+pattern spreads." That is wrong. `Box::pin(async move { .. })` is **required,
+not conventional**, so the example is correct and was left alone.
+
+**Deliverable:** a doc comment on `HookFuture` recording all three unstable
+blockers and the `M-ASYNC-FN` trait carve-out that licenses the explicit
+`Future` return, so the next reader does not repeat this spike. No API change,
+therefore no `CHANGELOG` entry and no `feat!:` commit — the plan's assumption
+that Task 2.2 would be a breaking change does not apply either.
+
+`fmt` and `clippy -D warnings` both exit 0 on `hyperdb-api` after the change.
 
 ## Deferred: all existing-doc updates
 

@@ -122,6 +122,24 @@ use crate::connection::Connection;
 use crate::error::{Error, Result};
 
 /// Future returned by pool lifecycle hooks.
+///
+/// Hooks are boxed rather than taking an `AsyncFn` because the hook future
+/// must be both `Send` (the pool is used from multi-threaded runtimes) and
+/// able to borrow the `&AsyncConnection` it is handed. On stable Rust those
+/// two requirements cannot be expressed together:
+///
+/// - Bounding an `AsyncFn`'s returned future as `Send` requires naming
+///   `AsyncFnMut::CallRefFuture`, which is behind unstable `async_fn_traits`.
+/// - Return-type notation (`F(&AsyncConnection): Send`) is also unstable.
+/// - A generic `F: Fn(&'a AsyncConnection) -> Fut` cannot work either, because
+///   `Fut` would have to depend on the higher-ranked lifetime `'a` — the case
+///   that needs return-type notation or GATs.
+///
+/// So `Box::pin(async move { .. })` at the call site is required, not merely
+/// conventional, and the examples on [`PoolConfig`] teach it deliberately.
+/// This matches the trait carve-out in upstream `M-ASYNC-FN`, which permits an
+/// explicit `Future` return "inside traits". Revisit if `async_fn_traits` or
+/// return-type notation stabilizes.
 pub type HookFuture<'a> = Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>;
 
 /// A hook that runs once on every newly-opened connection (after authentication
