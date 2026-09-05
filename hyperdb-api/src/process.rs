@@ -965,6 +965,7 @@ impl HyperProcess {
     ///
     /// Returns `None` if the process is using TCP.
     #[cfg(windows)]
+    #[must_use]
     pub fn pipe_name(&self) -> Option<&str> {
         self.pipe_name.as_deref()
     }
