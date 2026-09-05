@@ -1,0 +1,126 @@
+name: rhel-compatibility
+
+# Proves the workspace builds with Red Hat's system-native Rust toolchain and
+# no rustup, which is the enterprise consumption path. GitHub's ubuntu-latest
+# runners are x86_64, so this runs native amd64 with no emulation -- that is
+# what makes CI, rather than a developer laptop, the authoritative gate for the
+# x86_64-specific linker configuration stripped below.
+#
+# Security note: this workflow interpolates no event data. The only variable is
+# PROTOC_VERSION, a static literal passed via env:, plus GitHub's own
+# GITHUB_WORKSPACE path. No untrusted input reaches any run: block.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**/*.rs'
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.cargo/config.toml'
+      - '.github/workflows/rhel-compatibility.yml'
+  pull_request:
+    paths:
+      - '**/*.rs'
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.cargo/config.toml'
+      - '.github/workflows/rhel-compatibility.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # protoc is NOT available from any UBI repository -- see the "Install build
+  # prerequisites" step. Pinned to the version this workspace builds against
+  # locally (libprotoc 35.1).
+  PROTOC_VERSION: '35.1'
+
+jobs:
+  rhel-native:
+    name: RHEL rust-toolset (no rustup)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    container:
+      image: registry.access.redhat.com/ubi9/ubi:latest
+
+    steps:
+      # Probed 2026-09-04 against ubi9/ubi:latest. Findings that shape this
+      # step, all verified rather than assumed:
+      #
+      # This list is the empirically minimal set, verified end-to-end by
+      # `make check-rhel` on 2026-09-04. Probe findings against ubi9/ubi:latest:
+      #
+      #   rust-toolset       AVAILABLE (ubi-9-appstream-rpms), currently 1.92.0
+      #                      -- note it is a *rolling* stream, so it is ahead of
+      #                      the 1.88.0 that RHEL 9.7's notes document
+      #   fontconfig-devel   AVAILABLE -- plotters' font stack in hyperdb-mcp
+      #   gcc, gcc-c++       AVAILABLE -- also plotters: freetype-sys compiles C
+      #                      and pathfinder_simd compiles C++. Nothing in this
+      #                      workspace's own code needs a C or C++ compiler.
+      #   git                AVAILABLE -- lets actions/checkout use git rather
+      #                      than falling back to a REST tarball
+      #   unzip              AVAILABLE (ubi-9-baseos-rpms), not preinstalled
+      #   protobuf-compiler  *** NOT AVAILABLE *** -- `dnf search protobuf`
+      #                      returns only protobuf-c and python3-protobuf, so
+      #                      there is no protoc binary. Fetched below instead.
+      #   mold               *** NOT AVAILABLE *** -- hence the RUSTFLAGS
+      #                      override in the build step.
+      #
+      # cmake and make are deliberately absent: they were required only by
+      # aws-lc-sys, which is no longer in the dependency graph now that both
+      # reqwest declarations use `rustls-no-provider` and let the workspace's
+      # ring provider apply.
+      #
+      # Note ubi-9-codeready-builder-rpms is already enabled by default, so
+      # enabling it is not an available fallback for the missing protoc.
+      - name: Install build prerequisites
+        run: |
+          dnf install -y rust-toolset fontconfig-devel git unzip gcc gcc-c++
+          dnf clean all
+
+      - name: Install protoc
+        # hyperdb-api-core/build.rs runs tonic_prost_build, which needs protoc.
+        # This is a standing M-OOBE deviation: a published crate should not
+        # require a tool beyond cargo and rustc. The durable fix is to generate
+        # the .rs files at publish time and vendor them into the crate; until
+        # then CI supplies protoc explicitly.
+        run: |
+          curl -fsSLO "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip"
+          unzip -q "protoc-${PROTOC_VERSION}-linux-x86_64.zip" -d /usr/local
+          rm "protoc-${PROTOC_VERSION}-linux-x86_64.zip"
+          protoc --version
+
+      - uses: actions/checkout@v7
+
+      - name: Prove this is the distro toolchain, not rustup
+        run: |
+          if command -v rustup >/dev/null 2>&1; then
+            echo "::error::rustup is present; this job must exercise the system toolchain only"
+            exit 1
+          fi
+          echo "cargo:  $(command -v cargo)"
+          echo "rustc:  $(command -v rustc)"
+          rustc --version
+          cargo --version
+
+      - name: cargo check with the system toolchain
+        # The repo's .cargo/config.toml pins linker = "clang" plus
+        # -fuse-ld=mold for x86_64-unknown-linux-gnu, and mold is not in any
+        # UBI repo. `cargo check` still links build scripts and proc-macro
+        # crates for the host, so this genuinely breaks the job.
+        #
+        # Both overrides are neutralized by environment rather than by editing
+        # the checkout. Note that `--config target.<triple>.rustflags=[]` does
+        # NOT work: cargo *joins* rustflags across config sources. The env var
+        # replaces them, which was verified directly.
+        #
+        # rust-toolchain.toml needs no handling at all: it is read only by
+        # rustup's proxy shims, and the step above asserts rustup is absent.
+        env:
+          RUSTFLAGS: ''
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: cc
+        run: cargo check --workspace --locked --all-targets
