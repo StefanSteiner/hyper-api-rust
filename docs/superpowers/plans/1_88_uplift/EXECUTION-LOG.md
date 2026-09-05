@@ -31,7 +31,8 @@ AGENTS.md reminder 10 — no green is recorded without real output.
 | 3 | 3.2 README section, 3.4 doc gap | **Done** |
 | 4 | 4.0 benchmark gate | Next |
 
-| 4 | 4.1-4.3 RC, API audit, 1.0.0 | Not started |
+| 4 | 4.2 API audit | **Done — 1 of 141 sites was real** |
+| 4 | 4.1, 4.3 RC and 1.0.0 release | Blocked on 4.0 |
 
 **Commits so far:** `f3736b0`, `8a42b8c`, `9f75ff0`, `caeda1b`, `091327c`,
 `0cab3af`, `efbf704` — all signed.
@@ -544,6 +545,59 @@ crate defines.
 
 Gates after the pass: `fmt`, `clippy -D warnings`, `cargo deny`, and
 `make doc` all exit 0.
+
+## 2026-09-05 — Task 4.2 API audit: done (`7144165`)
+
+The 1.0.0 gate. Every number below came from running the lints, not from the
+plan's estimates.
+
+### `must_use_candidate`: 141 sites, but only one that matters
+
+The count matched the plan review exactly. The **distribution** is what
+decided the outcome:
+
+| Location | Sites | Is it a public API? |
+|---|---:|---|
+| `hyperdb-api-core` | 122 | No — its `lib.rs` says "This crate is not a public API" |
+| `hyperdb-mcp` | 10 | No — internal daemon/server helpers in a binary crate |
+| prost-generated protobuf | 8 | No — generated, and not editable |
+| **`hyperdb-api`** | **1** | **Yes — the flagship public API** |
+
+The lint measures *public API* ergonomics, so annotating 140 internal methods
+to satisfy it would be cargo-culting. Instead: the one real site
+(`Error::column_index_out_of_bounds`) is now `#[must_use]`, the workspace
+default stays `allow`, and `hyperdb-api/src/lib.rs` opts back in with a
+crate-level `#![warn(clippy::must_use_candidate)]`. Verified the crate-level
+attribute does override the workspace `allow`.
+
+### The two doc lints were already clean
+
+`missing_errors_doc` and `missing_panics_doc` measured **zero** sites each over
+`--workspace --all-targets`. The Cargo.toml comment claiming "a large number of
+sites" pending a post-1.0 docs pass was simply stale — the work had already
+been done. Both promoted from `warn` to `deny` so they stay closed.
+
+### `multiple_crate_versions`: 17 splits, none code-fixable
+
+Still `allow`, but the note is now a measured list rather than a guess:
+`base64`, `hashbrown`, `syn`, `getrandom`, `rand`, `rand_core`, `thiserror`,
+`thiserror-impl`, `r-efi`, `wit-bindgen`, and the RustCrypto 0.10/0.11 cluster.
+The `windows_*` triplet the old note cited is **gone** — dropped with the
+`quinn` stack when `aws-lc-rs` was replaced by `ring`, so the provider fix
+measurably improved this too.
+
+### M-SINGLE-ITEM-PATH: clean
+
+Checked because this is the last cheap moment — after 1.0.0 a path change is a
+major bump. `hyperdb-api` exposes three public modules (`copy`, `pool`,
+`grpc`), and none of their items are also re-exported at the crate root, so
+every public item has exactly one path.
+
+Gates after the audit: `fmt`, `clippy -D warnings`, `make doc`, `cargo deny`
+all exit 0; `make test` 1519/1519.
+
+**Phase 4 now needs only the benchmark gate (4.0) and the release steps
+(4.1, 4.3).**
 
 ## Previously deferred (now complete)
 
