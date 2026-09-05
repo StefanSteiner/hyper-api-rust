@@ -25,7 +25,8 @@ AGENTS.md reminder 10 — no green is recorded without real output.
 | 1 | 1.4 drop-order triage, napi verify | **Done — no code changes** |
 | 1 | 1.5 doc/config sweep | Deferred (see below) |
 | 2 | 2.2 async-closure spike | **Done — NO-GO, documented** |
-| 2 | 2.5 API modernization, 2.6 node casts | Next |
+| 2 | 2.5 API modernization | **Done — 1 bug fixed, 3 rejected** |
+| 2 | 2.6 node cast conversions | Next |
 | 3 | RHEL CI (3.0–3.4) | Not started |
 | 4 | Benchmark gate, RC, API audit, 1.0.0 | Not started |
 
@@ -249,6 +250,76 @@ therefore no `CHANGELOG` entry and no `feat!:` commit — the plan's assumption
 that Task 2.2 would be a breaking change does not apply either.
 
 `fmt` and `clippy -D warnings` both exit 0 on `hyperdb-api` after the change.
+
+## 2026-09-04 — Task 2.5 API modernization: one real bug fixed, three items rejected
+
+The `is_none_or` cluster had already landed via the B2 burn-down. Of the three
+remaining items, **two were not candidates and the third needed a different
+tool than the plan named.**
+
+### Rejected: `is_some_and` at `provider.rs:278`
+
+The let-chain pass already flattened `:215` correctly. It deliberately left
+`:278` alone, and clippy was right to: the outer `if let` block has a statement
+*after* the inner `if`.
+
+```rust
+if let Some(ref token) = self.cached_oauth_token {
+    if token.is_likely_valid() { /* .. */ return Ok(token.clone()); }
+    debug!("Cached OAuth Access Token expired, refreshing");  // <-- would be lost
+}
+```
+
+Flattening to a let chain or `is_some_and` would drop that `debug!`, since it
+runs precisely when the inner condition is false. Not a candidate.
+
+### Rejected: tuple `FromIterator` at `engine.rs:963`
+
+The plan called this "the one genuine hit" for the 1.85 tuple `Extend` impls.
+It is not. The two `Vec::push` calls sit inside
+`while let Some(chunk) = result.next_chunk()?` — a *fallible streaming* loop
+over chunks, nested inside `if let Some(ref schema)` and `for row in &chunk`.
+Collecting into `(Vec<_>, Vec<_>)` would mean turning fallible chunk streaming
+into an iterator chain, which fights AGENTS.md's rule that results stream to
+hold memory constant. Two pushes in a nested loop is the correct form here.
+
+### Fixed, and bigger than described: a latent `usize` overflow (`d7157c3`)
+
+The plan framed `protocol/types.rs` as a `split_at_checked` readability tidy-up.
+Inspection found a real bug in both variable-length readers:
+
+```rust
+let len = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+if buf.len() < 4 + len { /* .. */ }        // <-- 4 + len can overflow usize
+```
+
+On a 32-bit target `usize` is 32 bits, so a declared length near `u32::MAX`
+wraps `4 + len` to a small value, the bounds check passes, and the following
+slice index panics. **32-bit `i686` targets are Tier 1**, which M-OOBE requires
+supporting, so this was reachable rather than theoretical.
+
+`slice::split_first_chunk::<4>()` is the right tool, not `split_at_checked`: it
+yields a typed `&[u8; 4]` plus remainder, so no length arithmetic is performed
+at all and the overflow class is removed by construction. An intermediate
+version using `split_at_checked(4)` + `try_into().expect(..)` worked but
+introduced a panic path that `clippy::missing_panics_doc` correctly caught —
+`split_first_chunk` needs no `expect` because the array length lives in the
+type.
+
+Also converted the six fixed-width readers to slice-to-array `try_into`,
+removing six manual index chains. `TryFrom` enforces exact length by
+definition, so semantics are unchanged.
+
+Added four regression tests for behaviour the three existing round-trip tests
+missed: oversized declared length, truncated length prefix, exact-length
+enforcement, and zero-length payload as distinct from truncation.
+
+**Honest limit on the evidence:** these tests guard the contract but cannot
+show red-before-green for the overflow, because on a 64-bit host the old
+arithmetic did not overflow and produced the same error. The fix rests on
+construction, not on a failing test.
+
+`make test` now passes **1519/1519** (1515 plus the four new).
 
 ## Deferred: all existing-doc updates
 
