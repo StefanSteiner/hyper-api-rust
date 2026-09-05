@@ -27,9 +27,11 @@ AGENTS.md reminder 10 — no green is recorded without real output.
 | 2 | 2.2 async-closure spike | **Done — NO-GO, documented** |
 | 2 | 2.5 API modernization | **Done — 1 bug fixed, 3 rejected** |
 | 2 | 2.6 node cast conversions | **Done — 5 fixed, ~20 exempt** |
-| 3 | RHEL CI (3.0-3.4) | Next |
+| 3 | 3.0 probe, 3.1 workflow, 3.3 Makefile | **Done — verified end-to-end** |
+| 3 | 3.2 README section, 3.4 doc gap | Deferred (see below) |
+| 4 | 4.0 benchmark gate | Next |
 
-| 4 | Benchmark gate, RC, API audit, 1.0.0 | Not started |
+| 4 | 4.1-4.3 RC, API audit, 1.0.0 | Not started |
 
 **Commits so far:** `f3736b0`, `8a42b8c`, `9f75ff0`, `caeda1b`, `091327c`,
 `0cab3af`, `efbf704` — all signed.
@@ -387,6 +389,119 @@ is lossless and is described as such.
 
 Gates: workspace `fmt` and `clippy -D warnings` exit 0; `npm test` exits 0 with
 the new narrowing block passing.
+
+## 2026-09-04 — Phase 3 RHEL CI: done (`d97f4af`), plus a dependency win (`909127c`)
+
+### The probe earned its place — three findings the plan had wrong
+
+Task 3.0 probed `ubi9/ubi:latest` rather than assuming, and all three of the
+plan's assumptions about the container were wrong:
+
+- **`protobuf-compiler` is not in any UBI repository.** `dnf search protobuf`
+  returns only `protobuf-c` and `python3-protobuf`. Worse, the plan's first
+  fallback — "enable `ubi-9-codeready-builder`" — was already exhausted:
+  `dnf repolist` shows appstream, baseos **and** codeready-builder all enabled
+  by default. protoc is fetched from the pinned upstream release instead.
+- **`rust-toolset` is 1.92.0, not 1.88.0.** RHEL 9.7's release notes document
+  1.88.0, but it is a *rolling* Application Stream and UBI tracks the latest.
+  So this job proves "builds with RHEL's current system toolchain", which is
+  the real enterprise contract, but it does **not** pin-test the 1.88 MSRV
+  floor. Verifying that floor specifically would need a pinned toolchain, which
+  contradicts the no-rustup premise.
+- **`mold` is not available**, confirming the linker override must be
+  neutralized rather than satisfied.
+
+### Two corrections to the planned approach
+
+**The `--config` override does not work; the env var does.** The plan review
+proved `--config target.<triple>.rustflags=[]` is a no-op because cargo *joins*
+rustflags across config sources. I tested the env form directly in a scratch
+crate: both `RUSTFLAGS=""` and `CARGO_ENCODED_RUSTFLAGS=""` **replace** them.
+So the job neutralizes both overrides by environment and never edits the
+checkout — no copy, no deletion.
+
+That matters because the plan's copy-based approach failed hard: `cp -a /src
+/build` filled the container VM's disk and corrupted containerd's content
+store, because **`target/` is 32 GB** locally. The read-only mount has no such
+problem.
+
+**`make check-rhel` defaults to native arch, not `--platform linux/amd64`.**
+The plan made amd64 mandatory to avoid a false pass on the x86_64-scoped mold
+override (blocker B5). But GitHub's runners are natively x86_64, so **CI is
+already the authoritative gate** for that, and forcing qemu/Rosetta emulation
+locally would make the target too slow to ever be run. `RHEL_PLATFORM=linux/amd64`
+opts in.
+
+### Verified end-to-end
+
+`make check-rhel` exits **0** against `rustc 1.92.0 (Red Hat 1.92.0-1.el9)`
+with `cargo check --workspace --locked --all-targets`. The `--all-targets`
+scope is only possible because the Blocker B1 `sysinfo` downgrade removed the
+last dependency above the MSRV floor — so the plan's "promote to
+`--all-targets` later" step is already done.
+
+### Bonus: the crypto provider fix removed 17 crates
+
+Chasing the C++ requirement uncovered that the workspace's deliberate
+`rustls = { features = ["ring"] }` choice **was not taking effect**. reqwest's
+`rustls` feature expands to `__rustls-aws-lc-rs`, forcing `rustls?/aws-lc-rs`,
+and Cargo unifies features across the graph — so one requester overrode the
+workspace's selection for everyone.
+
+Two crates requested it: `hyperdb-bootstrap`, which declares its own reqwest
+rather than inheriting the workspace entry, and `hyperdb-api-salesforce`. Both
+now use `rustls-no-provider`. Dropped from the lockfile: `aws-lc-sys`,
+`aws-lc-rs`, `cmake`, `jobserver`, `fs_extra`, `dunce`, `cfg_aliases`,
+duplicate `rand`/`rand_chacha`/`rand_core`, `tinyvec`, `web-time`, `lru-slab`,
+and the entire `quinn` HTTP/3 stack. 186 lines out of `Cargo.lock`.
+
+Runtime TLS was the risk, since `rustls-no-provider` installs no default
+`CryptoProvider`. **Verified rather than assumed:** `make verify-hyperd-pin`
+makes four real HTTPS requests to downloads.tableau.com through the changed
+reqwest, all returning 200. rustls auto-resolves ring now that exactly one
+provider is compiled in.
+
+This also dropped `cmake` from the RHEL prerequisites.
+
+## Follow-up: the last C/C++ requirement is the plotters chart stack
+
+Investigated but **deliberately not changed** — recorded so the next person
+does not start from scratch.
+
+`gcc`/`gcc-c++`/`fontconfig-devel` remain required by exactly one chain:
+
+    hyperdb-mcp -> plotters 0.3.7 -> font-kit 0.14.3 -> pathfinder_simd 0.5.6
+
+`pathfinder_simd` (Mozilla's Pathfinder rasterizer) compiles a C++ SIMD shim.
+`font-kit` is a *system* font loader, which is where `freetype-sys` and
+`yeslogic-fontconfig-sys` come from — those two are Linux-only, since font-kit
+uses Core Text on macOS, which is why they never appear in a local
+`cargo tree` on a Mac.
+
+It arrives from `plotters = "0.3"` with default features, and plotters'
+defaults include `ttf = ["font-kit", "ttf-parser", "lazy_static",
+"pathfinder_geometry"]`.
+
+**The swap looks viable.** plotters offers `ab_glyph`, a pure-Rust rasterizer
+with no native deps. Font usage in `chart.rs` is trivially small: only
+`("sans-serif", 11)` at 6 sites and `("sans-serif", 22)` at 7 — no bold or
+italic variants, no user-supplied family names. Removing `ttf` would drop
+`font-kit`, `pathfinder_simd`, `pathfinder_geometry`, `freetype-sys` and
+`yeslogic-fontconfig-sys`, taking the RHEL prerequisites down to `rust-toolset`
+plus `unzip` and fetched protoc — no C or C++ compiler at all.
+
+**But it is not free.** plotters' `ab_glyph` backend bundles **no** default
+font: its `FONTS` map starts empty and `"sans-serif"` resolves to
+`FontError::FontUnavailable` until the application calls
+`register_font(family, style, bytes)`. So it needs a committed font file
+(DejaVu Sans or Liberation Sans for licensing), registration at MCP startup,
+and a licensing review since the font would ship in both the crate and the npm
+package.
+
+Held back as its own change because it puts a binary asset in the repo, and
+because "the chart still renders correctly" is a visual property the test suite
+does not cover — unlike the aws-lc removal, where four real HTTPS requests
+proved equivalence.
 
 ## Deferred: all existing-doc updates
 
