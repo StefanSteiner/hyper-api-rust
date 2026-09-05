@@ -237,7 +237,14 @@ describe({ database: "persistent" })
 sample({ table: "customers", database: "persistent" })
 ```
 
-The `database` parameter is available on `query`, `execute`, `load_data`, `load_file`, `load_files`, `watch_directory`, `describe`, `sample`, `chart`, `export`, and `set_table_metadata`. The shorthand `persist: true` (sugar for `database: "persistent"`) is available on `load_data`, `load_file`, `load_files`, and `watch_directory`. Read tools generally accept a read-only user attachment; write tools require a writable one. The exception is the KV family: every `kv_*` call to a user attachment requires it to be writable because the backing table may need initialization.
+The `database` parameter is available on `query`, `execute`, `load_data`,
+`load_file`, `load_files`, `watch_directory`, `describe`, `sample`, `chart`,
+`export`, and `set_table_metadata`. The shorthand `persist: true` (sugar for
+`database: "persistent"`) is available on `load_data`, `load_file`,
+`load_files`, and `watch_directory`. Read tools generally accept a read-only
+user attachment; write tools require a writable one. The exception is the KV
+family: every `kv_*` call to a user attachment requires it to be writable
+because the backing table may need initialization.
 
 Every successful database-routed response includes the canonical
 `resolved_database`: `"local"`, `"persistent"`, or the lowercase attached

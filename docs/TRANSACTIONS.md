@@ -28,7 +28,13 @@ txn.commit()?;
 
 #### 1. Exclusive Borrowing
 
-`Connection::transaction(&mut self)` takes a mutable (exclusive) borrow of the connection, and `Transaction<'conn>` holds `&'conn mut Connection`. While the `Transaction` exists, the Rust borrow checker prevents any other code from accessing the raw connection — not even for read-only operations. This eliminates an entire class of bugs where application code accidentally issues SQL statements outside the transaction scope, causing data races or logic errors. The protection is enforced at compile time with zero runtime cost.
+`Connection::transaction(&mut self)` takes a mutable (exclusive) borrow of the
+connection, and `Transaction<'conn>` holds `&'conn mut Connection`. While the
+`Transaction` exists, the Rust borrow checker prevents any other code from
+accessing the raw connection — not even for read-only operations. This
+eliminates an entire class of bugs where application code accidentally issues
+SQL statements outside the transaction scope, causing data races or logic
+errors. The protection is enforced at compile time with zero runtime cost.
 
 ```rust
 let mut conn = Connection::connect(endpoint, "db.hyper", CreateMode::DoNotCreate)?;
