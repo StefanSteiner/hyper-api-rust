@@ -101,7 +101,16 @@ Every ingest function (`ingest_json`, `ingest_csv`, `ingest_parquet_file`, `inge
 Three edges to this guarantee, all documented in `src/engine.rs`:
 
 1. **DDL auto-commits.** Hyper commits `CREATE TABLE` / `DROP TABLE` immediately, regardless of the surrounding transaction. In `replace` mode the original table is already gone by the time INSERTs start, so a failed replace-mode ingest leaves an empty table rather than restoring the original. Append mode is fully atomic because it issues DDL only when the target doesn't exist and, when it does, no data is lost on failure.
-2. **Panic safety.** `execute_in_transaction` wraps the closure in `catch_unwind(AssertUnwindSafe(...))`, issues a best-effort ROLLBACK on panic, and `resume_unwind`s the original payload. Without this, a panic inside the closure (unwrap on None, indexing OOB, arithmetic overflow) would leave an open transaction and every subsequent tool call would hit "transaction already in progress" — classified as `InternalError`, not `ConnectionLost`, so the reconnect path at `with_engine` would not rescue it and the engine would stay wedged until restart. Tested via `execute_in_transaction_rolls_back_on_panic` in `tests/transaction_tests.rs`.
+2. **Panic safety.** `execute_in_transaction` wraps the closure in
+   `catch_unwind(AssertUnwindSafe(...))`, issues a best-effort ROLLBACK on
+   panic, and `resume_unwind`s the original payload. Without this, a panic
+   inside the closure (unwrap on None, indexing OOB, arithmetic overflow) would
+   leave an open transaction and every subsequent tool call would hit
+   "transaction already in progress" — classified as `InternalError`, not
+   `ConnectionLost`, so the reconnect path at `with_engine` would not rescue it
+   and the engine would stay wedged until restart. Tested via
+   `execute_in_transaction_rolls_back_on_panic` in
+   `tests/transaction_tests.rs`.
 3. **Post-error wire-protocol quirk.** After a mid-transaction Hyper-level error (e.g. a NOT NULL violation on INSERT), the first SELECT after rollback may return an empty result set due to residual bytes on the connection. Retrying the query once restores normal behavior; the rollback itself is always correct. The `query_resilient` helper in `tests/transaction_tests.rs` is the robust pattern.
 
 ---
@@ -217,15 +226,49 @@ Logs land next to the persistent file when one is supplied (so users find them i
 
 ## Daemon Mode Internals
 
-`Engine::new` defaults to *daemon mode* — it tries `daemon::spawn::ensure_daemon(resolve_port_scan())` first, which discovers an existing daemon via `~/.hyperdb/daemon.json` (overridable via `HYPERDB_STATE_DIR`), else scans the port range for a running daemon, else auto-spawns one on the first free port as a detached background process. The Engine then connects via TCP (`Connection::connect(endpoint, …)`) without owning any `HyperProcess`, and records the daemon's `health_port` so the server's debounced `HEARTBEAT` targets the actual discovered port rather than re-resolving.
+`Engine::new` defaults to *daemon mode* — it tries
+`daemon::spawn::ensure_daemon(resolve_port_scan())` first, which discovers an
+existing daemon via `~/.hyperdb/daemon.json` (overridable via
+`HYPERDB_STATE_DIR`), else scans the port range for a running daemon, else
+auto-spawns one on the first free port as a detached background process. The
+Engine then connects via TCP (`Connection::connect(endpoint, …)`) without
+owning any `HyperProcess`, and records the daemon's `health_port` so the
+server's debounced `HEARTBEAT` targets the actual discovered port rather than
+re-resolving.
 
 Falls back to local mode (per-session `hyperd` via `HyperProcess::new`) when the daemon can't be reached (including `AllOccupied` — the whole scan range is held by foreign processes), or always when `--no-daemon` is passed.
 
-**Port resolution + identity.** `resolve_port_scan()` returns a `PortScan { base, span }`: when `HYPERDB_DAEMON_PORT` is set it pins that exact port (`span = 1`); otherwise it scans `span = DAEMON_PORT_SCAN_SPAN` (16) ports up from `DEFAULT_DAEMON_BASE_PORT` (7485 — deliberately *not* 7484, which is hyperd's conventional gRPC port). `probe_port` classifies each port as `OurDaemon` / `Camped` / `Refused`: liveness is no longer a bare TCP connect but an identity handshake — `health::ping_identified` sends `PING` and requires the reply's first two tokens to be exactly `PONG` and `hyperdb-mcp` (the third token is the daemon version). A foreign process that merely accepts TCP is `Camped` and skipped; only a `Refused` (connection-refused) port is treated as free to spawn on. `discover()` applies the same identity check before trusting `daemon.json`, so a stale or foreign-owned file is detected and removed.
+**Port resolution + identity.** `resolve_port_scan()` returns a
+`PortScan { base, span }`: when `HYPERDB_DAEMON_PORT` is set it pins that exact
+port (`span = 1`); otherwise it scans `span = DAEMON_PORT_SCAN_SPAN` (16) ports
+up from `DEFAULT_DAEMON_BASE_PORT` (7485 — deliberately *not* 7484, which is
+hyperd's conventional gRPC port). `probe_port` classifies each port as
+`OurDaemon` / `Camped` / `Refused`: liveness is no longer a bare TCP connect
+but an identity handshake — `health::ping_identified` sends `PING` and requires
+the reply's first two tokens to be exactly `PONG` and `hyperdb-mcp` (the third
+token is the daemon version). A foreign process that merely accepts TCP is
+`Camped` and skipped; only a `Refused` (connection-refused) port is treated as
+free to spawn on. `discover()` applies the same identity check before trusting
+`daemon.json`, so a stale or foreign-owned file is detected and removed.
 
-**Version takeover.** When discovery finds a running daemon, `maybe_take_over` compares the client's `version::MCP_VERSION` against the daemon's reported version via the pure `client_should_take_over` helper (`semver`). If the client is *strictly newer* it sends `STOP` (which drops the daemon's `HyperProcess`, stopping `hyperd`), waits for the health port to stop answering the identity ping, then respawns a fresh daemon on the same port. Equal/older/unparseable versions reuse the daemon — never a downgrade-kill. This makes upgrades take effect immediately instead of waiting for the old daemon to disappear.
+**Version takeover.** When discovery finds a running daemon, `maybe_take_over`
+compares the client's `version::MCP_VERSION` against the daemon's reported
+version via the pure `client_should_take_over` helper (`semver`). If the client
+is *strictly newer* it sends `STOP` (which drops the daemon's `HyperProcess`,
+stopping `hyperd`), waits for the health port to stop answering the identity
+ping, then respawns a fresh daemon on the same port. Equal/older/unparseable
+versions reuse the daemon — never a downgrade-kill. This makes upgrades take
+effect immediately instead of waiting for the old daemon to disappear.
 
-**Idle shutdown is opt-in.** `DaemonConfig.idle_timeout` is `Option<Duration>`, set only when `--idle-timeout` or `HYPERDB_DAEMON_IDLE_TIMEOUT` is provided (flag wins over env). With neither set the idle-monitor branch of the `run_daemon` `tokio::select!` is replaced by `std::future::pending()` and never fires — the daemon (and `hyperd`) stay resident indefinitely so clients never pay the cold-start "restarting, please retry" round-trip. `DaemonState::last_activity` and the debounced `HEARTBEAT` plumbing still exist and only matter when the timeout is enabled. The hyperd restart-limit shutdown (below) is independent and always active.
+**Idle shutdown is opt-in.** `DaemonConfig.idle_timeout` is `Option<Duration>`,
+set only when `--idle-timeout` or `HYPERDB_DAEMON_IDLE_TIMEOUT` is provided
+(flag wins over env). With neither set the idle-monitor branch of the
+`run_daemon` `tokio::select!` is replaced by `std::future::pending()` and never
+fires — the daemon (and `hyperd`) stay resident indefinitely so clients never
+pay the cold-start "restarting, please retry" round-trip.
+`DaemonState::last_activity` and the debounced `HEARTBEAT` plumbing still exist
+and only matter when the timeout is enabled. The hyperd restart-limit shutdown
+(below) is independent and always active.
 
 ### hyperd liveness monitoring and restart
 
@@ -252,7 +295,21 @@ Two new code paths fire `report_hyperd_error_to_daemon` (best-effort, 200ms time
 
 ### Known limitations
 
-- **Hung-but-alive `hyperd`** (TCP listening, but unresponsive to queries) is NOT detected. The monitor's `try_wait()` returns `None` for a hung process; client tool calls hang on the read side without producing a `ConnectionLost` error. Operator recovery is `hyperdb-mcp daemon stop` followed by reconnect. Note the tradeoff introduced by resident-by-default: the idle timeout used to be an implicit backstop that reaped a wedged daemon after 30 min, after which the next client respawned a fresh one. With idle shutdown now opt-in (off by default), a hung-but-alive `hyperd` stays wedged until a client reports an error (fast-path `REPORT_HYPERD_ERROR`, which fires on a client-side `ConnectionLost`) or an operator runs `daemon stop`. This is an accepted tradeoff — keeping `hyperd` warm avoids the cold-start "restarting, please retry" round-trip on every active session, and genuine hyperd hangs are rare. A future enhancement could add a daemon-side liveness probe (a periodic trivial query with a timeout) to close the "all clients idle + hyperd hung" gap without reintroducing cold-start latency.
+- **Hung-but-alive `hyperd`** (TCP listening, but unresponsive to queries) is
+  NOT detected. The monitor's `try_wait()` returns `None` for a hung process;
+  client tool calls hang on the read side without producing a `ConnectionLost`
+  error. Operator recovery is `hyperdb-mcp daemon stop` followed by reconnect.
+  Note the tradeoff introduced by resident-by-default: the idle timeout used to
+  be an implicit backstop that reaped a wedged daemon after 30 min, after which
+  the next client respawned a fresh one. With idle shutdown now opt-in (off by
+  default), a hung-but-alive `hyperd` stays wedged until a client reports an
+  error (fast-path `REPORT_HYPERD_ERROR`, which fires on a client-side
+  `ConnectionLost`) or an operator runs `daemon stop`. This is an accepted
+  tradeoff — keeping `hyperd` warm avoids the cold-start "restarting, please
+  retry" round-trip on every active session, and genuine hyperd hangs are rare.
+  A future enhancement could add a daemon-side liveness probe (a periodic
+  trivial query with a timeout) to close the "all clients idle + hyperd hung"
+  gap without reintroducing cold-start latency.
 - **Watchers** auto-recover from hyperd restarts: when an ingest fails with a connection-lost error, the watcher rebuilds its connection pool against the engine's current endpoint and retries the file once. Persistent failures (the second attempt also fails) fall through to the standard `failed/` move so a single broken file can't keep the watcher pinned in retry loops.
 
 See `src/daemon/{mod,discovery,health,run,spawn}.rs` for the full implementation.
@@ -268,7 +325,14 @@ See `src/daemon/{mod,discovery,health,run,spawn}.rs` for the full implementation
 - **No `spawn_blocking`**: Engine calls are synchronous in an async runtime. Works today because `rmcp` handles dispatch, but explicit `spawn_blocking` would be more robust.
 - **Watcher thread per directory**: Each `watch_directory` call spawns a dedicated OS thread. For many concurrent watchers, a shared thread pool would be more efficient.
 - **Single shared `Connection`**: `Engine` owns exactly one `Connection` to `hyperd`, and every tool call serializes on an `Arc<Mutex<Option<Engine>>>`. `hyperd` itself can handle many concurrent connections, so a `Connection` pool (or a dedicated watcher-thread `Connection`) would stop a long-running ingest from blocking unrelated tool calls.
-- **`list_changed` is not fired on append-mode table creation**: Both `load_*` append mode and `watch_directory` auto-create the target table via `CREATE TABLE IF NOT EXISTS` when it doesn't exist, but neither path plumbs a "created vs existed" signal back from the ingest layer, so clients subscribed to `hyper://tables` miss the new entry until they rescan. The fix is to have `create_table` report whether it actually created vs. no-oped, bubble that up through the ingest return, and have both callers fire `notify_list_changed` only when a new table appears.
+- **`list_changed` is not fired on append-mode table creation**: Both `load_*`
+  append mode and `watch_directory` auto-create the target table via
+  `CREATE TABLE IF NOT EXISTS` when it doesn't exist, but neither path plumbs a
+  "created vs existed" signal back from the ingest layer, so clients subscribed
+  to `hyper://tables` miss the new entry until they rescan. The fix is to have
+  `create_table` report whether it actually created vs. no-oped, bubble that up
+  through the ingest return, and have both callers fire `notify_list_changed`
+  only when a new table appears.
 
 ---
 

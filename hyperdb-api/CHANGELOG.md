@@ -71,7 +71,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   unification applied it workspace-wide. See the `hyperdb-bootstrap` and
   `hyperdb-api-salesforce` entries for detail.
 
-- **BREAKING:** `KvStore::set`, `KvStore::set_as`, and `KvStore::set_batch` (plus their `AsyncKvStore` twins) now return `SetOutcome` or `BatchSetOutcome` instead of `Result<()>`, reporting whether each write created a new key or overwrote an existing one. The `created` signal eliminates silent data loss when an LLM accidentally clobbers existing KV data. Callers that ignored the `Result` (statement-position `set("k","v")?;`) — including `let _ = set(...)?;` — still compile unchanged. The genuinely breaking cases are callers that named the unit return (`let x: () = set(...)?;`) or that returned `set(...)` where a `Result<()>` was expected; these now see `SetOutcome`/`BatchSetOutcome` and must adapt.
+- **BREAKING:** `KvStore::set`, `KvStore::set_as`, and `KvStore::set_batch`
+  (plus their `AsyncKvStore` twins) now return `SetOutcome` or
+  `BatchSetOutcome` instead of `Result<()>`, reporting whether each write
+  created a new key or overwrote an existing one. The `created` signal
+  eliminates silent data loss when an LLM accidentally clobbers existing KV
+  data. Callers that ignored the `Result` (statement-position `set("k","v")?;`)
+  — including `let _ = set(...)?;` — still compile unchanged. The genuinely
+  breaking cases are callers that named the unit return (`let x: () =
+  set(...)?;`) or that returned `set(...)` where a `Result<()>` was expected;
+  these now see `SetOutcome`/`BatchSetOutcome` and must adapt.
 
 ### Added
 
