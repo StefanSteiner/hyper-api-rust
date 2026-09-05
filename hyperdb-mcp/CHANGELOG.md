@@ -7,33 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Changed
-
-- The `arrow` and `parquet` dependencies moved from **58** to **59**. Not a
-  library-API change (this crate ships a binary), but it removes the `thrift`
-  dependency and the Apache Thrift excessive-size-allocation advisory with it:
-  `parquet` 58.x pinned `thrift ^0.17`, and `parquet` 59 dropped thrift
-  entirely.
-
-- `Engine::execute_in_transaction` now calls `hyperdb-api`'s `*_unguarded`
-  transaction methods instead of the deprecated `begin_transaction` / `commit`
-  / `rollback`, which 1.0.0 removed. No behavior change: the helper still takes
-  `&self`, so the RAII guard remains unavailable to it, and it still rolls back
-  before resuming an unwind. The `#[allow(deprecated)]` it needed is gone.
-  Moving to the guard still waits on
-  [issue #72](https://github.com/tableau/hyper-api-rust/issues/72).
-- **BREAKING:** the minimum supported Rust version is now **1.88**, up from
-  1.81, and the crate is compiled with **edition 2024**. 1.88 is the version
-  Red Hat Enterprise Linux 9.7 ships as `rust-toolset`.
-
-### Fixed
-
-- Public documentation on `PersistentAttachOutcome`, `ensure_exists_in`,
-  `list_in`, `upsert_stub_in`, `set_metadata_in` and `reconcile_in` no longer
-  links to private items, which made `cargo doc` fail under
-  `RUSTDOCFLAGS="-D warnings"`. The prose still names the internal helpers; it
-  just no longer tries to hyperlink to items a reader cannot navigate to.
-
 ### Added
 
 - **`kv_set_many` tool** — atomic batch write accepting an array of `{key, value}` entries. Validates all keys before opening the transaction; an invalid key aborts the whole batch without writing anything. Default behavior (`overwrite` absent or `true`) reports `{stored, created, overwritten, total_bytes}`; with `overwrite: false`, existing keys are skipped (not errors) and the response reports `{stored, created, skipped, total_bytes}` where `created` is the number of keys newly inserted. `total_bytes` sums all submitted values, so it is an upper bound on bytes actually persisted when keys are skipped or duplicated. Each oversized entry (> 1 MiB) adds a keyed `warning` to a `warnings` array.
@@ -74,6 +47,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- The `arrow` and `parquet` dependencies moved from **58** to **59**. Not a
+  library-API change (this crate ships a binary), but it removes the `thrift`
+  dependency and the Apache Thrift excessive-size-allocation advisory with it:
+  `parquet` 58.x pinned `thrift ^0.17`, and `parquet` 59 dropped thrift
+  entirely.
+
+- `Engine::execute_in_transaction` now calls `hyperdb-api`'s `*_unguarded`
+  transaction methods instead of the deprecated `begin_transaction` / `commit`
+  / `rollback`, which 1.0.0 removed. No behavior change: the helper still takes
+  `&self`, so the RAII guard remains unavailable to it, and it still rolls back
+  before resuming an unwind. The `#[allow(deprecated)]` it needed is gone.
+  Moving to the guard still waits on
+  [issue #72](https://github.com/tableau/hyper-api-rust/issues/72).
+- **BREAKING:** the minimum supported Rust version is now **1.88**, up from
+  1.81, and the crate is compiled with **edition 2024**. 1.88 is the version
+  Red Hat Enterprise Linux 9.7 ships as `rust-toolset`.
 - **KV attachment/read-only clarification (supersedes the shorthand in the
   Added notes above).** The global `--read-only` guard leaves the four KV
   readers available, but every `kv_*` call targeting a user attachment still
@@ -91,6 +80,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Public documentation on `PersistentAttachOutcome`, `ensure_exists_in`,
+  `list_in`, `upsert_stub_in`, `set_metadata_in` and `reconcile_in` no longer
+  links to private items, which made `cargo doc` fail under
+  `RUSTDOCFLAGS="-D warnings"`. The prose still names the internal helpers; it
+  just no longer tries to hyperlink to items a reader cannot navigate to.
 - **Hyper-format export side-effect correction (supersedes the older
   Unreleased note below).** Export does not mutate its source database, but it
   creates or replaces the requested destination `.hyper` file and materializes

@@ -145,7 +145,7 @@ block from the suite's stdout.
 
 ### Platform: macOS (Apple Silicon)
 
-**Hardware / software**
+#### Hardware / software
 
 - **OS:** Darwin 26.6.2 (aarch64)
 - **CPU:** Apple M3 Max (14 physical / 14 logical cores)
@@ -301,7 +301,9 @@ unchanged — opt into `ArrowInserter` and `executeQueryColumnar` /
 
 ### Platform: Linux (x86_64)
 
-**Hardware / software** *(placeholder — replace with `host` block from your suite run)*
+#### Hardware / software
+
+*Placeholder — replace with the `host` block from your suite run.*
 
 - **OS:** (e.g. Ubuntu 24.04)
 - **CPU:**
@@ -326,7 +328,7 @@ unchanged — opt into `ArrowInserter` and `executeQueryColumnar` /
 
 ### Platform: Windows (x86_64, native)
 
-**Hardware / software**
+#### Hardware / software
 
 - **OS:** Windows 11 (build 26100) (x86_64)
 - **CPU:** Intel(R) Core(TM) i9-10980XE @ 3.00 GHz (18 physical / 36 logical cores)
@@ -417,7 +419,9 @@ same process.
 
 ### Platform: Windows (x86_64 / WSL2)
 
-**Hardware / software** *(placeholder)*
+#### Hardware / software
+
+*Placeholder — fill in from the `host` block of your suite run.*
 
 - **OS:** (e.g. Ubuntu 22.04 under WSL2)
 - **CPU:**
