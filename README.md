@@ -403,7 +403,7 @@ shims, so a distro-packaged `cargo` never consults it.
 1.88.0 documented in the RHEL 9.7 release notes. The MSRV floor of 1.88 is
 therefore conservative and safe.
 
-Compatibility is enforced on every pull request by
+Compatibility is enforced by
 `.github/workflows/rhel-compatibility.yml`, which runs
 `cargo check --workspace --locked --all-targets` in a `ubi9/ubi` container
 using nothing but the distro toolchain. Reproduce it locally with

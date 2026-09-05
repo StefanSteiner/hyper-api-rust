@@ -3,8 +3,10 @@ name: release
 # Publish to crates.io.
 #
 # Triggered by:
-#   - a GitHub Release published event (release-please drives this via
-#     PAT, so this fires automatically on merge of the release PR), or
+#   - a GitHub Release published event. Note release-please does NOT create
+#     the Release (skip-github-release is true), so a maintainer creates it
+#     by hand after merging the release PR; using a PAT keeps the trigger
+#     from being suppressed. Or
 #   - a manual workflow_dispatch with an explicit existing tag (for
 #     re-runs or emergency releases).
 #

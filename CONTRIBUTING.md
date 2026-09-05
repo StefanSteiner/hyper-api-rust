@@ -45,22 +45,26 @@ CI enforces the machine-checkable portion on every pull request. These map to
 jobs in [`.github/workflows/ci.yml`](.github/workflows/ci.yml):
 
 - `cargo fmt --all -- --check` — `fmt` job
-- `cargo clippy --workspace --all-targets -- -D warnings` — `clippy` job
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings` —
+  `clippy` job
 - `cargo test` across Linux, macOS, and Windows — `test` job
+- `cargo check` on a **pinned 1.88** toolchain — `msrv (1.88)` job; the only
+  gate that compiles at the declared MSRV floor, and it also covers
+  `hyperdb-compile-check`, which `--workspace` skips
+- `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` over all 8 published crates
+  — `doc` job; catches broken intra-doc links and missing docs. `make doc` runs
+  exactly this locally
 - `cargo deny check` — `deny` job; license, advisory, and supply-chain policy
 - `cargo audit --deny warnings` — `audit` job; RustSec advisories
 - Node bindings build plus smoke test — `node-bindings` job
 - `cargo publish --dry-run` and workspace version consistency —
   `publish-dry-run` and `version-consistency` jobs
 
-- RHEL `rust-toolset` compatibility — `rhel-compatibility` job; builds in a
-  `ubi9/ubi` container with the distro toolchain and no rustup
-
-Run locally before pushing:
-
-- `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` (all seven publishable
-  crates) — catches broken intra-doc links and missing docs. **Not currently a
-  CI job**, so it is on you to run it; `make doc` runs exactly this.
+One further gate lives in its own workflow rather than `ci.yml`: RHEL
+`rust-toolset` compatibility, the `rhel-native` job in
+[`rhel-compatibility.yml`](.github/workflows/rhel-compatibility.yml), which
+builds in a `ubi9/ubi` container with the distro toolchain and no rustup. It is
+path-filtered, so a docs-only PR does not run it.
 
 When a lint genuinely cannot be satisfied for a given site, suppress it with `#[expect(lint_name, reason = "<specific reason>")]` rather than bare `#[allow(...)]` — the `reason` is mandatory and `#[expect]` auto-removes itself when the lint would no longer fire. See the [Exceptions](docs/RUST_GUIDELINES.md#exceptions) section of the guidelines page for the current workspace-level waivers.
 

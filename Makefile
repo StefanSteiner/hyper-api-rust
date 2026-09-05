@@ -210,13 +210,15 @@ npm-pack: build-release
 # All features are now always-on (no feature flags needed).
 # salesforce-auth on hyperdb-api-core is the only remaining optional feature.
 # RUSTDOCFLAGS="-D warnings" matches what CONTRIBUTING.md lists as a gate.
-# Covers all seven publishable crates: hyperdb-api-derive and hyperdb-bootstrap
+# Covers all 8 workspace members, matching the CI `doc` job so a local pass
+# means a CI pass. hyperdb-api-derive, hyperdb-bootstrap and hyperdb-api-node
 # were previously omitted, so their rustdoc was never checked.
 doc: clean-doc
 	RUSTDOCFLAGS="-D warnings" cargo doc --no-deps \
 		-p hyperdb-api-core --features hyperdb-api-core/salesforce-auth \
 		-p hyperdb-api \
 		-p hyperdb-api-derive \
+		-p hyperdb-api-node \
 		-p hyperdb-api-salesforce \
 		-p hyperdb-bootstrap \
 		-p hyperdb-mcp \
