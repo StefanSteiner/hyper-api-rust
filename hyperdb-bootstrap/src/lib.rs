@@ -45,7 +45,7 @@ pub mod url;
 pub mod verify;
 
 pub use error::Error;
-pub use install::{install, InstallOptions, InstalledHyperd, VersionSource, DEFAULT_DEST_ROOT};
+pub use install::{DEFAULT_DEST_ROOT, InstallOptions, InstalledHyperd, VersionSource, install};
 pub use platform::Platform;
 pub use release::PinnedRelease;
-pub use verify::{verify_release, VerifyOutcome};
+pub use verify::{VerifyOutcome, verify_release};

@@ -140,39 +140,46 @@ block from the suite's stdout.
 
 **Hardware / software**
 
-- **OS:** Darwin 26.4 (aarch64)
+- **OS:** Darwin 26.6.2 (aarch64)
 - **CPU:** Apple M3 Max (14 physical / 14 logical cores)
 - **Memory:** 96.0 GB
-- **Rust:** rustc 1.94.0 (4a4ef493e 2026-03-02)
-- **Node.js:** v25.8.1 (for the hyperdb-api-node bench)
-- **hyperdb-api version:** 0.1.0-rc.1
-- **hyperd:** Release build on same host
-- **Date:** 2026-05-02 (median of 5 post-warmup runs; TCP `SO_RCVBUF`/`SO_SNDBUF` tuned to 4 MiB)
+- **Rust:** rustc 1.98.0 (88d9e12ae 2026-08-18)
+- **Node.js:** v24.18.0 (for the hyperdb-api-node bench)
+- **hyperdb-api version:** 1.0.0
+- **hyperd:** `0.0.26359.r07abb490` (the pin in `hyperd-version.toml`, arm64 native)
+- **Date:** 2026-09-05 (Rust suite: median of 5 runs; Node bench: median of 15)
 
 #### Rust suite — 100M rows per workload, 4 parallel workers
 
 | Workload | Variant | Flavor | Rows | Time (s) | Rows/sec | MB/sec |
 |---|---|---|---:|---:|---:|---:|
-| insert.bulk | AsyncArrowInserter | async | 100.00M | 3.104 | 32.22 M/s | 737.4 |
-| insert.bulk | AsyncArrowInserter × 4 | async | 100.00M | 1.667 | 59.99 M/s | 1373.0 |
-| insert.bulk | ChunkSender × 4 | sync | 100.00M | 3.671 | 27.24 M/s | 623.5 |
-| insert.bulk | Inserter (HyperBinary) | sync | 100.00M | 3.679 | 27.18 M/s | 622.2 |
-| insert.bulk | spawn_blocking+ChunkSender × 4 | async | 100.00M | 2.177 | 45.94 M/s | 1051.6 |
-| query.aggregation | 4 parallel connections | async | 40 | 0.109 | 365/s | 0.0 |
-| query.aggregation | single connection | sync | 10 | 0.048 | 207/s | 0.0 |
-| query.aggregation | single connection | async | 10 | 0.049 | 204/s | 0.0 |
-| query.filtered | 4 parallel connections | async | 10.00M | 0.220 | 45.36 M/s | 519.1 |
-| query.filtered | single connection | sync | 10.00M | 0.297 | 33.67 M/s | 385.3 |
-| query.filtered | single connection | async | 10.00M | 0.374 | 26.74 M/s | 306.0 |
-| query.full_scan | 4 parallel connections | async | 100.00M | 2.526 | 39.59 M/s | 906.1 |
-| query.full_scan | single connection | sync | 100.00M | 5.317 | 18.81 M/s | 430.5 |
-| query.full_scan | single connection | async | 100.00M | 5.384 | 18.57 M/s | 425.1 |
+| insert.bulk | AsyncArrowInserter | async | 100.00M | 3.360 | 29.76 M/s | 714.3 |
+| insert.bulk | AsyncArrowInserter × 4 | async | 100.00M | 2.063 | 48.47 M/s | 1163.4 |
+| insert.bulk | ChunkSender × 4 | sync | 100.00M | 4.049 | 24.70 M/s | 592.8 |
+| insert.bulk | Inserter (HyperBinary) | sync | 100.00M | 3.998 | 25.01 M/s | 600.3 |
+| insert.bulk | spawn_blocking+ChunkSender × 4 | async | 100.00M | 2.392 | 41.81 M/s | 1003.4 |
+| query.aggregation | 4 parallel connections | async | 40 | 0.109 | 368/s | 0.0 |
+| query.aggregation | single connection | sync | 10 | 0.050 | 199/s | 0.0 |
+| query.aggregation | single connection | async | 10 | 0.049 | 205/s | 0.0 |
+| query.filtered | 4 parallel connections | async | 10.00M | 0.207 | 48.31 M/s | 579.8 |
+| query.filtered | single connection | sync | 10.00M | 0.301 | 33.20 M/s | 398.4 |
+| query.filtered | single connection | async | 10.00M | 0.372 | 26.90 M/s | 322.8 |
+| query.full_scan | 4 parallel connections | async | 100.00M | 1.361 | 73.45 M/s | 1762.9 |
+| query.full_scan | single connection | sync | 100.00M | 3.218 | 31.08 M/s | 745.8 |
+| query.full_scan | single connection | async | 100.00M | 4.014 | 24.91 M/s | 597.9 |
+
+> **Read the `× 4` rows as order-of-magnitude only.** Measured over 5 runs on
+> this host, the multi-connection variants have a run-to-run spread of
+> **±20–61%**, because 4 workers contend on a 14-core laptop. The
+> single-connection rows are stable to within ±2.4% and are the ones to
+> compare across releases.
 
 **Headline takeaways (Rust, macOS / M3 Max):**
 
-- **Async inserts beat sync inserts** at every scale — parallel `AsyncArrowInserter × 4` is the fastest path at **1373 MB/s aggregate** (60 M rows/s), and even single-connection `AsyncArrowInserter` (32 M rows/s) edges ahead of sync `Inserter` (27 M rows/s). The sync paths themselves saw a **~9% improvement** from the 4 MiB `SO_RCVBUF`/`SO_SNDBUF` tuning landed 2026-05.
-- **Parallel queries scale well** on full-scan — 4 connections reach **40 M rows/s / 906 MB/s**, a 2.1× wall-clock speedup over the single-connection sync scan.
-- **The async vs sync gap closed on single-connection queries** — post-tuning, `query.filtered async` runs 27 M rows/s vs the sync path's 34 M rows/s, and full_scan is essentially tied (18.6 vs 18.8 M rows/s). The historical "async is slower single-connection" warning no longer holds at the single-consumer-filter scale. For concurrent workloads, async remains the clear win.
+- **Parallel reads are the standout** — `query.full_scan × 4` reaches **73 M rows/s / 1763 MB/s**, a 2.4× wall-clock speedup over the single-connection sync scan. Parallel inserts lead too, with `AsyncArrowInserter × 4` at **48 M rows/s / 1163 MB/s**.
+- **Sync beats async on single-connection reads.** `query.full_scan` sync runs 31.1 M rows/s against async's 24.9 M rows/s, and `query.filtered` 33.2 vs 26.9 M rows/s. Async wins only once it can use multiple connections, so prefer the sync path for a single streaming consumer and reach for async when you have concurrency to exploit.
+- **Async still wins single-connection *inserts*** — `AsyncArrowInserter` at 29.8 M rows/s versus sync `Inserter` at 25.0 M rows/s.
+- **Single-connection scans are much faster than the previous entry** (18.8 → 31.1 M rows/s sync full-scan). Note this is *not* a controlled comparison: the prior numbers were taken on a different `hyperd`, rustc 1.94, and macOS 26.4, so the gain cannot be attributed to any single change.
 
 #### Node.js bench — 10M rows (same schema)
 
@@ -186,47 +193,61 @@ eager scan exhausts the heap. For large reads through
 `hyperdb-api-node`, always use `executeQueryColumnar` or
 `executeQueryToArrow`.
 
-Numbers below are post-rewrite (all async-native, Inserter renamed
-to `RowInserter`, new `ArrowInserter` class).
-
 | Workload | Variant | Rows | Time (s) | Rows/sec | MB/sec |
 |---|---|---:|---:|---:|---:|
-| insert.bulk | RowInserter (COPY, row API) | 10.00M | 5.330 | 1.88 M/s | 42.9 |
-| insert.bulk | **ArrowInserter (COPY, Arrow IPC)** | **10.00M** | **0.379** | **26.4 M/s** | **603.9** |
-| query.full_scan | executeQuery (eager, 1M only) | 1.00M | 0.678 | 1.47 M/s | 33.8 |
-| query.full_scan | executeQueryStream (1M only) | 1.00M | 0.801 | 1.25 M/s | 28.6 |
-| query.full_scan | executeQueryStream (chunked, 1M only) | 1.00M | 0.874 | 1.15 M/s | 26.2 |
-| query.full_scan | **executeQueryColumnar** | **1.00M** | **0.102** | **9.80 M/s** | **223.7** |
-| query.full_scan | **executeQueryToArrow** | **1.00M** | **0.050** | **20.0 M/s** | **458.7** |
-| query.filtered | executeQueryStream (sensor_id=5) | 100K | 0.114 | 878 K/s | 20.1 |
-| query.filtered | executeQueryColumnar | 100K | 0.015 | 6.80 M/s | 156.3 |
-| query.filtered | **executeQueryToArrow** | **100K** | **0.005** | **20.6 M/s** | **471.7** |
-| query.aggregation | GROUP BY sensor_id | 10 | 0.003 | 320 M/s | — |
+| insert.bulk | RowInserter (COPY, row API) | 10.00M | 4.659 | 2.15 M/s | 51.5 |
+| insert.bulk | **ArrowInserter (COPY, Arrow IPC)** | **10.00M** | **0.242** | **41.3 M/s** | **991.7** |
+| query.full_scan | executeQuery (eager, 1M only) | 1.00M | 0.684 | 1.46 M/s | 35.1 |
+| query.full_scan | executeQueryStream (1M only) | 1.00M | 1.371 | 729 K/s | 17.5 |
+| query.full_scan | executeQueryStream (chunked, 1M only) | 1.00M | 0.746 | 1.34 M/s | 32.2 |
+| query.full_scan | **executeQueryColumnar** | **1.00M** | **0.076** | **13.2 M/s** | **315.8** |
+| query.full_scan | **executeQueryToArrow** | **1.00M** | **0.035** | **28.6 M/s** | **685.7** |
+| query.filtered | executeQueryStream (sensor_id=5) | 100K | 0.176 | 568 K/s | 13.6 |
+| query.filtered | executeQueryColumnar | 100K | 0.012 | 8.33 M/s | 200.0 |
+| query.filtered | **executeQueryToArrow** | **100K** | **0.005** | **20.0 M/s** | **480.0** |
+| query.aggregation | GROUP BY sensor_id | 1.00M | 0.006 | 167 M/s | — |
+
+> **Three of these paths are bimodal on this host**, which is why the table is
+> a median of 15 runs rather than 5. `executeQueryToArrow` on the filtered
+> query lands at either ~0.005 s or ~0.18 s (10 of 15 runs fast);
+> `executeQueryStream` full-scan splits between ~0.79 s and ~1.4 s; and the
+> filtered stream between ~0.11 s and ~0.18 s. A 5-run sample can put the
+> median in either mode, so treat single short runs of these three as
+> unreliable. The sub-10 ms measurements in particular are dominated by one
+> GC pause or JIT decision.
 
 #### Rust vs Node.js — 10M apples-to-apples
 
-Same schema, same dataset shape. Post-rewrite, the Node bindings
-now have parity with Rust on the Arrow-ingest path because
-`ArrowInserter` moves bytes directly into Hyper without any
-per-row JS↔Rust conversion.
+Same schema, same dataset shape, **both harnesses run at 10M rows** so the
+figures line up. Each side's timed region is end-to-end and includes
+generating the rows: the Node Arrow path pays for filling typed arrays,
+building the Arrow table, and IPC-serializing it, all inside the measurement.
 
 | Workload | Rust (best) | Node (best) | Rust factor |
 |---|---|---|---:|
-| insert.bulk | AsyncArrowInserter × 4 — **32.5 M/s / 745 MB/s** | ArrowInserter — 26.4 M/s / 603.9 MB/s | **1.2×** |
-| insert.bulk (row API) | sync Inserter — **~25 M/s** (native) | RowInserter — 1.9 M/s | ~13× (CPU-bound JS encode) |
-| query.full_scan | async × 4 — **36.3 M/s / 831 MB/s** | executeQueryToArrow — 20.0 M/s / 458.7 MB/s | 1.8× |
-| query.filtered | sync — **25.6 M/s / 292.8 MB/s** | executeQueryToArrow — 20.6 M/s / 471.7 MB/s | 1.2× |
-| query.aggregation | sync — 1.46 K/s | GROUP BY — 320 M/s | — (server-side; both latency-bound) |
+| insert.bulk | AsyncArrowInserter × 4 — 37.8 M/s / 907.9 MB/s | **ArrowInserter — 41.3 M/s / 991.7 MB/s** | **0.9× (Node ahead)** |
+| insert.bulk (row API) | sync Inserter — **23.1 M/s / 553.1 MB/s** | RowInserter — 2.15 M/s / 51.5 MB/s | ~11× (CPU-bound JS encode) |
+| query.full_scan | async × 4 — **54.3 M/s / 1302 MB/s** | executeQueryToArrow — 28.6 M/s / 685.7 MB/s | 1.9× |
+| query.filtered | sync — **31.0 M/s / 372.2 MB/s** | executeQueryToArrow — 20.0 M/s / 480.0 MB/s | 1.6× |
+| query.aggregation | sync — ~1 K/s | GROUP BY — 167 M/s | — (server-side; both latency-bound) |
 
-Reading: on the **Arrow-IPC path** Node is within ~20% of native
-Rust — the remaining gap is the IPC serialization cost in JS. On
-the row-by-row API Rust is still ~13× faster because it can skip
-the JS object materialization entirely. The pre-rewrite 16× insert
-gap closes to ~1.2× once callers opt into `ArrowInserter`.
+Reading: on the **Arrow-IPC ingest path Node is at parity with Rust, and at
+this scale slightly ahead.** That is a scale artifact rather than JS beating
+native — Rust's `× 4` variant pays a fixed cost to spin up 4 workers and
+connections, which it only amortizes on larger inputs (the same variant
+reaches 48.5 M rows/s at 100M rows, comfortably ahead of Node). Read the row
+as "the Arrow path costs you nothing at 10M," not as a language ranking.
+
+On **reads** Rust keeps a genuine ~1.6–1.9× lead, since it never materializes
+an Arrow table in a JS heap. And the **row-by-row API remains the one to
+avoid from Node** at ~11× slower than native: that gap is JS object
+materialization, and it is why `ArrowInserter` exists. The guidance is
+unchanged — opt into `ArrowInserter` and `executeQueryColumnar` /
+`executeQueryToArrow` for anything bulk.
 
 ### Platform: Linux (x86_64)
 
-**Hardware / software** _(placeholder — replace with `host` block from your suite run)_
+**Hardware / software** *(placeholder — replace with `host` block from your suite run)*
 
 - **OS:** (e.g. Ubuntu 24.04)
 - **CPU:**
@@ -239,15 +260,15 @@ gap closes to ~1.2× once callers opt into `ArrowInserter`.
 
 #### Rust suite — 100M rows per workload, 4 parallel workers
 
-_Paste the contents of `test_results/benchmark_suite.md` here after running the suite on Linux. Keep the same column order so the section renders identically across platforms._
+*Paste the contents of `test_results/benchmark_suite.md` here after running the suite on Linux. Keep the same column order so the section renders identically across platforms.*
 
 #### Node.js bench — 10M rows
 
-_Paste the `SUMMARY` block from `node __test__/benchmark.mjs 10000000`. See the macOS subsection for the target table shape._
+*Paste the `SUMMARY` block from `node __test__/benchmark.mjs 10000000`. See the macOS subsection for the target table shape.*
 
 #### Rust vs Node.js — 10M apples-to-apples
 
-_Fill in once both Rust (at 10M) and Node (at 10M) numbers are captured._
+*Fill in once both Rust (at 10M) and Node (at 10M) numbers are captured.*
 
 ### Platform: Windows (x86_64, native)
 
@@ -257,7 +278,7 @@ _Fill in once both Rust (at 10M) and Node (at 10M) numbers are captured._
 - **CPU:** Intel(R) Core(TM) i9-10980XE @ 3.00 GHz (18 physical / 36 logical cores)
 - **Memory:** 127.8 GB
 - **Rust:** rustc 1.92.0 (ded5c06cf 2025-12-08)
-- **Node.js:** _not yet captured_
+- **Node.js:** *not yet captured*
 - **hyperdb-api version:** 0.1.0-rc.1
 - **hyperd:** Release build pinned via `hyperdb-bootstrap`
 - **Date:** 2026-05-02
@@ -321,15 +342,15 @@ same process.
 
 #### Node.js bench — 10M rows
 
-_Not yet captured on native Windows. Run via `npm install && npm run build && node __test__/benchmark.mjs 10000000` from `hyperdb-api-node/` and paste the `SUMMARY` block here._
+*Not yet captured on native Windows. Run via `npm install && npm run build && node __test__/benchmark.mjs 10000000` from `hyperdb-api-node/` and paste the `SUMMARY` block here.*
 
 #### Rust vs Node.js — 10M apples-to-apples
 
-_Fill in once both Rust (at 10M) and Node (at 10M) numbers are captured._
+*Fill in once both Rust (at 10M) and Node (at 10M) numbers are captured.*
 
 ### Platform: Windows (x86_64 / WSL2)
 
-**Hardware / software** _(placeholder)_
+**Hardware / software** *(placeholder)*
 
 - **OS:** (e.g. Ubuntu 22.04 under WSL2)
 - **CPU:**
@@ -342,15 +363,15 @@ _Fill in once both Rust (at 10M) and Node (at 10M) numbers are captured._
 
 #### Rust suite — 100M rows per workload, 4 parallel workers
 
-_Paste the contents of `test_results/benchmark_suite.md` here after running the suite under WSL2. WSL2 numbers should land near native Linux — see the [Windows notes](#windows-notes) below for context._
+*Paste the contents of `test_results/benchmark_suite.md` here after running the suite under WSL2. WSL2 numbers should land near native Linux — see the [Windows notes](#windows-notes) below for context.*
 
 #### Node.js bench — 10M rows
 
-_Paste the `SUMMARY` block from `node __test__/benchmark.mjs 10000000`._
+*Paste the `SUMMARY` block from `node __test__/benchmark.mjs 10000000`.*
 
 #### Rust vs Node.js — 10M apples-to-apples
 
-_Fill in once both Rust and Node numbers are captured._
+*Fill in once both Rust and Node numbers are captured.*
 
 ---
 
@@ -423,10 +444,12 @@ out differently — worth measuring.
 
 1. Build in release mode: `cargo build --release -p hyperdb-api --example benchmark_suite`
 2. Run the suite:
+
    ```sh
    HYPERD_PATH=/path/to/hyperd \
      ./target/release/examples/benchmark_suite 100000000 4
    ```
+
 3. Copy-paste:
    - The `Host:` block from stdout into the platform section as the hardware/software block.
    - The `| Workload | … |` markdown table at the end of stdout into the results block.

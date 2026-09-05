@@ -5,6 +5,7 @@ This document describes the Unix Domain Socket (UDS) implementation and provides
 ## Overview
 
 The Hyper Rust API supports multiple transport mechanisms:
+
 - **TCP**: Traditional TCP/IP connections (cross-platform)
 - **Unix Domain Sockets (UDS)**: High-performance IPC on Unix/macOS (completed)
 - **Windows Named Pipes**: High-performance IPC on Windows (TODO)
@@ -33,6 +34,7 @@ pub enum ConnectionEndpoint {
 ### Stream Abstractions
 
 **Async Stream** (`hyper-client/src/async_stream.rs`):
+
 ```rust
 pub enum AsyncStream {
     Tcp(tokio::net::TcpStream),
@@ -44,6 +46,7 @@ pub enum AsyncStream {
 ```
 
 **Sync Stream** (`hyper-client/src/sync_stream.rs`):
+
 ```rust
 pub enum SyncStream {
     Tcp(std::net::TcpStream),
@@ -57,6 +60,7 @@ pub enum SyncStream {
 ## Connection Descriptor Formats
 
 The C API uses the following descriptor formats:
+
 - TCP: `tab.tcp://host:port`
 - Unix Domain Socket: `tab.domain://<directory>/domain/<socket_name>`
 - Windows Named Pipe: `tab.pipe://<host>/pipe/<pipe_name>`
@@ -95,6 +99,7 @@ impl Write for SyncStream { ... }
 #### 2. Client Connection Methods
 
 Each client has three connection methods:
+
 - `connect(&Config)` - TCP via Config (original)
 - `connect_unix(path, &Config)` - UDS via socket path
 - `connect_endpoint(&ConnectionEndpoint, &Config)` - Generic via endpoint
@@ -102,6 +107,7 @@ Each client has three connection methods:
 #### 3. HyperProcess Integration
 
 In `hyperapi/src/process.rs`:
+
 - `TransportMode` enum: `Ipc` (default on Unix) or `Tcp`
 - Socket directory created in temp folder: `/tmp/hyper-<pid>/`
 - Listen connection format: `tab.domain://<dir>/domain/hyper`
@@ -110,6 +116,7 @@ In `hyperapi/src/process.rs`:
 #### 4. Connection::new() Auto-Detection
 
 When connecting via `Connection::new(&HyperProcess, ...)`:
+
 - On Unix: Uses `connection_endpoint()` if available (supports UDS)
 - Falls back to string endpoint parsing (TCP)
 
@@ -139,6 +146,7 @@ pub enum ConnectionEndpoint {
 ```
 
 Add methods:
+
 ```rust
 #[cfg(windows)]
 pub fn named_pipe(host: impl Into<String>, name: impl Into<String>) -> Self { ... }
@@ -160,6 +168,7 @@ NamedPipe(/* Windows named pipe type */),
 ```
 
 For synchronous named pipes, you may need:
+
 - `windows` crate or direct Win32 API calls
 - `CreateFile` to open the pipe
 - Implement `Read` and `Write` traits
@@ -167,6 +176,7 @@ For synchronous named pipes, you may need:
 **File: `hyper-client/src/async_stream.rs`**
 
 For async named pipes with Tokio:
+
 ```rust
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::NamedPipeClient;
@@ -180,6 +190,7 @@ NamedPipe(NamedPipeClient),
 **File: `hyper-client/src/client.rs`**
 
 Add:
+
 ```rust
 #[cfg(windows)]
 pub fn connect_named_pipe(pipe_path: &str, config: &Config) -> Result<Self> { ... }
@@ -196,6 +207,7 @@ Similar updates for async client.
 **File: `hyperapi/src/process.rs`**
 
 Update `start_server()`:
+
 ```rust
 #[cfg(windows)]
 let listen_connection = if transport_mode == TransportMode::Ipc {
@@ -233,6 +245,7 @@ pub fn detect_transport_type(endpoint: &str) -> TransportType {
 **File: `hyperapi/src/connection_builder.rs`**
 
 Add:
+
 ```rust
 #[cfg(windows)]
 fn build_named_pipe(self) -> Result<Connection> { ... }
@@ -257,16 +270,19 @@ Update `build()` match to handle `TransportType::NamedPipe`.
 ## Named Pipe Format Reference
 
 Windows named pipe paths:
+
 - Local: `\\.\pipe\<pipe_name>`
 - Remote: `\\<server>\pipe\<pipe_name>`
 
 Hyper descriptor format:
+
 - `tab.pipe://./pipe/<name>` (local)
 - `tab.pipe://<server>/pipe/<name>` (remote)
 
 ## Build Verification
 
 After implementing, verify:
+
 ```powershell
 cargo build -p hyper-client -p hyperapi
 cargo test -p hyper-client -p hyperapi
@@ -298,12 +314,14 @@ macOS XNU kernel has specialized fast paths for TCP loopback (`127.0.0.1`). The 
 #### 2. Default Socket Buffer Sizes
 
 On macOS:
+
 - **TCP loopback**: Default `SO_SNDBUF`/`SO_RCVBUF` ~128KB-256KB
 - **Unix sockets**: Default buffers often ~8KB-64KB (significantly smaller)
 
 Smaller buffers mean more syscalls for the same data volume. The current implementation does not tune socket buffer sizes for UDS.
 
 **Relevant code** (`hyper-client/src/client.rs:228-241`):
+
 ```rust
 let unix_stream = UnixStream::connect(path).map_err(...)?;
 let stream = SyncStream::unix(unix_stream);
@@ -313,6 +331,7 @@ let stream = SyncStream::unix(unix_stream);
 #### 3. macOS UDS Kernel Path
 
 Unlike Linux (where UDS is heavily optimized for Docker, systemd, etc.), macOS UDS sees less optimization focus. The XNU kernel's UDS implementation has:
+
 - More locking overhead
 - Less aggressive batching
 - No `MSG_ZEROCOPY` equivalent
@@ -324,6 +343,7 @@ macOS only supports path-based Unix sockets (no abstract namespace like Linux). 
 #### 5. TCP_NODELAY vs UDS
 
 In `sync_stream.rs`:
+
 ```rust
 pub fn set_nodelay(&self, nodelay: bool) -> io::Result<()> {
     match self {
@@ -332,6 +352,7 @@ pub fn set_nodelay(&self, nodelay: bool) -> io::Result<()> {
     }
 }
 ```
+
 TCP with `TCP_NODELAY` sends immediately. UDS doesn't have Nagle algorithm, but behavior may differ.
 
 ### Potential Fixes
@@ -346,6 +367,7 @@ TCP with `TCP_NODELAY` sends immediately. UDS doesn't have Nagle algorithm, but 
 ### Diagnostic Commands
 
 To check socket buffer sizes on macOS:
+
 ```bash
 # Check system defaults
 sysctl kern.ipc.maxsockbuf

@@ -51,8 +51,8 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{
-    parse_macro_input, spanned::Spanned, Data, DataStruct, DeriveInput, Field, Fields,
-    GenericArgument, LitInt, LitStr, PathArguments, Type, TypePath,
+    Data, DataStruct, DeriveInput, Field, Fields, GenericArgument, LitInt, LitStr, PathArguments,
+    Type, TypePath, parse_macro_input, spanned::Spanned,
 };
 
 /// How a field maps to a column. Either by name (the default or
@@ -97,6 +97,9 @@ pub fn table_derive(input: TokenStream) -> TokenStream {
 /// [`hyperdb_api::FromRow`] and must be registered via
 /// `#[derive(Table)] #[hyperdb(register)]`.
 ///
+/// [`hyperdb_api::QueryAs<Type>`]: https://docs.rs/hyperdb-api
+/// [`hyperdb_api::FromRow`]: https://docs.rs/hyperdb-api
+///
 /// With the `compile-time` cargo feature enabled, validates at build time that
 /// the SQL is syntactically valid, all referenced tables are registered, and
 /// all struct fields appear in the projected columns.
@@ -122,7 +125,7 @@ pub fn query_as(input: TokenStream) -> TokenStream {
 }
 
 fn expand_query_as(input: &TokenStream2) -> syn::Result<TokenStream2> {
-    use syn::{parse::Parser, punctuated::Punctuated, Expr, Token};
+    use syn::{Expr, Token, parse::Parser, punctuated::Punctuated};
 
     // Parse: Type, "sql_literal" [, expr, expr, ...]
     let parser = Punctuated::<Expr, Token![,]>::parse_terminated;
@@ -191,6 +194,9 @@ fn last_type_ident(ty: &Type) -> Option<&syn::Ident> {
 /// [`hyperdb_api::RowValue`]. No `derive(Table)` is required — scalars project
 /// a single column and don't map to a struct.
 ///
+/// [`hyperdb_api::QueryScalar<Type>`]: https://docs.rs/hyperdb-api
+/// [`hyperdb_api::RowValue`]: https://docs.rs/hyperdb-api
+///
 /// With the `compile-time` feature enabled, validates at build time that the
 /// SQL returns exactly one column.
 #[proc_macro]
@@ -202,7 +208,7 @@ pub fn query_scalar(input: TokenStream) -> TokenStream {
 }
 
 fn expand_query_scalar(input: &TokenStream2) -> syn::Result<TokenStream2> {
-    use syn::{parse::Parser, punctuated::Punctuated, Expr, Token};
+    use syn::{Expr, Token, parse::Parser, punctuated::Punctuated};
 
     let parser = Punctuated::<Expr, Token![,]>::parse_terminated;
     let args = parser.parse2(input.clone())?;

@@ -1,8 +1,8 @@
 // Copyright (c) 2026, Salesforce, Inc. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use napi::bindgen_prelude::*;
@@ -10,7 +10,7 @@ use napi_derive::napi;
 
 use crate::columnar::{self, ColumnarStream};
 use crate::query_stream::{self, QueryStream};
-use crate::result::{extract_row, ResultColumnInfo, RowData};
+use crate::result::{ResultColumnInfo, RowData, extract_row};
 use crate::types::CreateMode;
 
 // =============================================================================

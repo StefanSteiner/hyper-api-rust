@@ -467,13 +467,13 @@ impl<'conn> KvStore<'conn> {
     ///
     /// - [`Error::FeatureNotSupported`] / [`Error::Server`].
     pub fn pop(&self) -> Result<Option<(String, String)>> {
-        self.connection.begin_transaction_raw()?;
+        self.connection.begin_transaction_unguarded()?;
         let result = self.pop_inner();
         match &result {
-            Ok(_) => self.connection.commit_raw()?,
+            Ok(_) => self.connection.commit_unguarded()?,
             Err(_) => {
                 // Best-effort rollback; preserve the original error.
-                let _ = self.connection.rollback_raw();
+                let _ = self.connection.rollback_unguarded();
             }
         }
         result
@@ -525,7 +525,7 @@ impl<'conn> KvStore<'conn> {
         for (key, _) in entries {
             validate_kv_name(key, "key")?;
         }
-        self.connection.begin_transaction_raw()?;
+        self.connection.begin_transaction_unguarded()?;
         let result = (|| {
             let mut outcome = BatchSetOutcome {
                 created: 0,
@@ -541,9 +541,9 @@ impl<'conn> KvStore<'conn> {
             Ok(outcome)
         })();
         match &result {
-            Ok(_) => self.connection.commit_raw()?,
+            Ok(_) => self.connection.commit_unguarded()?,
             Err(_) => {
-                let _ = self.connection.rollback_raw();
+                let _ = self.connection.rollback_unguarded();
             }
         }
         result
@@ -561,7 +561,7 @@ impl<'conn> KvStore<'conn> {
         for (key, _) in entries {
             validate_kv_name(key, "key")?;
         }
-        self.connection.begin_transaction_raw()?;
+        self.connection.begin_transaction_unguarded()?;
         let result = (|| {
             let mut outcome = BatchGuardOutcome {
                 written: 0,
@@ -577,9 +577,9 @@ impl<'conn> KvStore<'conn> {
             Ok(outcome)
         })();
         match &result {
-            Ok(_) => self.connection.commit_raw()?,
+            Ok(_) => self.connection.commit_unguarded()?,
             Err(_) => {
-                let _ = self.connection.rollback_raw();
+                let _ = self.connection.rollback_unguarded();
             }
         }
         result

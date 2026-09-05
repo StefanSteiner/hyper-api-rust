@@ -68,7 +68,7 @@ use std::os::unix::net::UnixStream;
 
 use super::cancel::Cancellable;
 use super::config::Config;
-use super::connection::{parse_error_response, RawConnection};
+use super::connection::{RawConnection, parse_error_response};
 use super::endpoint::ConnectionEndpoint;
 use super::error::{Error, ErrorKind, Result};
 use super::prepare;
@@ -868,12 +868,12 @@ impl Client {
 
         let mut affected = 0u64;
         for msg in messages {
-            if let crate::protocol::message::Message::CommandComplete(body) = msg {
-                if let Ok(tag) = body.tag() {
-                    // Parse affected row count from tag like "INSERT 0 1"
-                    if let Some(count) = parse_affected_rows(tag) {
-                        affected = count;
-                    }
+            if let crate::protocol::message::Message::CommandComplete(body) = msg
+                && let Ok(tag) = body.tag()
+            {
+                // Parse affected row count from tag like "INSERT 0 1"
+                if let Some(count) = parse_affected_rows(tag) {
+                    affected = count;
                 }
             }
         }
@@ -1559,9 +1559,11 @@ mod tests {
 
         // Case-insensitive
         let lowercase = "copy \"users\" FROM STDIN";
-        assert!(lowercase
-            .trim_start()
-            .to_ascii_uppercase()
-            .starts_with("COPY"));
+        assert!(
+            lowercase
+                .trim_start()
+                .to_ascii_uppercase()
+                .starts_with("COPY")
+        );
     }
 }

@@ -15,7 +15,7 @@
 //! Without the feature flag the example still works; validation is skipped.
 
 use hyperdb_api::{Connection, CreateMode, HyperProcess, QueryAs, QueryScalar, Result, Table};
-use hyperdb_api_derive::{query_as, query_scalar, FromRow, Table};
+use hyperdb_api_derive::{FromRow, Table, query_as, query_scalar};
 
 // derive(Table) generates:
 //   - impl Table for User { const NAME = "users"; const CREATE_SQL = "..."; }

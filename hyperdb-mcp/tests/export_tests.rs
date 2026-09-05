@@ -9,7 +9,7 @@ mod common;
 use common::TestEngine;
 use hyperdb_mcp::engine::Engine;
 use hyperdb_mcp::error::ErrorCode;
-use hyperdb_mcp::export::{export_to_file, ExportOptions};
+use hyperdb_mcp::export::{ExportOptions, export_to_file};
 
 /// Create a small test table with mixed types (INT, TEXT, DOUBLE) and two rows.
 fn setup_test_table(te: &TestEngine) {
@@ -372,7 +372,7 @@ fn export_overwrite_true_replaces_existing_file() {
 /// is our consumer, and hyperd sits on both sides.
 #[test]
 fn iceberg_export_round_trips_through_load_iceberg() {
-    use hyperdb_mcp::lakehouse::{ingest_iceberg_table, IcebergIngestOptions};
+    use hyperdb_mcp::lakehouse::{IcebergIngestOptions, ingest_iceberg_table};
 
     let te = TestEngine::new_ephemeral();
     setup_test_table(&te);
@@ -504,7 +504,7 @@ fn iceberg_export_overwrite_replaces_directory() {
 
     // Reload and confirm only the filtered row survived — the original
     // 2-row Iceberg table was replaced, not augmented.
-    use hyperdb_mcp::lakehouse::{ingest_iceberg_table, IcebergIngestOptions};
+    use hyperdb_mcp::lakehouse::{IcebergIngestOptions, ingest_iceberg_table};
     let ingest = ingest_iceberg_table(
         &te.engine,
         iceberg_str,

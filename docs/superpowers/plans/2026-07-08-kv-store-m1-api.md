@@ -14,6 +14,7 @@ Every task's requirements implicitly include this section. Values copied verbati
 
 - **PR title uses a `feat:` prefix** — this is the real feature (M1). M2 (MCP) is a separate branch/plan with a `fix:` prefix; **do not touch `hyperdb-mcp` in M1.**
 - **Backing table (fixed, static) — NO `PRIMARY KEY`:**
+
   ```sql
   CREATE TABLE IF NOT EXISTS _hyperdb_kv_store (
       store_name TEXT NOT NULL,
@@ -21,6 +22,7 @@ Every task's requirements implicitly include this section. Values copied verbati
       value      TEXT
   );
   ```
+
   Table name is `_hyperdb_kv_store` (the `_hyperdb_` prefix so M2's `is_internal_table()` auto-hides it).
 
   **⚠️ CRITICAL — verified empirically (2026-07-08).** Hyper **rejects** a `PRIMARY KEY`
@@ -61,6 +63,7 @@ Every task's requirements implicitly include this section. Values copied verbati
 ### Verified building blocks (call these; do not invent APIs)
 
 Sync (`Connection`, in `connection.rs`):
+
 - `execute_command(&self, &str) -> Result<u64>`
 - `execute_query(&self, &str) -> Result<Rowset<'_>>`
 - `query_params(&self, query: &str, params: &[&dyn ToSqlParam]) -> Result<Rowset<'_>>` — TCP-only
@@ -68,6 +71,7 @@ Sync (`Connection`, in `connection.rs`):
 - `pub(crate) begin_transaction_raw(&self)` / `commit_raw(&self)` / `rollback_raw(&self)` — take `&self` (the escape hatch; `transaction()` needs `&mut self` and cannot be used from a shared borrow)
 
 Sync results (`result.rs`):
+
 - `Rowset::first_row(self) -> Result<Option<Row>>` — **`None` on empty, no error** (use for `get`/`pop`/`exists`)
 - `Rowset::scalar<T: RowValue>(self) -> Result<Option<T>>` — **errors on zero rows** (use only for `COUNT(*)`, which always returns a row)
 - `Rowset::next_chunk(&mut self) -> Result<Option<Vec<Row>>>` — streaming (use for `keys`/`kv_list_stores`)
@@ -100,9 +104,11 @@ Test harness (`hyperdb-api/tests/common/mod.rs`): `TestConnection::new()` (sync)
 ## Task 1: Add `Error::Serialization` variant
 
 **Files:**
+
 - Modify: `hyperdb-api/src/error.rs`
 
 **Interfaces:**
+
 - Produces: `Error::Serialization(String)` variant; `Error::serialization(message: impl Into<String>) -> Self`.
 
 - [ ] **Step 1: Write the failing test**
@@ -170,9 +176,11 @@ git commit -m "feat(kv): add Error::Serialization variant for get_as/set_as"
 ## Task 2: Name validation + shared constants
 
 **Files:**
+
 - Create: `hyperdb-api/src/kv_store.rs` (initial: constants + validator + unit tests only)
 
 **Interfaces:**
+
 - Produces:
   - `pub(crate) const KV_TABLE: &str = "_hyperdb_kv_store";`
   - `pub(crate) const KV_MAX_NAME_BYTES: usize = 512;`
@@ -329,11 +337,13 @@ git commit -m "feat(kv): add KV name validator and shared constants"
 ## Task 3: `KvStore` scaffolding + `Connection::kv_store` + PK-enforcement probe
 
 **Files:**
+
 - Modify: `hyperdb-api/src/kv_store.rs`
 - Modify: `hyperdb-api/src/lib.rs` (add `pub use kv_store::KvStore;`)
 - Create: `hyperdb-api/tests/kv_store_tests.rs`
 
 **Interfaces:**
+
 - Consumes: `KV_TABLE`, `validate_kv_name` (Task 2); `Connection::{execute_command, query_params}` and streaming (`connection.rs`).
 - Produces:
   - `pub struct KvStore<'conn>` (holds `&'conn Connection`, validated `store_name: String`, `table_ref: String`).
@@ -576,10 +586,12 @@ git commit -m "feat(kv): add KvStore scaffolding, kv_store/kv_list_stores, PK pr
 ## Task 4: `get` / `set` (upsert) + `get_as` / `set_as`
 
 **Files:**
+
 - Modify: `hyperdb-api/src/kv_store.rs`
 - Modify: `hyperdb-api/tests/kv_store_tests.rs`
 
 **Interfaces:**
+
 - Consumes: `Connection::{command_params, query_params}`; `Rowset::first_row`; `Row::get`.
 - Produces on `KvStore<'conn>`:
   - `pub fn get(&self, key: &str) -> Result<Option<String>>`
@@ -762,10 +774,12 @@ git commit -m "feat(kv): add get/set upsert and serde get_as/set_as"
 ## Task 5: `delete` / `exists` / `size` / `keys` / `clear` + empty `kv_list_stores`
 
 **Files:**
+
 - Modify: `hyperdb-api/src/kv_store.rs`
 - Modify: `hyperdb-api/tests/kv_store_tests.rs`
 
 **Interfaces:**
+
 - Produces on `KvStore<'conn>`:
   - `pub fn delete(&self, key: &str) -> Result<bool>`
   - `pub fn exists(&self, key: &str) -> Result<bool>`
@@ -944,10 +958,12 @@ git commit -m "feat(kv): add delete/exists/size/keys/clear"
 ## Task 6: `pop` (transactional) + `set_batch` (transactional)
 
 **Files:**
+
 - Modify: `hyperdb-api/src/kv_store.rs`
 - Modify: `hyperdb-api/tests/kv_store_tests.rs`
 
 **Interfaces:**
+
 - Consumes: `Connection::{begin_transaction_raw, commit_raw, rollback_raw}` (`pub(crate)`, take `&self`).
 - Produces on `KvStore<'conn>`:
   - `pub fn pop(&self) -> Result<Option<(String, String)>>`
@@ -1110,9 +1126,11 @@ git commit -m "feat(kv): add transactional pop and set_batch"
 ## Task 7: Compile-fail lifetime doc test
 
 **Files:**
+
 - Modify: `hyperdb-api/src/lib.rs`
 
 **Interfaces:**
+
 - Produces: a `compile_fail` doc test proving a `KvStore` cannot outlive its `Connection`, matching the existing `Inserter` example at `lib.rs:72-80`.
 
 - [ ] **Step 1: Add the doc test**
@@ -1157,11 +1175,13 @@ git commit -m "test(kv): add compile-fail lifetime doc test for KvStore"
 ## Task 8: Async twin — `AsyncKvStore`
 
 **Files:**
+
 - Create: `hyperdb-api/src/async_kv_store.rs`
 - Modify: `hyperdb-api/src/lib.rs` (`mod async_kv_store;` + `pub use async_kv_store::AsyncKvStore;`)
 - Create: `hyperdb-api/tests/async_kv_store_tests.rs`
 
 **Interfaces:**
+
 - Consumes: `AsyncConnection::{execute_command, execute_query, query_params, command_params, begin_transaction_raw, commit_raw, rollback_raw}`; `AsyncRowset::{first_row, scalar, next_chunk}`; `kv_store::{KV_TABLE, validate_kv_name}`.
 - Produces: `pub struct AsyncKvStore<'conn>` + `impl AsyncConnection { pub fn kv_store(&self, name) -> ...; pub async fn kv_list_stores(&self) -> ...; }` and all methods as `async fn`, mirroring Tasks 3-6.
 
@@ -1657,13 +1677,16 @@ git commit -m "feat(kv): add AsyncKvStore async twin"
 ## Task 9: Performance benchmark — single-commit vs batched-commit
 
 **Files:**
+
 - Create: `hyperdb-api/benches/kv_benchmark.rs`
 - Modify: `hyperdb-api/Cargo.toml` (register the example)
 
 **Interfaces:**
+
 - Consumes: `Connection::kv_store`, `KvStore::{clear, set, set_batch}`, `HyperProcess`, `Connection::new`. Standalone — does not use `benches/common.rs`.
 
 **Design:** A plain-`main()` example (matching `benches/benchmark.rs`), run via `cargo run -p hyperdb-api --release --example kv_benchmark [N]`. It measures two write strategies for the KV store:
+
 1. **Single-commit-per-set:** N calls to `kv.set(key, value)` (each an implicit upsert/commit).
 2. **Batched:** N keys written in batches of `BATCH` (default 25, in the 10-50 range) via `kv.set_batch(&batch)`, one transaction per batch.
 
@@ -1799,6 +1822,7 @@ git commit -m "feat(kv): add KV write benchmark (single vs batched commit)"
 ## Task 10: Documentation
 
 **Files:**
+
 - Modify: `hyperdb-api/README.md`
 - Modify: `hyperdb-api/CHANGELOG.md`
 - Modify: `hyperdb-api/DEVELOPMENT.md`

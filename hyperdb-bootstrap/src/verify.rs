@@ -8,10 +8,10 @@
 
 use std::process::Command;
 
+use crate::Error;
 use crate::platform::Platform;
 use crate::release::PinnedRelease;
 use crate::url::build_download_url;
-use crate::Error;
 
 const PLATFORMS: &[Platform] = &[
     Platform::MacosArm64,

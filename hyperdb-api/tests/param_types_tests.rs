@@ -44,10 +44,10 @@ fn test_interval_param() {
     let test = TestConnection::new().expect("Failed to create test connection");
 
     let interval = Interval::new(2, 5, 0); // 2 months, 5 days, 0 microseconds
-                                           // CAST the bound interval param to text so we can assert the VALUE, not
-                                           // just non-null — this proves the [us BE][days BE][months BE] encoding
-                                           // was interpreted correctly (Interval doesn't yet implement RowValue, so
-                                           // we can't read it back as a typed Interval).
+    // CAST the bound interval param to text so we can assert the VALUE, not
+    // just non-null — this proves the [us BE][days BE][months BE] encoding
+    // was interpreted correctly (Interval doesn't yet implement RowValue, so
+    // we can't read it back as a typed Interval).
     let result = test
         .connection
         .query_params(

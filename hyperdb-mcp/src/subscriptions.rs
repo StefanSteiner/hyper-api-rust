@@ -32,9 +32,9 @@
 //!    detached task, but since notify is a bounded per-tool-call cost
 //!    and sessions are short-lived this hasn't mattered in practice.
 
+use rmcp::RoleServer;
 use rmcp::model::ResourceUpdatedNotificationParam;
 use rmcp::service::Peer;
-use rmcp::RoleServer;
 use std::collections::HashMap;
 use std::sync::Mutex;
 

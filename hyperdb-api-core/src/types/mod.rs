@@ -52,7 +52,7 @@ mod traits;
 )]
 mod types;
 
-pub use oid::{oids, Oid, Type};
+pub use oid::{Oid, Type, oids};
 pub use special::{Date, Geography, Interval, Numeric, OffsetTimestamp, Time, Timestamp};
 pub use sql_type::{ColumnDefinition, Nullability, SqlType};
 pub use traits::{FromHyperBinary, IsNull, ToHyperBinary};

@@ -16,9 +16,9 @@ use tracing::{error, info, warn};
 
 use hyperdb_api::{HyperProcess, Parameters, TransportMode};
 
+use super::ENV_IDLE_TIMEOUT;
 use super::discovery::{self, DaemonInfo};
 use super::health::{DaemonState, HealthListener};
-use super::ENV_IDLE_TIMEOUT;
 
 /// Configuration for the daemon process.
 #[derive(Debug)]
@@ -244,7 +244,7 @@ async fn hyperd_monitor(
         // act, so a flag set after this point survives to the next tick.
         let needs_restart = {
             let mut guard = hyper_state.lock().expect("HyperState mutex poisoned");
-            let process_dead = guard.hyper.as_mut().map_or(true, HyperProcess::has_exited);
+            let process_dead = guard.hyper.as_mut().is_none_or(HyperProcess::has_exited);
             // Only consume the flag when we're going to restart anyway, OR
             // when the process is alive and we want to honor a client report.
             if process_dead {

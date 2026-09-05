@@ -94,7 +94,7 @@ fn daemon_state_restart_request_consume_round_trip() {
 
 #[test]
 fn restart_history_records_attempts_under_limit() {
-    use hyperdb_mcp::daemon::run::{try_record_restart_attempt, RestartAttempt};
+    use hyperdb_mcp::daemon::run::{RestartAttempt, try_record_restart_attempt};
     let mut history: Vec<Instant> = Vec::new();
     let t0 = Instant::now();
 
@@ -119,7 +119,7 @@ fn restart_history_records_attempts_under_limit() {
 
 #[test]
 fn restart_history_rejects_fourth_attempt_in_window() {
-    use hyperdb_mcp::daemon::run::{try_record_restart_attempt, RestartAttempt};
+    use hyperdb_mcp::daemon::run::{RestartAttempt, try_record_restart_attempt};
     let mut history: Vec<Instant> = Vec::new();
     let t0 = Instant::now();
 
@@ -139,7 +139,7 @@ fn restart_history_rejects_fourth_attempt_in_window() {
 
 #[test]
 fn restart_history_prunes_entries_older_than_window() {
-    use hyperdb_mcp::daemon::run::{try_record_restart_attempt, RestartAttempt};
+    use hyperdb_mcp::daemon::run::{RestartAttempt, try_record_restart_attempt};
     let mut history: Vec<Instant> = Vec::new();
     let t0 = Instant::now();
 
@@ -762,14 +762,16 @@ fn daemon_idle_timeout_shuts_down_daemon() {
     let idle_timeout = Duration::from_secs(2);
 
     let monitor_state = Arc::clone(&state);
-    let monitor = std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_millis(100));
-        if monitor_state.idle_duration() >= idle_timeout {
-            monitor_state.request_shutdown();
-            break;
-        }
-        if monitor_state.should_shutdown() {
-            break;
+    let monitor = std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_millis(100));
+            if monitor_state.idle_duration() >= idle_timeout {
+                monitor_state.request_shutdown();
+                break;
+            }
+            if monitor_state.should_shutdown() {
+                break;
+            }
         }
     });
 
@@ -798,14 +800,16 @@ fn daemon_heartbeat_prevents_idle_shutdown() {
         }
     });
 
-    let monitor = std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_millis(100));
-        if monitor_state.idle_duration() >= idle_timeout {
-            monitor_state.request_shutdown();
-            break;
-        }
-        if monitor_state.should_shutdown() {
-            break;
+    let monitor = std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_millis(100));
+            if monitor_state.idle_duration() >= idle_timeout {
+                monitor_state.request_shutdown();
+                break;
+            }
+            if monitor_state.should_shutdown() {
+                break;
+            }
         }
     });
 
@@ -1007,11 +1011,11 @@ fn scan_skips_camped_returns_free() {
         let (camped_listener, base) = loop {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let port = listener.local_addr().unwrap().port();
-            if port < u16::MAX {
-                if let Ok(probe) = TcpListener::bind(("127.0.0.1", port + 1)) {
-                    drop(probe);
-                    break (listener, port);
-                }
+            if port < u16::MAX
+                && let Ok(probe) = TcpListener::bind(("127.0.0.1", port + 1))
+            {
+                drop(probe);
+                break (listener, port);
             }
             drop(listener);
         };
@@ -1020,10 +1024,12 @@ fn scan_skips_camped_returns_free() {
         // Spawn a thread that keeps the camped listener alive and accepts
         // connections, answering with non-protocol garbage so the identity
         // check classifies it as `Camped`, not `OurDaemon`.
-        std::thread::spawn(move || loop {
-            if let Ok((mut stream, _)) = camped_listener.accept() {
-                use std::io::Write;
-                let _ = stream.write_all(b"NOPE\n");
+        std::thread::spawn(move || {
+            loop {
+                if let Ok((mut stream, _)) = camped_listener.accept() {
+                    use std::io::Write;
+                    let _ = stream.write_all(b"NOPE\n");
+                }
             }
         });
 
@@ -1815,18 +1821,13 @@ fn kill_pid(pid: u32) {
 fn wait_for_endpoint_change_or_recovery(health_port: u16, timeout_secs: u64) -> Option<String> {
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     while Instant::now() < deadline {
-        if let Ok(response) = health::send_command(health_port, "STATUS") {
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(response.trim()) {
-                if let Some(endpoint) = parsed["hyperd_endpoint"].as_str() {
-                    if let Ok(addr) = endpoint.parse::<std::net::SocketAddr>() {
-                        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500))
-                            .is_ok()
-                        {
-                            return Some(endpoint.to_string());
-                        }
-                    }
-                }
-            }
+        if let Ok(response) = health::send_command(health_port, "STATUS")
+            && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(response.trim())
+            && let Some(endpoint) = parsed["hyperd_endpoint"].as_str()
+            && let Ok(addr) = endpoint.parse::<std::net::SocketAddr>()
+            && std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok()
+        {
+            return Some(endpoint.to_string());
         }
         std::thread::sleep(Duration::from_millis(250));
     }

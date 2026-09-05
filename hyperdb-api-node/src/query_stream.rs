@@ -7,7 +7,7 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use tokio::sync::mpsc;
 
-use crate::result::{extract_row, ResultColumnInfo, RowData};
+use crate::result::{ResultColumnInfo, RowData, extract_row};
 
 /// A chunk result sent from the background task.
 type ChunkResult = std::result::Result<Vec<RowData>, String>;

@@ -1013,15 +1013,15 @@ impl AsyncClient {
 
     fn extract_row_count(messages: &[Message]) -> u64 {
         for msg in messages {
-            if let Message::CommandComplete(body) = msg {
-                if let Ok(tag) = body.tag() {
-                    // Parse formats like "INSERT 0 5", "UPDATE 10", "DELETE 3"
-                    let parts: Vec<&str> = tag.split_whitespace().collect();
-                    if let Some(last) = parts.last() {
-                        if let Ok(count) = last.parse() {
-                            return count;
-                        }
-                    }
+            if let Message::CommandComplete(body) = msg
+                && let Ok(tag) = body.tag()
+            {
+                // Parse formats like "INSERT 0 5", "UPDATE 10", "DELETE 3"
+                let parts: Vec<&str> = tag.split_whitespace().collect();
+                if let Some(last) = parts.last()
+                    && let Ok(count) = last.parse()
+                {
+                    return count;
                 }
             }
         }

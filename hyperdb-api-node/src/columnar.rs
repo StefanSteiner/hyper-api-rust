@@ -82,11 +82,32 @@ impl ColumnarChunk {
     pub fn get_int32_column(&self, index: u32) -> Result<Vec<i32>> {
         match self.columns.get(index as usize) {
             Some(ColumnData::Int32(v)) => Ok(v.clone()),
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "caller-selected column coercion: `get_int32_column` is documented to narrow Int64/Float64 columns into Int32"
-            )]
-            Some(ColumnData::Int64(v)) => Ok(v.iter().map(|&x| x as i32).collect()),
+            // Int64 -> Int32 is integer narrowing, which `as` would wrap
+            // silently. Reject instead: a wrapped value is indistinguishable
+            // from a real one on the JS side.
+            //
+            // Split into a bounds scan and a narrowing pass. Fusing the two by
+            // collecting a `Result` per element measured meaningfully slower on
+            // this path, which is hot enough to be worth the odd shape. The
+            // bounds are widened i32 -> i64, which is lossless.
+            Some(ColumnData::Int64(v)) => {
+                const LO: i64 = i32::MIN as i64;
+                const HI: i64 = i32::MAX as i64;
+
+                if let Some(&out_of_range) = v.iter().find(|&&x| !(LO..=HI).contains(&x)) {
+                    return Err(Error::from_reason(format!(
+                        "value {out_of_range} in column {index} does not fit an Int32; \
+                         use getInt64Column({index}), which widens to Int64 \
+                         (note JS numbers lose precision above 2^53)"
+                    )));
+                }
+
+                Ok(v.iter()
+                    .map(|&x| {
+                        i32::try_from(x).expect("bounds-checked against i32 range just above")
+                    })
+                    .collect())
+            }
             #[expect(
                 clippy::cast_possible_truncation,
                 reason = "caller-selected column coercion: `get_int32_column` is documented to narrow Int64/Float64 columns into Int32"

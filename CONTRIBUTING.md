@@ -13,26 +13,29 @@ The intent and goal of open sourcing this project is to increase the contributor
 Use GitHub Issues page to submit issues, enhancement requests and discuss ideas.
 
 ### Bug Reports and Fixes
--  If you find a bug, please search for it in the [Issues](https://github.com/tableau/hyper-api-rust/issues), and if it isn't already tracked,
+
+- If you find a bug, please search for it in the [Issues](https://github.com/tableau/hyper-api-rust/issues), and if it isn't already tracked,
    [create a new issue](https://github.com/tableau/hyper-api-rust/issues/new). Fill out the "Bug Report" section of the issue template. Even if an Issue is closed, feel free to comment and add details, it will still
    be reviewed.
--  Issues that have already been identified as a bug (note: able to reproduce) will be labelled `bug`.
--  If you'd like to submit a fix for a bug, [send a Pull Request](#creating_a_pull_request) and mention the Issue number.
-  -  Include tests that isolate the bug and verifies that it was fixed.
+- Issues that have already been identified as a bug (note: able to reproduce) will be labelled `bug`.
+- If you'd like to submit a fix for a bug, [send a Pull Request](#creating-a-pull-request) and mention the Issue number.
+- Include tests that isolate the bug and verifies that it was fixed.
 
 ### New Features
--  If you'd like to add new functionality to this project, describe the problem you want to solve in a [new Issue](<!-- TODO: UPDATE_REPO_URL -->/issues/new).
--  Issues that have been identified as a feature request will be labelled `enhancement`.
--  If you'd like to implement the new feature, please wait for feedback from the project
+
+- If you'd like to add new functionality to this project, describe the problem you want to solve in a [new Issue](https://github.com/tableau/hyper-api-rust/issues/new).
+- Issues that have been identified as a feature request will be labelled `enhancement`.
+- If you'd like to implement the new feature, please wait for feedback from the project
    maintainers before spending too much time writing the code. In some cases, `enhancement`s may
    not align well with the project objectives at the time.
 
 ### Tests, Documentation, Miscellaneous
--  If you'd like to improve the tests, you want to make the documentation clearer, you have an
+
+- If you'd like to improve the tests, you want to make the documentation clearer, you have an
    alternative implementation of something that may have advantages over the way its currently
    done, or you have any other change, we would be happy to hear about it!
-  -  If its a trivial change, go ahead and [send a Pull Request](#creating_a_pull_request) with the changes you have in mind.
-  -  If not, [open an Issue](<!-- TODO: UPDATE_REPO_URL -->/issues/new) to discuss the idea first.
+- If its a trivial change, go ahead and [send a Pull Request](#creating-a-pull-request) with the changes you have in mind.
+- If not, [open an Issue](https://github.com/tableau/hyper-api-rust/issues/new) to discuss the idea first.
 
 If you're new to our project and looking for some way to make your first contribution, look for
 Issues labelled `good first contribution`.
@@ -41,13 +44,30 @@ Issues labelled `good first contribution`.
 
 This project follows the **[Microsoft Pragmatic Rust Guidelines](https://microsoft.github.io/rust-guidelines/)**. The repo-specific adaptation — what is machine-enforced, what is reviewer-enforced, and the list of documented exceptions — is in [docs/RUST_GUIDELINES.md](docs/RUST_GUIDELINES.md).
 
-CI enforces the machine-checkable portion on every pull request:
+CI enforces the machine-checkable portion on every pull request. These map to
+jobs in [`.github/workflows/ci.yml`](.github/workflows/ci.yml):
 
-- `cargo fmt --all -- --check`
-- `cargo clippy --workspace --all-targets -- -D warnings`
-- `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` (on published crates)
-- `cargo deny check` — license, advisory, and supply-chain policy
-- `cargo audit --deny warnings` — RustSec advisories
+- `cargo fmt --all -- --check` — `fmt` job
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings` —
+  `clippy` job
+- `cargo test` across Linux, macOS, and Windows — `test` job
+- `cargo check` on a **pinned 1.88** toolchain — `msrv (1.88)` job; the only
+  gate that compiles at the declared MSRV floor, and it also covers
+  `hyperdb-compile-check`, which `--workspace` skips
+- `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` over all 8 published crates
+  — `doc` job; catches broken intra-doc links and missing docs. `make doc` runs
+  exactly this locally
+- `cargo deny check` — `deny` job; license, advisory, and supply-chain policy
+- `cargo audit --deny warnings` — `audit` job; RustSec advisories
+- Node bindings build plus smoke test — `node-bindings` job
+- `cargo publish --dry-run` and workspace version consistency —
+  `publish-dry-run` and `version-consistency` jobs
+
+One further gate lives in its own workflow rather than `ci.yml`: RHEL
+`rust-toolset` compatibility, the `rhel-native` job in
+[`rhel-compatibility.yml`](.github/workflows/rhel-compatibility.yml), which
+builds in a `ubi9/ubi` container with the distro toolchain and no rustup. It is
+path-filtered, so a docs-only PR does not run it.
 
 When a lint genuinely cannot be satisfied for a given site, suppress it with `#[expect(lint_name, reason = "<specific reason>")]` rather than bare `#[allow(...)]` — the `reason` is mandatory and `#[expect]` auto-removes itself when the lint would no longer fire. See the [Exceptions](docs/RUST_GUIDELINES.md#exceptions) section of the guidelines page for the current workspace-level waivers.
 
@@ -110,6 +130,7 @@ Two gotchas to avoid:
 GPG signing is also supported — see [GitHub's signing-commits guide](https://docs.github.com/en/authentication/managing-commit-signature-verification/signing-commits) for the GPG and S/MIME paths. SSH is the recommended default for this repo.
 
 # Creating a Pull Request
+
 1. **Ensure the bug/feature was not already reported** by searching on GitHub under Issues. If none exists, create a new issue so that other contributors can keep track of what you are trying to add/fix and offer suggestions (or let you know if there is already an effort in progress).
 2. **Fork** the repository on GitHub.
 3. **Clone** the forked repo to your machine.
@@ -122,6 +143,7 @@ GPG signing is also supported — see [GitHub's signing-commits guide](https://d
 > **NOTE**: Be sure to [sync your fork](https://help.github.com/articles/syncing-a-fork/) before making a pull request.
 
 # Contributor License Agreement ("CLA")
+
 In order to accept your pull request, we need you to submit a CLA. You only need
 to do this once to work on any of Salesforce's open source projects.
 
@@ -188,9 +210,14 @@ the next version and generate the changelog automatically. Commit-message
 prefixes drive the version bump per the table in
 [Commit Types and Version Impact](#commit-types-and-version-impact) above.
 
-Contributors do **not** edit `CHANGELOG.md` files by hand and do **not** bump
-versions in `Cargo.toml` / `package.json` manually. Both are regenerated by
-release-please on every push to `main`.
+Contributors do **not** edit the **root** [`CHANGELOG.md`](CHANGELOG.md) by
+hand and do **not** bump versions in `Cargo.toml` / `package.json` manually.
+Both are regenerated by release-please on every push to `main`.
+
+The **per-crate** `CHANGELOG.md` files are different: each carries a
+`## [Unreleased]` section, none is managed by release-please, and you *are*
+expected to append to them for user-visible API changes. See
+[AGENTS.md](AGENTS.md) reminder 8 for the policy and the full file list.
 
 ## What maintainers do
 
@@ -202,13 +229,20 @@ Summary:
 2. release-please opens (or updates) a single PR titled
    `chore(main): release X.Y.Z` containing the version bumps and CHANGELOG
    updates.
-3. Review and **merge** that PR when ready to ship. release-please tags the
-   merge commit and creates the GitHub Release.
+3. Review and **merge** that PR when ready to ship. Merging does *not* tag:
+   `release-please-config.json` sets `skip-github-release: true`, so the
+   maintainer creates the `vX.Y.Z` tag and GitHub Release by hand. This is a
+   deliberate human checkpoint — see
+   [`docs/GITHUB_OPERATIONS.md`](docs/GITHUB_OPERATIONS.md#cutting-a-release)
+   for the exact `gh release create` invocation, including the `--prerelease`
+   flag required for `-rc.N` tags.
 4. Wait for CI to pass, then **manually trigger** the publish workflows:
+
    ```bash
    gh workflow run release.yml -f tag=vX.Y.Z
    gh workflow run npm-build-publish.yml -f tag=vX.Y.Z
    ```
+
    See [`docs/GITHUB_OPERATIONS.md`](docs/GITHUB_OPERATIONS.md#cutting-a-release)
    for why this step is manual (GitHub Actions `GITHUB_TOKEN` limitation).
 
@@ -222,14 +256,18 @@ footer in a commit on `main` — see
 |---------|----------|-------|
 | `hyperdb-api` | crates.io | Flagship public API |
 | `hyperdb-api-core` | crates.io | Internal implementation detail. Published because Cargo requires it; not a stable API — depend on `hyperdb-api` instead. |
+| `hyperdb-api-derive` | crates.io | Derive macros (`derive(Table)`, `query_as!`). Added directly by users rather than re-exported, to break the `hyperdb-api` → derive → `hyperdb-compile-check` cycle. |
 | `hyperdb-api-salesforce` | crates.io | Salesforce Data Cloud OAuth |
 | `sea-query-hyperdb` | crates.io | HyperDB dialect for sea-query |
 | `hyperdb-mcp` | crates.io | MCP server CLI |
 | `hyperdb-bootstrap` | crates.io | `hyperd` download helper |
-| `hyperdb-api-node` | npm | Node.js/TypeScript bindings |
+| `hyperdb-compile-check` | crates.io | Compile-time SQL validation backend. Not a workspace member (it declares its own `[workspace]` to break the dependency cycle), but release-please manages its version and it must be published for `hyperdb-api-derive`'s off-by-default `compile-time` feature to resolve. |
+| `hyperdb-api-node` | npm | Node.js/TypeScript bindings. `publish = false` for crates.io — the only crate in the tree that is not a Cargo publish target. |
 
 # Code of Conduct
+
 Please follow our [Code of Conduct](CODE_OF_CONDUCT.md).
 
 # License
+
 By contributing your code, you agree to license your contribution under the terms of our project [MIT](LICENSE-MIT) and [Apache-2.0](LICENSE-APACHE) dual license, and to sign the [Salesforce CLA](https://cla.salesforce.com/sign-cla).

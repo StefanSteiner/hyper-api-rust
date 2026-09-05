@@ -1,5 +1,5 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
     "hyperdb-api-core",
     "hyperdb-api",
@@ -27,8 +27,8 @@ exclude = ["hyperdb-compile-check"]
 
 [workspace.package]
 version = "0.7.3"
-edition = "2021"
-rust-version = "1.81"
+edition = "2024"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/tableau/hyper-api-rust"
 homepage = "https://github.com/tableau/hyper-api-rust"
@@ -47,7 +47,7 @@ rand = "0.10"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 sha2 = "0.11"
 socket2 = "0.6"
-sysinfo = "0.39"
+sysinfo = "0.38"
 tempfile = "3.20"
 thiserror = "2.0"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros"] }
@@ -59,7 +59,7 @@ tracing = "0.1"
 webpki-roots = "1.0"
 zeroize = "1.8"
 # Salesforce OAuth dependencies
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "form"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "form"] }
 jsonwebtoken = { version = "11", default-features = false, features = ["use_pem", "rust_crypto"] }
 rsa = { version = "0.9", features = ["pem"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -118,29 +118,44 @@ allow_attributes_without_reason = "warn"
 # Shared-ownership idioms.
 clone_on_ref_ptr = "warn"
 
-# Known-noisy pedantic lints we intentionally relax. Revisit post-1.0.
+# Known-noisy pedantic lints we intentionally relax.
 #
 # Microsoft's Pragmatic Rust Guidelines explicitly permit per-lint opt-outs
 # when a pedantic lint proves noisy in practice: "Undesired lints (e.g.,
 # numeric casts) can be opted back out of on a case-by-case basis."
-# We keep documentation-quality lints (`missing_errors_doc`,
-# `missing_panics_doc`, `missing_debug_implementations`) at `warn` to align
-# with M-CANONICAL-DOCS; they block release at `-D warnings` time, and the
-# remaining work is tracked for a post-1.0 docs pass.
 module_name_repetitions   = "allow"
 too_many_lines            = "allow"
 doc_markdown              = "allow"  # cosmetic: backticking every type name in rustdoc is churn
-must_use_candidate        = "allow"  # API-judgment call, not mechanical
 unreadable_literal        = "allow"  # cosmetic: digit separators on wire-format constants
 items_after_statements    = "allow"  # stylistic: benchmarks and tests use local helpers
 match_same_arms           = "allow"  # match readability; consolidating can hide semantic grouping
 match_wildcard_for_single_variants = "allow"  # cfg-conditional enum variants make wildcards cross-platform correct
-missing_errors_doc        = "warn"
-missing_panics_doc        = "warn"
 
-# Transitive dependency collisions from the workspace resolver (rand 0.8/0.9,
-# thiserror 1/2, windows_* 0.48/0.52/0.53, etc.) are surfaced per-crate by
-# `clippy::cargo`. They are not code-fixable without a dep-graph audit.
-# Tracked post-1.0; Microsoft guidelines explicitly permit opt-outs on the
-# `cargo` group.
+# `must_use_candidate` measures *public API* ergonomics. Measured 2026-09-05:
+# 141 sites workspace-wide, of which 122 are in `hyperdb-api-core` (whose
+# lib.rs states it is not a public API), 10 are internal daemon helpers in the
+# `hyperdb-mcp` binary, and 8 are in prost-generated protobuf. Exactly one was
+# in the flagship public API, and it is now `#[must_use]`. So this stays
+# `allow` here and `hyperdb-api/src/lib.rs` opts back in with a crate-level
+# `#![warn]`, which is where the lint actually carries meaning.
+must_use_candidate        = "allow"
+
+# Promoted from `warn` to `deny` on 2026-09-05. The previous comment claimed a
+# large backlog pending a post-1.0 docs pass; a real measurement found **zero**
+# sites for either lint, so the backlog had already been closed and the note
+# was stale. Denying them keeps it that way (M-CANONICAL-DOCS).
+missing_errors_doc        = "deny"
+missing_panics_doc        = "deny"
+
+# Transitive dependency version splits, surfaced per-crate by `clippy::cargo`.
+# Not code-fixable: they are version-line splits inside our dependencies, not
+# choices this workspace makes.
+#
+# Measured 2026-09-05, 17 remaining: base64, hashbrown, syn, getrandom, rand,
+# rand_core, thiserror, thiserror-impl, r-efi, wit-bindgen, and the RustCrypto
+# 0.10/0.11 cluster (digest, sha2, hmac, block-buffer, crypto-common,
+# const-oid, cpufeatures). The `windows_*` triplet the previous note listed is
+# gone, dropped along with the quinn stack when aws-lc-rs was replaced by ring.
+#
+# Microsoft guidelines explicitly permit opt-outs on the `cargo` group.
 multiple_crate_versions   = { level = "allow", priority = 1 }

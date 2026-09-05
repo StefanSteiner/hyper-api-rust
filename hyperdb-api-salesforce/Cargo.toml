@@ -13,6 +13,9 @@ categories = ["database", "authentication"]
 
 [dependencies]
 reqwest = { workspace = true }
+# The workspace `reqwest` entry uses `rustls-no-provider`, which ships no
+# crypto provider, so we install `ring` ourselves before building a client.
+rustls = { workspace = true }
 jsonwebtoken = { workspace = true }
 rsa = { workspace = true }
 url = { workspace = true }
@@ -30,7 +33,7 @@ workspace = true
 [dev-dependencies]
 rand = { workspace = true }
 hyperdb-api-core = { path = "../hyperdb-api-core", features = ["salesforce-auth"] }
-arrow = { version = "58.0", default-features = false, features = ["ipc"] }
+arrow = { version = "59.0", default-features = false, features = ["ipc"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1", features = ["full"] }
 

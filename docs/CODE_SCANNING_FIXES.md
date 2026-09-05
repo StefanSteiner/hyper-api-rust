@@ -37,6 +37,7 @@ notes on the flagged lines.
 **Rule:** `rust/hard-coded-cryptographic-value`
 
 All five alerts pointed to `#[cfg(test)]` modules containing test fixtures:
+
 - `auth.rs` — MD5 password test vector from PostgreSQL docs
 - `config.rs` — builder test with `"mypass"` literal
 - `connection.rs` — test mock construction

@@ -123,10 +123,10 @@ impl StatsSummary {
                 } else {
                     query_rows += o.rows_affected;
                 }
-            } else if let Some(ref e) = o.error {
-                if errors.len() < 100 {
-                    errors.push(e.clone());
-                }
+            } else if let Some(ref e) = o.error
+                && errors.len() < 100
+            {
+                errors.push(e.clone());
             }
         }
 

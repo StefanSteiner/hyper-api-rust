@@ -10,7 +10,7 @@ binaries on the Releases page come from".
 
 ## Repository
 
-- **Canonical URL:** https://github.com/tableau/hyper-api-rust
+- **Canonical URL:** <https://github.com/tableau/hyper-api-rust>
 - **Default branch:** `main`
 - **License:** dual MIT / Apache-2.0 (see [LICENSE-MIT.txt](../LICENSE-MIT.txt), [LICENSE-APACHE.txt](../LICENSE-APACHE.txt))
 - **Governance:** see [CONTRIBUTING.md](../CONTRIBUTING.md) for the
@@ -18,15 +18,16 @@ binaries on the Releases page come from".
 
 ## Workflows
 
-Four GitHub Actions workflows live under [`.github/workflows/`](../.github/workflows/):
+Six GitHub Actions workflows live under [`.github/workflows/`](../.github/workflows/):
 
 | Workflow | File | Triggers | Purpose |
 |---|---|---|---|
 | `ci` | [ci.yml](../.github/workflows/ci.yml) | `push` to `main`, all PRs, manual | fmt, clippy, full test matrix, `cargo deny`, `cargo audit`, `cargo publish --dry-run` |
-| `release-please` | [release-please.yml](../.github/workflows/release-please.yml) | `push` to `main`, manual | open/update the release PR; on merge, create the `vX.Y.Z` tag + GitHub Release |
-| `release` | [release.yml](../.github/workflows/release.yml) | tag push matching `v*.*.*` / `v*.*.*-rc.*`, manual | re-run tests, publish the 6 Rust crates to crates.io (`hyperdb-api-node` is published separately to npm) |
+| `release-please` | [release-please.yml](../.github/workflows/release-please.yml) | `push` to `main`, manual | open/update the release PR with version bumps + CHANGELOG. Does **not** tag: `skip-github-release: true` means the maintainer creates the tag and Release by hand — see [Cutting a release](#cutting-a-release) |
+| `release` | [release.yml](../.github/workflows/release.yml) | GitHub Release `published`, manual (`workflow_dispatch` against an existing tag) | re-run tests, publish the 8 Rust crates to crates.io (`hyperdb-api-node` is published separately to npm). **Not** a tag push: that trigger was removed to stop duplicate runs, so pushing a tag alone publishes nothing |
 | `npm-build-publish` | [npm-build-publish.yml](../.github/workflows/npm-build-publish.yml) | GitHub Release published, manual | build npm platform packages with bundled hyperd, publish to npm registry |
 | `verify-hyperd-pin` | [verify-hyperd-pin.yml](../.github/workflows/verify-hyperd-pin.yml) | changes to `hyperdb-bootstrap/hyperd-version.toml` or its source, weekly cron, manual | `HEAD` every pinned hyperd release URL to catch Tableau yanks / typos |
+| `rhel-compatibility` | [rhel-compatibility.yml](../.github/workflows/rhel-compatibility.yml) | `push` to `main` and PRs touching Rust/manifests/toolchain config, manual | `cargo check --workspace --locked --all-targets` in a `ubi9/ubi` container using RHEL's `rust-toolset` and no rustup — the M-OOBE enforcement |
 
 ### CI (`ci.yml`)
 
@@ -189,8 +190,9 @@ still resolve (via `hyperdb-bootstrap verify`). Runs:
 ## Cutting a release
 
 Releases are driven by [release-please](https://github.com/googleapis/release-please).
-Maintainers don't bump versions, edit changelogs, or push tags by hand — those
-steps are automated based on [Conventional Commits](https://www.conventionalcommits.org/).
+Maintainers don't bump versions or edit changelogs by hand — those steps are
+automated from [Conventional Commits](https://www.conventionalcommits.org/).
+The tag and GitHub Release **are** created by hand; see step 5.
 
 ### How it flows
 
@@ -200,7 +202,8 @@ steps are automated based on [Conventional Commits](https://www.conventionalcomm
 2. The [release-please workflow](../.github/workflows/release-please.yml)
    runs on every push to `main`. It opens (or updates) a single
    **release PR** titled `chore(main): release X.Y.Z`. That PR contains:
-   - All 7 workspace crates' versions bumped (Cargo.toml + package.json).
+   - All 8 workspace members' versions bumped (Cargo.toml + package.json),
+     plus out-of-workspace `hyperdb-compile-check` — 9 path crates in all.
    - The `optionalDependencies` and inter-crate version pins updated.
    - A new dated section in each crate's `CHANGELOG.md` summarizing the
      conventional commits that landed since the last release.
@@ -209,20 +212,27 @@ steps are automated based on [Conventional Commits](https://www.conventionalcomm
    different bump is needed (e.g., promote a `0.x.0` patch to a minor) by
    editing the PR or by tagging commits with
    [`Release-As: X.Y.Z`](https://github.com/googleapis/release-please?tab=readme-ov-file#how-can-i-fix-release-notes).
-4. **Merge the release PR.** release-please then:
-   - Creates a `vX.Y.Z` git tag on the merge commit.
-   - Creates a GitHub Release with the auto-generated changelog.
-5. **Publish workflows fire automatically.** Because release-please
-   uses a PAT (`RELEASE_PLEASE_TOKEN`), the `release: published` event
-   triggers both `release.yml` (crates.io) and `npm-build-publish.yml`
-   (npm) automatically. The npm workflow waits for CI to pass before
-   building.
+4. **Merge the release PR.** This lands the version bumps and changelogs on
+   `main`. It does **not** tag: `skip-github-release` is `true` in
+   `release-please-config.json`, so release-please creates neither the tag nor
+   the GitHub Release.
+5. **Create the tag and Release by hand.** See
+   [Manual tag step](#manual-tag-step-after-release-please-pr-merge) below. This is the step that actually
+   starts a publish, so skipping it leaves the release stalled with everything
+   merged and nothing shipped.
+6. **Publish workflows fire from the Release.** `gh release create` emits
+   `release: published`, which triggers both `release.yml` (crates.io) and
+   `npm-build-publish.yml` (npm). Because the Release is created with a PAT
+   rather than the default `GITHUB_TOKEN`, those triggers are not suppressed.
+   The npm workflow waits for CI to pass before building.
 
    If a publish workflow fails and needs a re-run:
+
    ```bash
    gh workflow run release.yml -f tag=vX.Y.Z
    gh workflow run npm-build-publish.yml -f tag=vX.Y.Z
    ```
+
    Already-published crates are skipped gracefully on re-run.
 
 ### Manual tag step (after release-please PR merge)
@@ -293,9 +303,11 @@ shipped yet — you have options:
   different version number).
 - **Force a `Release-As` bump** to skip the bad version with an empty
   commit on `main`:
+
   ```bash
   git commit --allow-empty -m "chore: release X.Y.(Z+1)" -m "Release-As: X.Y.(Z+1)"
   ```
+
   release-please then opens a fresh PR for that version.
 - **Revert the release PR's commit on `main`** if the bump itself is
   wrong, fix the manifest by hand if needed, and let release-please
@@ -309,19 +321,19 @@ bump implied. Mark a commit as a breaking change by either appending `!`
 after the type (e.g. `feat!:`) or by adding a `BREAKING CHANGE:` footer
 in the commit body.
 
-**Important pre-1.0 caveat:** while the workspace is on a `0.x.y`
-version, semver treats the entire `0.x` line as unstable, and
-release-please follows suit — a breaking change bumps the **minor**
-component, not the major. The major component stays at `0` until you
-explicitly opt into `1.0.0`.
+Now that the workspace is on `1.x`, standard semver applies: a breaking
+change bumps the **major** component. This differs from the `0.x` line,
+where release-please mapped a breaking change to a minor bump because
+semver treats all of `0.x` as unstable — so bump examples written before
+1.0.0 do not carry over.
 
-| Commit prefix on `main` | Bump from `0.1.0` to |
+| Commit prefix on `main` | Bump from `1.0.0` to |
 |---|---|
-| `fix:`, `fix(scope):` | `0.1.1` (patch) |
-| `feat:`, `feat(scope):` | `0.2.0` (minor) |
-| `feat!:` / `fix!:` / `BREAKING CHANGE:` footer | `0.2.0` (still minor — no major bump while pre-1.0) |
+| `fix:`, `fix(scope):` | `1.0.1` (patch) |
+| `feat:`, `feat(scope):` | `1.1.0` (minor) |
+| `feat!:` / `fix!:` / `BREAKING CHANGE:` footer | `2.0.0` (major) |
 | `chore:`, `docs:`, `refactor:`, `test:`, `style:`, `ci:`, `perf:`, `build:` | no release |
-| Manual `Release-As: 1.0.0` footer | `1.0.0` (forces the major bump) |
+| Manual `Release-As: X.Y.Z` footer | exactly `X.Y.Z` (overrides the computed bump) |
 
 After the workspace is on `1.x.y`, the same prefixes follow normal
 semver: `feat!:` will bump `1.2.3` → `2.0.0` as expected. To stabilize
@@ -352,7 +364,7 @@ hyperdb-mcp` doesn't pull a pre-release by default.
 
 ### Lockstep versioning
 
-All 7 workspace crates share a single version number, enforced by the
+All 8 workspace members share a single version number, enforced by the
 `linked-versions` plugin in
 [release-please-config.json](../release-please-config.json). When any
 crate's commits trigger a bump, every crate moves together. This keeps
@@ -363,10 +375,10 @@ without manual edits.
 
 Once both `release.yml` and `npm-build-publish.yml` go green:
 
-- https://github.com/tableau/hyper-api-rust/releases should list the
+- <https://github.com/tableau/hyper-api-rust/releases> should list the
   new tag with auto-generated release notes.
 - Each crate appears on crates.io under the new version: e.g.
-  https://crates.io/crates/hyperdb-api/X.Y.Z.
+  <https://crates.io/crates/hyperdb-api/X.Y.Z>.
 - `npm view hyperdb-mcp version` and
   `npm view hyperdb-api-node version` report the new version.
 
@@ -440,9 +452,11 @@ typically already granted), so that's what's actually deployed.
    dropdown next to it, authorize it for the `tableau` org — without
    this the secret update succeeds but the token can't touch the repo.
 5. Add it as a repo secret:
+
    ```bash
    gh secret set RELEASE_PLEASE_TOKEN --repo tableau/hyper-api-rust
    ```
+
 6. The [release-please workflow](../.github/workflows/release-please.yml)
    references this secret via `token: ${{ secrets.RELEASE_PLEASE_TOKEN }}`.
 
@@ -475,11 +489,14 @@ when multiple maintainers need the pipeline to work independently.
 2. **Install the App** on `tableau/hyper-api-rust` (or all repos in the
    org if you want it shared).
 3. **Store credentials** as repo secrets:
+
    ```bash
    gh secret set APP_ID --repo tableau/hyper-api-rust        # numeric App ID
    gh secret set APP_PRIVATE_KEY --repo tableau/hyper-api-rust  # PEM file contents
    ```
+
 4. **Update the workflow** to mint a short-lived token each run:
+
    ```yaml
    jobs:
      release-please:

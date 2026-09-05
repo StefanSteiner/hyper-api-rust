@@ -257,9 +257,11 @@ fn server_workspace_store_exposes_saved_queries_via_resources() {
     assert!(uris.contains(&"hyper://queries/recent_orders/definition".to_string()));
     assert!(uris.contains(&"hyper://queries/recent_orders/result".to_string()));
     // And the internal meta-table is hidden from the table catalog.
-    assert!(!uris
-        .iter()
-        .any(|u| u.contains(hyperdb_mcp::saved_queries::SAVED_QUERIES_TABLE)));
+    assert!(
+        !uris
+            .iter()
+            .any(|u| u.contains(hyperdb_mcp::saved_queries::SAVED_QUERIES_TABLE))
+    );
 
     // Reading the definition returns JSON with the stored SQL.
     let body = server

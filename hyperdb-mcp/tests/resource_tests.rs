@@ -81,12 +81,14 @@ fn single_text_resource<'a>(
     expected_uri: &str,
 ) -> Result<(&'a str, Option<&'a str>), std::io::Error> {
     match result.contents.as_slice() {
-        [ResourceContents::TextResourceContents {
-            uri,
-            mime_type,
-            text,
-            ..
-        }] if uri == expected_uri => Ok((text, mime_type.as_deref())),
+        [
+            ResourceContents::TextResourceContents {
+                uri,
+                mime_type,
+                text,
+                ..
+            },
+        ] if uri == expected_uri => Ok((text, mime_type.as_deref())),
         contents => Err(std::io::Error::other(format!(
             "expected one text resource for {expected_uri}, got {contents:?}"
         ))),

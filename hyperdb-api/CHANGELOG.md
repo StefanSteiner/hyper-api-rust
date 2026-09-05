@@ -7,9 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Removed
+
+- **BREAKING:** `Connection::begin_transaction`, `commit` and `rollback`, and
+  the matching `AsyncConnection` methods, are gone. They were `#[deprecated]`
+  and `#[doc(hidden)]` since 0.3.0, and 1.0.0 is the boundary at which they can
+  actually be dropped. Prefer `Connection::transaction()`, whose RAII guard
+  rolls back on drop and cannot leak a half-open transaction across an error
+  path. If the guard's `&mut self` borrow is impossible — typically a helper
+  that holds `&self` — use the `*_unguarded` methods added below. Migration
+  recipe in [docs/TRANSACTIONS.md](../docs/TRANSACTIONS.md#unguarded-transaction-control).
+
+### Added
+
+- `Connection::begin_transaction_unguarded`, `commit_unguarded` and
+  `rollback_unguarded`, plus the `AsyncConnection` equivalents. These are the
+  supported replacement for the removed deprecated methods and were previously
+  `pub(crate)` as `*_raw`. They are not deprecated, but they are not the
+  default path either: the caller owns pairing a begin with a commit or
+  rollback on **every** path, including panics and cancelled futures, since an
+  unmatched begin wedges the session in a way reconnect logic cannot clear.
+  Reach for them only when the guard's `&mut self` borrow is impossible.
+
 ### Changed
 
-- **BREAKING:** `KvStore::set`, `KvStore::set_as`, and `KvStore::set_batch` (plus their `AsyncKvStore` twins) now return `SetOutcome` or `BatchSetOutcome` instead of `Result<()>`, reporting whether each write created a new key or overwrote an existing one. The `created` signal eliminates silent data loss when an LLM accidentally clobbers existing KV data. Callers that ignored the `Result` (statement-position `set("k","v")?;`) — including `let _ = set(...)?;` — still compile unchanged. The genuinely breaking cases are callers that named the unit return (`let x: () = set(...)?;`) or that returned `set(...)` where a `Result<()>` was expected; these now see `SetOutcome`/`BatchSetOutcome` and must adapt. Under pre-1.0 semver the minor slot is the breaking slot, so this lands in the next minor release.
+- **BREAKING:** the `arrow` dependency moved from **58** to **59**. Arrow types
+  appear in this crate's public API (`ArrowReader`, `ArrowInserter`,
+  `AsyncArrowInserter`, `ArrowResult` and the Arrow IPC paths), so a consumer
+  must move to `arrow` 59 in lockstep — mixing 58 and 59 in one binary yields
+  two incompatible `RecordBatch` types. No source change was needed on our
+  side; the workspace builds and its 1568 tests pass unchanged.
+
+  This also **removes the `thrift` dependency**, and with it the Apache Thrift
+  "Memory Allocation with Excessive Size Value" advisory. `parquet` 58.x
+  required `thrift ^0.17`, which pinned the vulnerable 0.17.0 and could not be
+  updated in isolation; `parquet` 59 dropped thrift altogether. That closes an
+  advisory this workspace had previously been unable to resolve.
+
+- **BREAKING:** the minimum supported Rust version is now **1.88**, up from
+  1.81, and the crate is compiled with **edition 2024**. 1.88 is the version
+  Red Hat Enterprise Linux 9.7 ships as `rust-toolset`, so the declared MSRV
+  now matches the enterprise consumption path. The previous 1.81 was not
+  achievable in practice — the lockfile already required 1.88 for several
+  direct dependencies.
+- `Connection::stream_as`, `Connection::stream_as_params`,
+  `AsyncConnection::stream_as` and `AsyncConnection::stream_as_params` now
+  carry an explicit `use<'a, T>` precise-capturing bound on their returned
+  `impl Iterator` / `impl Stream`. Edition 2024 makes return-position `impl
+  Trait` capture every in-scope lifetime and type parameter by default; the
+  explicit capture list pins the previous behaviour rather than widening it.
+  Callers are unaffected unless they relied on the opaque type capturing more
+  than `'a` and `T`.
+- The effective TLS crypto provider is now **ring** rather than AWS-LC. The
+  crate already asked for `rustls` with `features = ["ring"]`, but a transitive
+  `reqwest` dependency forced the `aws-lc-rs` provider and Cargo's feature
+  unification applied it workspace-wide. See the `hyperdb-bootstrap` and
+  `hyperdb-api-salesforce` entries for detail.
+
+- **BREAKING:** `KvStore::set`, `KvStore::set_as`, and `KvStore::set_batch` (plus their `AsyncKvStore` twins) now return `SetOutcome` or `BatchSetOutcome` instead of `Result<()>`, reporting whether each write created a new key or overwrote an existing one. The `created` signal eliminates silent data loss when an LLM accidentally clobbers existing KV data. Callers that ignored the `Result` (statement-position `set("k","v")?;`) — including `let _ = set(...)?;` — still compile unchanged. The genuinely breaking cases are callers that named the unit return (`let x: () = set(...)?;`) or that returned `set(...)` where a `Result<()>` was expected; these now see `SetOutcome`/`BatchSetOutcome` and must adapt.
 
 ### Added
 

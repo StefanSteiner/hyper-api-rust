@@ -26,7 +26,7 @@
 use crate::db::get_or_init;
 use crate::diagnostic::ValidationError;
 use crate::dry_run::dry_run;
-use crate::error_extract::{classify, ErrorClass};
+use crate::error_extract::{ErrorClass, classify};
 use crate::registry::{self, Registry};
 
 /// Validate that `sql` is structurally compatible with `struct_name`.
@@ -116,19 +116,19 @@ fn run_dry_run_with_seed(
                 ErrorClass::MissingTable(t) => match Registry::seed_if_known(&t, db) {
                     Ok(true) => {} // seeded successfully; loop iterates to retry the dry-run
                     Ok(false) => {
-                        return Err(ValidationError::TablesNotRegistered { tables: vec![t] })
+                        return Err(ValidationError::TablesNotRegistered { tables: vec![t] });
                     }
                     Err(seed_err) => {
                         return Err(ValidationError::HyperError {
                             message: format!("{seed_err}"),
-                        })
+                        });
                     }
                 },
                 ErrorClass::SyntaxError(msg) => {
-                    return Err(ValidationError::SqlSyntaxError { message: msg })
+                    return Err(ValidationError::SqlSyntaxError { message: msg });
                 }
                 ErrorClass::MissingColumn(col) => {
-                    return Err(ValidationError::UnknownColumn { column: col })
+                    return Err(ValidationError::UnknownColumn { column: col });
                 }
                 ErrorClass::Other(msg) => return Err(ValidationError::HyperError { message: msg }),
             },

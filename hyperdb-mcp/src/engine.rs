@@ -53,9 +53,9 @@ use crate::daemon;
 use crate::error::{ErrorCode, McpError};
 use crate::schema::ColumnSchema;
 use hyperdb_api::{
-    escape_sql_path, Catalog, Connection, CreateMode, HyperProcess, Parameters, SqlType,
+    Catalog, Connection, CreateMode, HyperProcess, Parameters, SqlType, escape_sql_path,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -67,7 +67,7 @@ static EPHEMERAL_SEQ: AtomicU64 = AtomicU64::new(0);
 /// Mirrored as [`Engine::PERSISTENT_ALIAS`] for the public API.
 const PERSISTENT_ALIAS: &str = "persistent";
 
-/// Outcome of [`attach_default_persistent`] — flags whether the file was
+/// Outcome of `attach_default_persistent` — flags whether the file was
 /// freshly created so the catalog-seed step can fire (or skip).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PersistentAttachOutcome {
@@ -363,12 +363,11 @@ impl Engine {
         })?;
 
         // Try daemon mode first unless disabled
-        if !no_daemon {
-            if let Some(engine) =
+        if !no_daemon
+            && let Some(engine) =
                 Self::try_daemon_mode(&ephemeral_path, persistent_path.clone(), &log_dir)?
-            {
-                return Ok(engine);
-            }
+        {
+            return Ok(engine);
         }
 
         // Fall back to spawning a local HyperProcess
@@ -709,10 +708,10 @@ impl Engine {
     {
         let key = alias.to_ascii_lowercase();
         // Fast path: cache already populated.
-        if let Ok(guard) = self.catalog_present_cache.lock() {
-            if let Some(&present) = guard.get(&key) {
-                return Ok(present);
-            }
+        if let Ok(guard) = self.catalog_present_cache.lock()
+            && let Some(&present) = guard.get(&key)
+        {
+            return Ok(present);
         }
         // Slow path: run the probe and cache its result.
         let present = prober(self)?;
@@ -831,23 +830,20 @@ impl Engine {
     /// Does not introduce new panic sites. If `f` panics, the transaction
     /// is rolled back (best-effort) and the original panic is re-raised
     /// via [`std::panic::resume_unwind`], preserving the panic payload.
-    // The deprecated `begin_transaction`/`commit`/`rollback` raw
-    // methods on `Connection` are required here because this helper
-    // takes `&self` (and so cannot use the RAII guard, which needs
-    // `&mut self`). Migrating requires reshaping `Engine`'s locking
-    // model — see issue #72 for two implementation paths (wrap
-    // connection in a `Mutex` vs. introduce an `EngineTransaction`
-    // guard) and the 8 closure call sites that need updating.
-    #[allow(
-        deprecated,
-        reason = "Engine borrows &self; the RAII guard requires &mut. Migration tracked in issue #72."
-    )]
+    // Uses the `*_unguarded` transaction methods rather than the RAII guard,
+    // because this helper takes `&self` and the guard needs `&mut self`.
+    // Moving to the guard requires reshaping `Engine`'s locking model — see
+    // issue #72 for two implementation paths (wrap the connection in a
+    // `Mutex` vs. introduce an `EngineTransaction` guard) and the closure call
+    // sites that need updating. Until then the pairing obligation the
+    // `*_unguarded` docs describe is discharged by the `catch_unwind` below,
+    // which rolls back before resuming any unwind.
     pub fn execute_in_transaction<F, T>(&self, f: F) -> Result<T, McpError>
     where
         F: FnOnce(&Engine) -> Result<T, McpError>,
     {
         self.connection
-            .begin_transaction()
+            .begin_transaction_unguarded()
             .map_err(McpError::from)?;
         tracing::debug!("tx: BEGIN issued");
         // `catch_unwind` wraps the closure so a panic (unwrap on None,
@@ -864,12 +860,12 @@ impl Engine {
         match result {
             Ok(Ok(val)) => {
                 tracing::debug!("tx: closure returned Ok, issuing COMMIT");
-                self.connection.commit().map_err(McpError::from)?;
+                self.connection.commit_unguarded().map_err(McpError::from)?;
                 Ok(val)
             }
             Ok(Err(e)) => {
                 tracing::debug!(err = %e, "tx: closure returned Err, issuing ROLLBACK");
-                if let Err(rb_err) = self.connection.rollback() {
+                if let Err(rb_err) = self.connection.rollback_unguarded() {
                     // Rollback itself failed — log it but keep the original
                     // error as the primary cause. A failed rollback usually
                     // means the transaction was already aborted by the server,
@@ -889,7 +885,7 @@ impl Engine {
                 // unusable — but we're about to panic anyway, and
                 // `HyperMcpServer::with_engine` will drop the engine
                 // when the panic surfaces as a poisoned tokio task.
-                let _ = self.connection.rollback();
+                let _ = self.connection.rollback_unguarded();
                 std::panic::resume_unwind(panic_payload)
             }
         }
@@ -1741,8 +1737,8 @@ fn chart_measure_value(
     idx: usize,
     sql_type: &SqlType,
 ) -> ChartMeasureValue {
-    use hyperdb_api::oids;
     use hyperdb_api::Numeric;
+    use hyperdb_api::oids;
 
     if row.is_null(idx) {
         return ChartMeasureValue::Null;

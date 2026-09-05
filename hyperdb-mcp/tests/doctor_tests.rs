@@ -12,7 +12,7 @@ use std::thread::JoinHandle;
 
 use hyperdb_mcp::daemon::discovery::DaemonInfo;
 use hyperdb_mcp::daemon::health::{self, DaemonState, HealthListener};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 const SECRET_SENTINEL: &str = "UNKNOWN_SECRET_SENTINEL_doctor_7d31e9";
@@ -837,7 +837,7 @@ fn non_utf8_overlong_path(root: &Path) -> OsString {
 
     let mut bytes = root.as_os_str().as_bytes().to_vec();
     bytes.extend_from_slice(b"/hyperd-\xff-");
-    bytes.extend(std::iter::repeat(b'x').take(5 * 1024));
+    bytes.extend(std::iter::repeat_n(b'x', 5 * 1024));
     OsString::from_vec(bytes)
 }
 
@@ -1457,8 +1457,7 @@ fn doctor_relative_persistent_path_normalizes_parent_and_matches_runtime() {
             failures.push(failure);
         }
     }
-    let expected_parent =
-        "  Resolved persistent parent: . (encoding: utf8; exists: true; file: false; directory: true)";
+    let expected_parent = "  Resolved persistent parent: . (encoding: utf8; exists: true; file: false; directory: true)";
     if !human.contains(expected_parent) {
         failures.push(format!(
             "human report did not normalize the relative parent to an existing directory: {human}"

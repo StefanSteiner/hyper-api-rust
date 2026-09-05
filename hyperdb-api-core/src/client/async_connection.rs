@@ -747,12 +747,11 @@ where
             let msg = self.read_message().await?;
             match msg {
                 Message::CommandComplete(body) => {
-                    if let Ok(tag) = body.tag() {
-                        if let Some(count_str) = tag.strip_prefix("COPY ") {
-                            if let Ok(count) = count_str.trim().parse() {
-                                row_count = count;
-                            }
-                        }
+                    if let Ok(tag) = body.tag()
+                        && let Some(count_str) = tag.strip_prefix("COPY ")
+                        && let Ok(count) = count_str.trim().parse()
+                    {
+                        row_count = count;
                     }
                 }
                 Message::ReadyForQuery(_) => {

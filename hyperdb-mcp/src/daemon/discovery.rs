@@ -461,7 +461,7 @@ pub fn find_running_daemon() -> Option<DaemonInfo> {
 #[cfg(test)]
 mod tests {
     use std::ffi::{OsStr, OsString};
-    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::{Arc, Mutex};
 
     use serde_json::json;

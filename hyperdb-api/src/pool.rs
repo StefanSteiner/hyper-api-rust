@@ -112,16 +112,34 @@ use std::pin::Pin;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use deadpool::managed::{self, Manager, Metrics, RecycleError, RecycleResult, Timeouts};
 use deadpool::Runtime;
+use deadpool::managed::{self, Manager, Metrics, RecycleError, RecycleResult, Timeouts};
 use tokio::sync::Mutex as AsyncMutex;
 
+use crate::CreateMode;
 use crate::async_connection::AsyncConnection;
 use crate::connection::Connection;
 use crate::error::{Error, Result};
-use crate::CreateMode;
 
 /// Future returned by pool lifecycle hooks.
+///
+/// Hooks are boxed rather than taking an `AsyncFn` because the hook future
+/// must be both `Send` (the pool is used from multi-threaded runtimes) and
+/// able to borrow the `&AsyncConnection` it is handed. On stable Rust those
+/// two requirements cannot be expressed together:
+///
+/// - Bounding an `AsyncFn`'s returned future as `Send` requires naming
+///   `AsyncFnMut::CallRefFuture`, which is behind unstable `async_fn_traits`.
+/// - Return-type notation (`F(&AsyncConnection): Send`) is also unstable.
+/// - A generic `F: Fn(&'a AsyncConnection) -> Fut` cannot work either, because
+///   `Fut` would have to depend on the higher-ranked lifetime `'a` — the case
+///   that needs return-type notation or GATs.
+///
+/// So `Box::pin(async move { .. })` at the call site is required, not merely
+/// conventional, and the examples on [`PoolConfig`] teach it deliberately.
+/// This matches the trait carve-out in upstream `M-ASYNC-FN`, which permits an
+/// explicit `Future` return "inside traits". Revisit if `async_fn_traits` or
+/// return-type notation stabilizes.
 pub type HookFuture<'a> = Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>;
 
 /// A hook that runs once on every newly-opened connection (after authentication
@@ -506,15 +524,15 @@ impl Manager for ConnectionManager {
         // Retire connections that have outlived their configured caps before
         // spending a round-trip probing them. Returning a `Message` error evicts
         // the connection; deadpool then builds a fresh one transparently.
-        if let Some(max_lifetime) = self.config.max_lifetime {
-            if metrics.age() >= max_lifetime {
-                return Err(RecycleError::message("connection exceeded max_lifetime"));
-            }
+        if let Some(max_lifetime) = self.config.max_lifetime
+            && metrics.age() >= max_lifetime
+        {
+            return Err(RecycleError::message("connection exceeded max_lifetime"));
         }
-        if let Some(idle_timeout) = self.config.idle_timeout {
-            if metrics.last_used() >= idle_timeout {
-                return Err(RecycleError::message("connection exceeded idle_timeout"));
-            }
+        if let Some(idle_timeout) = self.config.idle_timeout
+            && metrics.last_used() >= idle_timeout
+        {
+            return Err(RecycleError::message("connection exceeded idle_timeout"));
         }
 
         // Active health probe per the configured strategy.
@@ -828,10 +846,10 @@ impl SyncPoolInner {
     /// so keeps the live count at or above `min_idle` (idle connections are kept
     /// warm down to that floor).
     fn should_evict(&self, idle: &IdleConn, live_size: usize) -> bool {
-        if let Some(max_lifetime) = self.config.max_lifetime {
-            if idle.created.elapsed() >= max_lifetime {
-                return true;
-            }
+        if let Some(max_lifetime) = self.config.max_lifetime
+            && idle.created.elapsed() >= max_lifetime
+        {
+            return true;
         }
         if let Some(idle_timeout) = self.config.idle_timeout {
             let min_idle = self.config.min_idle.unwrap_or(0) as usize;

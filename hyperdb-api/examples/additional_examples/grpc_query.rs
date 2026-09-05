@@ -53,7 +53,7 @@ mod grpc_example {
         let mut params = Parameters::new();
         params.set("log_dir", "test_results");
         params.set_listen_mode(ListenMode::Grpc { port: 0 }); // Auto-assign port
-                                                              // Note: grpc_threads is automatically set by HyperProcess when gRPC mode is enabled
+        // Note: grpc_threads is automatically set by HyperProcess when gRPC mode is enabled
 
         println!("Starting HyperProcess with gRPC mode...");
         let hyper = HyperProcess::new(None, Some(&params))?;
@@ -112,7 +112,7 @@ mod grpc_example {
         let mut params = Parameters::new();
         params.set("log_dir", "test_results");
         params.set_listen_mode(ListenMode::Both { grpc_port: 17484 }); // Specific port for gRPC
-                                                                       // Note: grpc_threads is automatically set by HyperProcess when gRPC mode is enabled
+        // Note: grpc_threads is automatically set by HyperProcess when gRPC mode is enabled
 
         println!("Starting HyperProcess with both libpq and gRPC...");
         let hyper = HyperProcess::new(None, Some(&params))?;

@@ -14,7 +14,7 @@
 
 mod common;
 use common::TestEngine;
-use hyperdb_mcp::lakehouse::{ingest_iceberg_table, IcebergIngestOptions};
+use hyperdb_mcp::lakehouse::{IcebergIngestOptions, ingest_iceberg_table};
 use tempfile::TempDir;
 
 /// A non-existent path must produce a clean `FileNotFound` error

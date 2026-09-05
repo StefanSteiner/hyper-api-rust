@@ -1,0 +1,31 @@
+// markdownlint-cli2 configuration.
+//
+// Rules live in .markdownlint.json (read by both this CLI and the VS Code
+// extension). This file only carries the path exclusions, because
+// markdownlint-cli2 does not read .markdownlintignore — that file is kept
+// alongside for the editor extension, which does.
+//
+// Run with: npx markdownlint-cli2
+{
+  "globs": ["**/*.md"],
+  "ignores": [
+    // Build output and dependencies
+    "target/**",
+    "**/target/**",
+    "node_modules/**",
+    "**/node_modules/**",
+
+    // Test artifacts (also gitignored)
+    "test_results/**",
+    "**/test_results/**",
+
+    // Generated / scraped. dc_sql_reference.md is produced by
+    // scripts/scrape_dc_sql_reference.py from Salesforce's published SQL
+    // reference, so hand-edits are undone by the next refresh.
+    "hyperdb-mcp/scripts/dc_sql_reference.md",
+
+    // npm platform sub-packages: packaging boilerplate, largely generated
+    "hyperdb-api-node/npm/**",
+    "hyperdb-mcp/npm/**"
+  ]
+}

@@ -5,7 +5,7 @@
 //! JSON serialization format used in MCP tool responses, and the
 //! `is_connection_lost` classifier that drives auto-reconnect.
 
-use hyperdb_mcp::error::{is_connection_lost, ErrorCode, McpError};
+use hyperdb_mcp::error::{ErrorCode, McpError, is_connection_lost};
 
 /// Verify that constructing an `McpError` auto-populates a recovery suggestion
 /// for error codes that have one (`HyperdNotFound` should suggest setting `HYPERD_PATH`).

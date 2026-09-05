@@ -1,0 +1,18 @@
+# Build output and dependencies
+target/
+**/target/
+node_modules/
+**/node_modules/
+
+# Test artifacts (also gitignored)
+test_results/
+**/test_results/
+
+# Generated / scraped documents. dc_sql_reference.md is produced by
+# scripts/scrape_dc_sql_reference.py from Salesforce's published SQL reference,
+# so hand-editing it is undone by the next refresh.
+hyperdb-mcp/scripts/dc_sql_reference.md
+
+# npm platform sub-packages: packaging boilerplate, largely generated
+hyperdb-api-node/npm/
+hyperdb-mcp/npm/

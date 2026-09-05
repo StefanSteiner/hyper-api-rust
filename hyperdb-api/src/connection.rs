@@ -17,7 +17,7 @@ use hyperdb_api_core::client::Client;
 use crate::error::{Error, Result};
 use crate::names::escape_sql_path;
 use crate::process::HyperProcess;
-use crate::result::{Row, Rowset, DEFAULT_BINARY_CHUNK_SIZE};
+use crate::result::{DEFAULT_BINARY_CHUNK_SIZE, Row, Rowset};
 use crate::transport::Transport;
 
 use std::any::Any;
@@ -315,12 +315,11 @@ impl Connection {
                 if let Err(e) = self.execute_command(&format!(
                     "CREATE DATABASE IF NOT EXISTS {}",
                     escape_sql_path(database_path)
-                )) {
-                    if !is_already_exists_error(&e) {
-                        return Err(Error::internal(format!(
-                            "Failed to create database '{database_path}': {e}"
-                        )));
-                    }
+                )) && !is_already_exists_error(&e)
+                {
+                    return Err(Error::internal(format!(
+                        "Failed to create database '{database_path}': {e}"
+                    )));
                 }
             }
             CreateMode::CreateAndReplace => {
@@ -837,7 +836,10 @@ impl Connection {
     /// succeeded.
     ///
     /// [`FromRow`]: crate::FromRow
-    pub fn stream_as<'a, T>(&'a self, query: &str) -> Result<impl Iterator<Item = Result<T>> + 'a>
+    pub fn stream_as<'a, T>(
+        &'a self,
+        query: &str,
+    ) -> Result<impl Iterator<Item = Result<T>> + 'a + use<'a, T>>
     where
         T: crate::FromRow + 'a,
     {
@@ -1002,7 +1004,7 @@ impl Connection {
         &'a self,
         query: &str,
         params: &[&dyn crate::params::ToSqlParam],
-    ) -> Result<impl Iterator<Item = Result<T>> + 'a>
+    ) -> Result<impl Iterator<Item = Result<T>> + 'a + use<'a, T>>
     where
         T: crate::FromRow + 'a,
     {
@@ -2106,10 +2108,10 @@ impl Connection {
 
     /// Internal: store the pending token+sql for lazy resolution.
     fn stats_store_pending(&self, token: Option<Box<dyn Any + Send>>, sql: &str) {
-        if let Some(token) = token {
-            if let Ok(mut guard) = self.pending_stats.lock() {
-                *guard = Some((token, sql.to_string()));
-            }
+        if let Some(token) = token
+            && let Ok(mut guard) = self.pending_stats.lock()
+        {
+            *guard = Some((token, sql.to_string()));
         }
     }
 }
@@ -2123,91 +2125,66 @@ impl Connection {
     // Raw transaction control (internal)
     // -------------------------------------------------------------------
     //
-    // The `*_raw` methods below are `pub(crate)` and form the canonical
-    // implementation of session-level transaction control. The RAII
-    // guard at `crate::Transaction` and any internal helper that
-    // genuinely needs `&self` (rather than the guard's `&mut self`)
-    // delegate to these.
+    // The `*_unguarded` methods below are the canonical implementation of
+    // session-level transaction control. The RAII guard at
+    // `crate::Transaction` and any helper that genuinely needs `&self`
+    // (rather than the guard's `&mut self`) delegate to these.
     //
-    // The matching `pub` methods (`begin_transaction`, `commit`,
-    // `rollback`) are thin `#[doc(hidden)] #[deprecated]` wrappers
-    // retained only so any pre-existing downstream caller sees a
-    // compiler warning rather than a hard break. They will be deleted
-    // in a future release; the `_raw` methods stay.
+    // They are public because a `&self` helper cannot use the guard at all,
+    // and `hyperdb-mcp`'s engine is exactly that case. They replaced the
+    // `#[doc(hidden)] #[deprecated]` `begin_transaction`/`commit`/`rollback`
+    // wrappers, which were removed in 1.0.0.
 
-    /// Issues `BEGIN TRANSACTION`. Crate-internal use only.
-    pub(crate) fn begin_transaction_raw(&self) -> Result<()> {
-        self.execute_command("BEGIN TRANSACTION")?;
-        Ok(())
-    }
-
-    /// Issues `COMMIT`. Crate-internal use only.
-    pub(crate) fn commit_raw(&self) -> Result<()> {
-        self.execute_command("COMMIT")?;
-        Ok(())
-    }
-
-    /// Issues `ROLLBACK`. Crate-internal use only.
-    pub(crate) fn rollback_raw(&self) -> Result<()> {
-        self.execute_command("ROLLBACK")?;
-        Ok(())
-    }
-
-    /// Begins an explicit transaction.
+    /// Issues `BEGIN TRANSACTION` without returning a guard.
     ///
-    /// **Prefer [`transaction()`](Self::transaction)** — the RAII guard
-    /// auto-rolls back on drop and cannot leak a half-open transaction
-    /// across error paths. This method is hidden from generated
-    /// rustdoc and marked deprecated; it will be removed in a future
-    /// release.
+    /// **Prefer [`transaction()`](Self::transaction).** The RAII guard cannot
+    /// leak a half-open transaction across an error path, and rolls back on
+    /// drop. Reach for this only when the guard's `&mut self` borrow is
+    /// impossible — for example inside a helper that holds `&self` and so
+    /// cannot borrow the connection mutably.
+    ///
+    /// Pairing is the caller's responsibility: every call must be matched by
+    /// [`commit_unguarded`](Self::commit_unguarded) or
+    /// [`rollback_unguarded`](Self::rollback_unguarded) on **every** path,
+    /// including panics. Leaving one open wedges the session — subsequent
+    /// statements fail with "transaction already in progress" on a connection
+    /// that is otherwise healthy, so reconnect logic will not recover it.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Server`] if the server rejects `BEGIN TRANSACTION`
     /// (e.g. a transaction is already open on this session).
-    #[doc(hidden)]
-    #[deprecated(
-        note = "Use `Connection::transaction()` for an RAII guard. This method will be removed \
-                in a future release."
-    )]
-    pub fn begin_transaction(&self) -> Result<()> {
-        self.begin_transaction_raw()
+    pub fn begin_transaction_unguarded(&self) -> Result<()> {
+        self.execute_command("BEGIN TRANSACTION")?;
+        Ok(())
     }
 
-    /// Commits the current transaction.
+    /// Issues `COMMIT` for a transaction opened with
+    /// [`begin_transaction_unguarded`](Self::begin_transaction_unguarded).
     ///
-    /// **Prefer [`Transaction::commit`](crate::Transaction::commit)** on
-    /// the RAII guard returned by [`transaction()`](Self::transaction).
-    /// Hidden from generated rustdoc and deprecated; slated for removal.
+    /// **Prefer [`Transaction::commit`](crate::Transaction::commit)** on the
+    /// guard returned by [`transaction()`](Self::transaction).
     ///
     /// # Errors
     ///
     /// Returns [`Error::Server`] if the server rejects `COMMIT`.
-    #[doc(hidden)]
-    #[deprecated(
-        note = "Use `Transaction::commit()` on the RAII guard from `Connection::transaction()`. \
-                This method will be removed in a future release."
-    )]
-    pub fn commit(&self) -> Result<()> {
-        self.commit_raw()
+    pub fn commit_unguarded(&self) -> Result<()> {
+        self.execute_command("COMMIT")?;
+        Ok(())
     }
 
-    /// Rolls back the current transaction.
+    /// Issues `ROLLBACK` for a transaction opened with
+    /// [`begin_transaction_unguarded`](Self::begin_transaction_unguarded).
     ///
-    /// **Prefer [`Transaction::rollback`](crate::Transaction::rollback)**
-    /// on the RAII guard returned by [`transaction()`](Self::transaction).
-    /// Hidden from generated rustdoc and deprecated; slated for removal.
+    /// **Prefer [`Transaction::rollback`](crate::Transaction::rollback)** on
+    /// the guard returned by [`transaction()`](Self::transaction).
     ///
     /// # Errors
     ///
     /// Returns [`Error::Server`] if the server rejects `ROLLBACK`.
-    #[doc(hidden)]
-    #[deprecated(
-        note = "Use `Transaction::rollback()` on the RAII guard from `Connection::transaction()`. \
-                This method will be removed in a future release."
-    )]
-    pub fn rollback(&self) -> Result<()> {
-        self.rollback_raw()
+    pub fn rollback_unguarded(&self) -> Result<()> {
+        self.execute_command("ROLLBACK")?;
+        Ok(())
     }
 
     /// Starts a transaction and returns an RAII guard that auto-rolls back on drop.

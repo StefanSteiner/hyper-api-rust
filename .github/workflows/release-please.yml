@@ -3,8 +3,10 @@ name: release-please
 # Maintains a single open "release PR" on main that bumps all workspace
 # versions, updates per-crate CHANGELOG.md files, and updates the
 # .release-please-manifest.json based on Conventional Commits since the
-# last release. Merging that PR creates a GitHub Release and a v{X.Y.Z}
-# tag.
+# last release. Merging that PR lands the bumps and changelogs only: it does
+# NOT tag, because `skip-github-release` is true in release-please-config.json.
+# A maintainer creates the v{X.Y.Z} tag and GitHub Release by hand afterwards,
+# which is what triggers the publish workflows. See docs/GITHUB_OPERATIONS.md.
 #
 # Uses a fine-grained PAT (RELEASE_PLEASE_TOKEN) instead of the default
 # GITHUB_TOKEN so that PRs and tags created by this workflow trigger

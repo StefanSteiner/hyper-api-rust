@@ -12,10 +12,10 @@
 
 use hyperdb_mcp::error::ErrorCode;
 use hyperdb_mcp::schema::{
-    apply_schema_override, infer_csv_schema, infer_json_schema, map_hyper_type,
-    normalize_schema_param, widen_csv_numeric_columns, ColumnSchema,
+    ColumnSchema, apply_schema_override, infer_csv_schema, infer_json_schema, map_hyper_type,
+    normalize_schema_param, widen_csv_numeric_columns,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::fmt::Write as _;
 
 /// Verify that integer and string JSON values are inferred as INT and TEXT

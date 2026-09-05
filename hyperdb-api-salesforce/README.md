@@ -119,8 +119,8 @@ Enable the `salesforce-auth` feature on `hyperdb-api-core::client`:
 
 ```toml
 [dependencies]
-hyperdb-api-core = { version = "0.1", features = ["salesforce-auth"] }
-hyperdb-api-salesforce = "0.1"
+hyperdb-api-core = { version = "1.0", features = ["salesforce-auth"] }
+hyperdb-api-salesforce = "1.0"
 ```
 
 `AuthenticatedGrpcClient` handles token refresh automatically, including

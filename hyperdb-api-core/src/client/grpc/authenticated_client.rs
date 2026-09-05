@@ -972,13 +972,9 @@ impl AuthenticatedGrpcClient {
         )
         .map_err(|e| crate::client::Error::other(format!("Failed to parse Arrow data: {e}")))?;
 
-        #[expect(
-            clippy::manual_flatten,
-            reason = "explicit if let Ok matches the rest of the Arrow-IPC stream consumers in this module; refactoring to .flatten() on StreamReader would hide the error discard"
-        )]
         for batch_result in reader {
-            if let Ok(batch) = batch_result {
-                if let (Some(name_arr), Some(label_arr)) = (
+            if let Ok(batch) = batch_result
+                && let (Some(name_arr), Some(label_arr)) = (
                     batch
                         .column(0)
                         .as_any()
@@ -987,34 +983,33 @@ impl AuthenticatedGrpcClient {
                         .column(1)
                         .as_any()
                         .downcast_ref::<arrow::array::StringArray>(),
-                ) {
-                    for i in 0..batch.num_rows() {
-                        use arrow::array::Array;
-                        if !name_arr.is_null(i) && !label_arr.is_null(i) {
-                            let table_name = name_arr.value(i).to_string();
-                            let label_raw = label_arr.value(i);
+                )
+            {
+                for i in 0..batch.num_rows() {
+                    use arrow::array::Array;
+                    if !name_arr.is_null(i) && !label_arr.is_null(i) {
+                        let table_name = name_arr.value(i).to_string();
+                        let label_raw = label_arr.value(i);
 
-                            // Parse JSON to extract displayName: {"displayName":"value"}
-                            let label = if label_raw.starts_with('{') {
-                                if let Ok(value) =
-                                    serde_json::from_str::<serde_json::Value>(label_raw)
-                                {
-                                    value
-                                        .get("displayName")
-                                        .and_then(|v| v.as_str())
-                                        .map_or_else(
-                                            || label_raw.to_string(),
-                                            std::string::ToString::to_string,
-                                        )
-                                } else {
-                                    label_raw.to_string()
-                                }
+                        // Parse JSON to extract displayName: {"displayName":"value"}
+                        let label = if label_raw.starts_with('{') {
+                            if let Ok(value) = serde_json::from_str::<serde_json::Value>(label_raw)
+                            {
+                                value
+                                    .get("displayName")
+                                    .and_then(|v| v.as_str())
+                                    .map_or_else(
+                                        || label_raw.to_string(),
+                                        std::string::ToString::to_string,
+                                    )
                             } else {
                                 label_raw.to_string()
-                            };
+                            }
+                        } else {
+                            label_raw.to_string()
+                        };
 
-                            labels.insert(table_name, label);
-                        }
+                        labels.insert(table_name, label);
                     }
                 }
             }
@@ -1065,13 +1060,9 @@ impl AuthenticatedGrpcClient {
         )
         .map_err(|e| crate::client::Error::other(format!("Failed to parse Arrow data: {e}")))?;
 
-        #[expect(
-            clippy::manual_flatten,
-            reason = "explicit if let Ok matches the rest of the Arrow-IPC stream consumers in this module; refactoring to .flatten() on StreamReader would hide the error discard"
-        )]
         for batch_result in reader {
-            if let Ok(batch) = batch_result {
-                if let (Some(name_arr), Some(label_arr)) = (
+            if let Ok(batch) = batch_result
+                && let (Some(name_arr), Some(label_arr)) = (
                     batch
                         .column(0)
                         .as_any()
@@ -1080,34 +1071,33 @@ impl AuthenticatedGrpcClient {
                         .column(1)
                         .as_any()
                         .downcast_ref::<arrow::array::StringArray>(),
-                ) {
-                    for i in 0..batch.num_rows() {
-                        use arrow::array::Array;
-                        if !name_arr.is_null(i) && !label_arr.is_null(i) {
-                            let col_name = name_arr.value(i).to_string();
-                            let label_raw = label_arr.value(i);
+                )
+            {
+                for i in 0..batch.num_rows() {
+                    use arrow::array::Array;
+                    if !name_arr.is_null(i) && !label_arr.is_null(i) {
+                        let col_name = name_arr.value(i).to_string();
+                        let label_raw = label_arr.value(i);
 
-                            // Parse JSON to extract displayName: {"displayName":"value"}
-                            let label = if label_raw.starts_with('{') {
-                                if let Ok(value) =
-                                    serde_json::from_str::<serde_json::Value>(label_raw)
-                                {
-                                    value
-                                        .get("displayName")
-                                        .and_then(|v| v.as_str())
-                                        .map_or_else(
-                                            || label_raw.to_string(),
-                                            std::string::ToString::to_string,
-                                        )
-                                } else {
-                                    label_raw.to_string()
-                                }
+                        // Parse JSON to extract displayName: {"displayName":"value"}
+                        let label = if label_raw.starts_with('{') {
+                            if let Ok(value) = serde_json::from_str::<serde_json::Value>(label_raw)
+                            {
+                                value
+                                    .get("displayName")
+                                    .and_then(|v| v.as_str())
+                                    .map_or_else(
+                                        || label_raw.to_string(),
+                                        std::string::ToString::to_string,
+                                    )
                             } else {
                                 label_raw.to_string()
-                            };
+                            }
+                        } else {
+                            label_raw.to_string()
+                        };
 
-                            labels.insert(col_name, label);
-                        }
+                        labels.insert(col_name, label);
                     }
                 }
             }

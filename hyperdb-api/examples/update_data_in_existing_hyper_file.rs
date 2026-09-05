@@ -13,8 +13,8 @@
 //! Run with: cargo run -p hyperdb-api --example `update_data_in_existing_hyper_file`
 
 use hyperdb_api::{
-    escape_name, escape_string_literal, Catalog, Connection, CreateMode, HyperProcess, Inserter,
-    Result, SqlType, TableDefinition,
+    Catalog, Connection, CreateMode, HyperProcess, Inserter, Result, SqlType, TableDefinition,
+    escape_name, escape_string_literal,
 };
 
 /// Creates the Customer table definition.
@@ -75,11 +75,15 @@ fn run_update_data_in_existing_hyper_file() -> Result<()> {
             let connection = Connection::new(&hyper, path_to_database, CreateMode::DoNotCreate)?;
 
             // Print pre-update data
-            println!("\nPre-Update: Individual rows showing 'Loyalty Reward Points' and 'Segment' columns:");
+            println!(
+                "\nPre-Update: Individual rows showing 'Loyalty Reward Points' and 'Segment' columns:"
+            );
             print_customer_data(&connection)?;
 
             // Update 'Customers' table by adding 50 Loyalty Reward Points to all Corporate Customers.
-            println!("\nUpdate 'Customer' table by adding 50 Loyalty Reward Points to all Corporate Customers.");
+            println!(
+                "\nUpdate 'Customer' table by adding 50 Loyalty Reward Points to all Corporate Customers."
+            );
 
             let update_sql = format!(
                 "UPDATE {} SET {} = {} + 50 WHERE {} = {}",
@@ -98,7 +102,9 @@ fn run_update_data_in_existing_hyper_file() -> Result<()> {
             );
 
             // Print post-update data
-            println!("\nPost-Update: Individual rows showing 'Loyalty Reward Points' and 'Segment' columns:");
+            println!(
+                "\nPost-Update: Individual rows showing 'Loyalty Reward Points' and 'Segment' columns:"
+            );
             print_customer_data(&connection)?;
         }
         println!("\nThe connection to the Hyper file has been closed.");

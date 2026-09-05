@@ -4,6 +4,7 @@ This file contains the JS/TS-specific style guide for developer-targeted documen
 in the `hyperdb-api-node` package.
 
 We distinguish 4 types of documentation:
+
 * **Source code documentation**: Document exported functions, classes, methods, and constants
   using JSDoc comments (`/** ... */`). These render in editor tooltips (VS Code, WebStorm)
   and can be extracted by documentation generators.
@@ -14,7 +15,6 @@ We distinguish 4 types of documentation:
   folder.
 * **Commit messages**: Should contain the *why* a change was made. Short-lived context
   belongs in the commit description, not in the code.
-
 
 ## General Writing Rules
 
@@ -29,7 +29,6 @@ Write all documentation in American English.
 
 When writing documentation, be inclusive of both AI agents and humans.
 
-
 ### Cross-Referencing vs. Duplication
 
 If content applies to both Rust and JS/TS layers or describes a cross-cutting workflow,
@@ -38,7 +37,6 @@ cross-reference it rather than duplicating the content.
 
 Information specific to the JS/TS package stays in the package's own files (README,
 DEVELOPMENT.md, or source code).
-
 
 ## Package README
 
@@ -53,12 +51,12 @@ and provide a concise API reference. Show *how to use*, not *how it works intern
 ### npm Rendering Constraints
 
 The README renders on npmjs.com, which differs from GitHub:
+
 * **Mermaid diagrams** are supported on GitHub but **not on npmjs.com**. Use ASCII diagrams
   or fenced code blocks for npm compatibility, or accept that diagrams only render on GitHub.
 * **Relative links** to other files in the repo work on GitHub but not on npm. Use absolute
   URLs for cross-references that must work on both.
 * **Badges** — place CI/version/downloads badges at the top.
-
 
 ## Source Code Documentation (JSDoc)
 
@@ -97,6 +95,7 @@ description. Non-obvious behavior, gotchas, and performance implications deserve
 additional explanation.
 
 For classes, document:
+
 * The class purpose (on the `class` declaration)
 * Constructor parameters
 * All public methods and properties
@@ -109,6 +108,7 @@ The Rust source files (`src/*.rs`) use `///` doc comments with JSDoc-style tags
 via the hand-written `index.d.ts`.
 
 When adding a new napi method in Rust:
+
 1. Write the `///` doc comment with JSDoc tags in the `.rs` file
 2. Add the corresponding signature and doc comment to `index.d.ts`
 3. The Rust doc and the `.d.ts` doc should match in content
@@ -134,6 +134,7 @@ executeQuery(sql: string): Promise<RowData[]>;
 ### ES Module Files (`.mjs`)
 
 Pure JavaScript modules (`pool.mjs`, `arrow.mjs`) should have:
+
 * A module-level JSDoc comment explaining the module's purpose
 * JSDoc on every exported function/class/method
 * `@example` blocks for primary APIs
@@ -142,10 +143,10 @@ Pure JavaScript modules (`pool.mjs`, `arrow.mjs`) should have:
 
 The `index.js` file contains significant logic (platform detection, JS extensions,
 utility functions). Document:
+
 * Each JS extension with a comment block explaining what it adds and why
 * All exported utility functions with JSDoc
 * The platform detection strategy with inline comments
-
 
 ## Naming Conventions
 
@@ -158,7 +159,6 @@ utility functions). Document:
 | Parameters | camelCase | `databasePath`, `createMode` |
 | Enums (in .d.ts) | PascalCase name, PascalCase members | `CreateMode.CreateIfNotExists` |
 
-
 ## Async Patterns
 
 * All I/O operations return `Promise`. No callback-style APIs.
@@ -167,14 +167,12 @@ utility functions). Document:
 * Resource cleanup: support `Symbol.asyncDispose` for `await using` syntax.
   Document this pattern in class-level JSDoc.
 
-
 ## Error Handling
 
 * Throw `Error` with descriptive messages. Do not use custom error classes unless
   the consumer needs to distinguish error types programmatically.
 * Document error conditions with `@throws`.
 * In napi-rs Rust code, use `Error::from_reason(msg)` to throw JS-visible errors.
-
 
 ## Testing
 
@@ -183,17 +181,16 @@ utility functions). Document:
 * Each test section should have a descriptive comment header explaining what it tests.
 * Benchmarks live alongside tests in `__test__/benchmark.mjs`.
 
-
 ## Documentation Review Checklist
 
 When reviewing documentation changes, verify:
 
-- [ ] All exported functions/classes/methods have JSDoc with at least a one-liner
-- [ ] `@param` tags match function signatures
-- [ ] `@returns` describes the resolved value for async methods
-- [ ] `@throws` documents error conditions
-- [ ] `@example` blocks use realistic code (not placeholder values)
-- [ ] `index.d.ts` matches the current Rust API surface
-- [ ] README does not contain build/publish internals — those belong in DEVELOPMENT.md
-- [ ] Cross-references use links rather than duplicating content
-- [ ] No stale references to renamed or removed APIs
+* [ ] All exported functions/classes/methods have JSDoc with at least a one-liner
+* [ ] `@param` tags match function signatures
+* [ ] `@returns` describes the resolved value for async methods
+* [ ] `@throws` documents error conditions
+* [ ] `@example` blocks use realistic code (not placeholder values)
+* [ ] `index.d.ts` matches the current Rust API surface
+* [ ] README does not contain build/publish internals — those belong in DEVELOPMENT.md
+* [ ] Cross-references use links rather than duplicating content
+* [ ] No stale references to renamed or removed APIs

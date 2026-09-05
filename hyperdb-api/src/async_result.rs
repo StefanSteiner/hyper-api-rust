@@ -164,10 +164,10 @@ impl<'conn> AsyncRowset<'conn> {
     }
 
     fn cached_schema_arc(&mut self) -> Option<Arc<ResultSchema>> {
-        if self.schema_cache.is_none() {
-            if let Some(schema) = self.build_schema() {
-                self.schema_cache = Some(Arc::new(schema));
-            }
+        if self.schema_cache.is_none()
+            && let Some(schema) = self.build_schema()
+        {
+            self.schema_cache = Some(Arc::new(schema));
         }
         self.schema_cache.clone()
     }

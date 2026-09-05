@@ -8,7 +8,7 @@ Hyper transactions in the Rust API guarantee **A**tomicity, **C**onsistency, and
 
 The recommended way to drive transactions is the **RAII guard** (`Transaction<'conn>` / `AsyncTransaction<'conn>`), which auto-rolls back on drop and uses Rust's borrow checker to make several classes of misuse compile errors.
 
-> Older raw `Connection::begin_transaction` / `commit` / `rollback` methods exist but are **deprecated** as of v0.3.0 and hidden from generated rustdoc. They will be removed in a future release; new code must use the RAII guard. See "Deprecated raw methods" at the bottom of this doc for the migration recipe.
+> The `Connection::begin_transaction` / `commit` / `rollback` methods, deprecated since v0.3.0, were **removed in 1.0.0**. Where the guard's `&mut self` borrow is genuinely impossible, use `begin_transaction_unguarded` / `commit_unguarded` / `rollback_unguarded` instead. See ["Unguarded transaction control"](#unguarded-transaction-control) at the bottom of this doc.
 
 ## API Reference
 
@@ -120,14 +120,18 @@ txn.commit().await?;
 - **Error recovery within transactions:** After a SQL error inside a transaction, the transaction is fully aborted (SQLSTATE `25P02`). You must rollback — you cannot continue executing statements.
 - **`information_schema.tables`:** Does not exist in Hyper. Cannot be used to check table existence.
 
-## Deprecated raw methods
+## Unguarded transaction control
 
-The methods `Connection::begin_transaction` / `commit` / `rollback` (and the matching `AsyncConnection` versions) are **deprecated** as of v0.3.0. They are hidden from generated rustdoc, marked `#[deprecated]` so any caller receives a compiler warning, and slated for removal in a future release.
+`Connection::begin_transaction` / `commit` / `rollback` were deprecated in
+v0.3.0 and **removed in 1.0.0**. Their replacements are
+`begin_transaction_unguarded` / `commit_unguarded` / `rollback_unguarded` (and
+the matching `AsyncConnection` versions), which are not deprecated but are also
+not the path you should normally take.
 
-Migration recipe:
+Migration recipe — prefer the guard:
 
 ```rust
-// Before — deprecated
+// Before — removed in 1.0.0
 conn.begin_transaction()?;
 conn.execute_command("INSERT INTO t VALUES (1, 'hello')")?;
 conn.commit()?;
@@ -138,7 +142,32 @@ txn.execute_command("INSERT INTO t VALUES (1, 'hello')")?;
 txn.commit()?;
 ```
 
-The `&mut conn` requirement is intentional — it's the borrow-checker mechanism that makes the safety story compile-enforced. If your code currently holds the connection through a non-mutable reference (e.g. inside an `&self` method on a wrapper struct), you may need to reshape the wrapper's locking model. The MCP server's `engine.rs::execute_in_transaction` is one such caller; it retains the deprecated raw methods until [issue #72](https://github.com/tableau/hyper-api-rust/issues/72) restructures `Engine`'s lock model.
+The `&mut conn` requirement is intentional — it's the borrow-checker mechanism
+that makes the safety story compile-enforced.
+
+If your code holds the connection through a shared reference (e.g. inside an
+`&self` method on a wrapper struct), the guard is not available to you at all,
+and the `_unguarded` methods are the supported escape hatch:
+
+```rust
+// Only when `&mut self` is impossible. You own the pairing.
+conn.begin_transaction_unguarded()?;
+let result = do_work(&conn);
+if result.is_ok() {
+    conn.commit_unguarded()?;
+} else {
+    let _ = conn.rollback_unguarded();
+}
+```
+
+Pairing is entirely on the caller, on **every** path including panics and
+cancelled futures. An unmatched begin wedges the session: later statements fail
+with "transaction already in progress" on a connection that is otherwise
+healthy, so reconnect logic won't clear it. The MCP server's
+`engine.rs::execute_in_transaction` is exactly this case and wraps its closure
+in `catch_unwind` to roll back before resuming an unwind; it stays on the
+unguarded methods until [issue #72](https://github.com/tableau/hyper-api-rust/issues/72)
+restructures `Engine`'s lock model.
 
 ## Test Inventory
 

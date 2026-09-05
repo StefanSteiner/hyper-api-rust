@@ -20,7 +20,7 @@ mod common;
 use common::TestConnection;
 
 use hyperdb_api::Table;
-use hyperdb_api_derive::{query_as, FromRow, Table};
+use hyperdb_api_derive::{FromRow, Table, query_as};
 
 // ---------------------------------------------------------------------------
 // Test structs — derive(Table) registers them at compile time when

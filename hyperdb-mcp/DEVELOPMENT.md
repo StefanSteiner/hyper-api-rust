@@ -151,6 +151,7 @@ HYPERD_PATH=/path/to/hyperd cargo run --example demo -p hyperdb-mcp
 ```
 
 Outputs land in `hyperdb-mcp/demo_output/`:
+
 - `coder_stats.csv` — the synthetic input dataset
 - `happiness_over_time.png` — line chart
 - `coffee_vs_bugs.png` — scatter chart

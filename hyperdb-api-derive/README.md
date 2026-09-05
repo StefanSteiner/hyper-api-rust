@@ -1,6 +1,7 @@
 # hyperdb-api-derive
 
 Procedural macros for [`hyperdb-api`](../hyperdb-api/README.md):
+
 - `#[derive(FromRow)]` — maps query result rows to Rust structs at runtime
 - `#[derive(Table)]` — generates `CREATE TABLE` SQL from a struct and (optionally) registers it for compile-time validation
 - `query_as!(T, "sql")` — typed query builder, validated at build time when the `compile-time` feature is enabled
@@ -9,7 +10,7 @@ Procedural macros for [`hyperdb-api`](../hyperdb-api/README.md):
 Add `hyperdb-api-derive` directly to your `[dependencies]`:
 
 ```toml
-hyperdb-api-derive = { version = "0.3", features = ["compile-time"] }
+hyperdb-api-derive = { version = "1.0", features = ["compile-time"] }
 ```
 
 > **Without `features = ["compile-time"]`** the macros are pure pass-throughs —
@@ -143,6 +144,7 @@ Builder methods: `.fetch_all(&conn)`, `.fetch_one(&conn)`, `.fetch_optional(&con
 ### Compile-time validation
 
 With `features = ["compile-time"]` and `HYPERD_PATH` set, `query_as!` validates at build time that:
+
 - The target struct is registered via `#[derive(Table)] #[hyperdb(register)]`
 - All referenced tables exist (seeded lazily from registered structs)
 - All struct fields appear in the projected columns

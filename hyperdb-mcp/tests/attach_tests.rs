@@ -12,8 +12,8 @@
 //! avoid spinning up the full MCP server.
 
 use hyperdb_mcp::attach::{
-    validate_alias, validate_local_path, AttachRegistry, AttachRequest, AttachSource, OnMissing,
-    LOCAL_ALIAS,
+    AttachRegistry, AttachRequest, AttachSource, LOCAL_ALIAS, OnMissing, validate_alias,
+    validate_local_path,
 };
 use hyperdb_mcp::engine::Engine;
 use hyperdb_mcp::error::ErrorCode;
@@ -567,9 +567,11 @@ fn replay_reattaches_on_fresh_engine() {
 
     let engine_b = Engine::new_no_daemon(Some(primary_path.to_string_lossy().into())).unwrap();
     // Without replay the attachment is invisible to engine_b.
-    assert!(engine_b
-        .execute_query_to_json("SELECT 1 FROM \"src\".public.t LIMIT 0")
-        .is_err());
+    assert!(
+        engine_b
+            .execute_query_to_json("SELECT 1 FROM \"src\".public.t LIMIT 0")
+            .is_err()
+    );
 
     // Replay should re-issue ATTACH against engine_b.
     registry.replay_all(&engine_b).unwrap();

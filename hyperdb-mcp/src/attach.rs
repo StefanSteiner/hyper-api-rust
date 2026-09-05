@@ -32,7 +32,7 @@
 use crate::engine::Engine;
 use crate::error::{ErrorCode, McpError};
 use hyperdb_api::escape_sql_path;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::SystemTime;
@@ -379,25 +379,25 @@ impl AttachRegistry {
         // all-or-nothing contract: the user asked for "create a new
         // DB" which implicitly promises a catalog; leaving an
         // attached-but-unseeded file would silently violate that.
-        if file_was_created {
-            if let Err(e) = crate::table_catalog::ensure_exists_in(engine, Some(&req.alias)) {
-                let detach_sql = format!("DETACH DATABASE \"{}\"", req.alias.replace('"', "\"\""));
-                if let Err(de) = engine.execute_command(&detach_sql) {
-                    tracing::warn!(
-                        alias = %req.alias,
-                        err = %de.message,
-                        "rollback DETACH after _table_catalog seed failure also failed; \
-                         alias may remain attached until reconnect",
-                    );
-                }
-                // Also reset search_path if this was the first
-                // attachment — the SET we just ran is no longer
-                // backed by an attachment.
-                if guard.is_empty() {
-                    let _ = reset_search_path(engine);
-                }
-                return Err(e);
+        if file_was_created
+            && let Err(e) = crate::table_catalog::ensure_exists_in(engine, Some(&req.alias))
+        {
+            let detach_sql = format!("DETACH DATABASE \"{}\"", req.alias.replace('"', "\"\""));
+            if let Err(de) = engine.execute_command(&detach_sql) {
+                tracing::warn!(
+                    alias = %req.alias,
+                    err = %de.message,
+                    "rollback DETACH after _table_catalog seed failure also failed; \
+                     alias may remain attached until reconnect",
+                );
             }
+            // Also reset search_path if this was the first
+            // attachment — the SET we just ran is no longer
+            // backed by an attachment.
+            if guard.is_empty() {
+                let _ = reset_search_path(engine);
+            }
+            return Err(e);
         }
 
         let entry = AttachedDb {
@@ -443,14 +443,14 @@ impl AttachRegistry {
         // over again so we don't leave a stale SET hanging around
         // that might shadow the primary's real name (for instance if
         // the user renames the workspace file across sessions).
-        if guard.is_empty() {
-            if let Err(e) = reset_search_path(engine) {
-                tracing::warn!(
-                    err = %e.message,
-                    "detach succeeded but could not reset schema_search_path; \
-                     unqualified queries should still work against the primary",
-                );
-            }
+        if guard.is_empty()
+            && let Err(e) = reset_search_path(engine)
+        {
+            tracing::warn!(
+                err = %e.message,
+                "detach succeeded but could not reset schema_search_path; \
+                 unqualified queries should still work against the primary",
+            );
         }
         Ok(true)
     }
@@ -516,13 +516,13 @@ impl AttachRegistry {
         // Re-pin the search path if at least one attachment survived
         // the replay. The post-ConnectionLost engine is brand-new so
         // any previous `SET schema_search_path` is gone.
-        if !guard.is_empty() {
-            if let Err(e) = set_primary_search_path(engine) {
-                tracing::warn!(
-                    err = %e.message,
-                    "replay_all: could not re-pin schema_search_path after reconnect",
-                );
-            }
+        if !guard.is_empty()
+            && let Err(e) = set_primary_search_path(engine)
+        {
+            tracing::warn!(
+                err = %e.message,
+                "replay_all: could not re-pin schema_search_path after reconnect",
+            );
         }
         Ok(())
     }

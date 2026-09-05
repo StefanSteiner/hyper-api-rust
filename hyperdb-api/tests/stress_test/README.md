@@ -119,6 +119,7 @@ All parameters are set via environment variables:
 ### `summary.json`
 
 Complete run results including config snapshot and aggregate statistics:
+
 - Operation counts by type (BulkInsert, SingleInsert, SimpleSelect, etc.)
 - Throughput (ops/sec, insert-rows/sec)
 - Latency percentiles (p50, p95, p99, max) overall and per-operation
@@ -130,6 +131,7 @@ Complete run results including config snapshot and aggregate statistics:
 ### `replay.json`
 
 Compact seed-based replay file for deterministic reproduction:
+
 - Global seed and full config snapshot
 - Per-user seed assignments (user ID, class, seed, database index)
 - Per-database schema seeds
@@ -213,6 +215,7 @@ Disk used:   1,979 MB
 ```
 
 **Observations:**
+
 - Replay produces a similar workload profile — throughput, latency, and memory are
   in the same ballpark. Operation counts differ because thread scheduling varies.
 - Hyper load >1.0 indicates the scheduler had more work queued than it could run

@@ -8,7 +8,7 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 use crate::connection::Connection;
-use crate::result::{extract_row, RowData};
+use crate::result::{RowData, extract_row};
 
 // =============================================================================
 // PreparedStatement

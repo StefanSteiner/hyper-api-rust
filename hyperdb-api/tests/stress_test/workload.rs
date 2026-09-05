@@ -11,8 +11,8 @@
 use hyperdb_api::{
     Catalog, Connection, CreateMode, HyperProcess, Inserter, SqlType, TableDefinition,
 };
-use rand::rngs::StdRng;
 use rand::RngExt;
+use rand::rngs::StdRng;
 use std::time::Instant;
 
 use super::config::SimulationConfig;

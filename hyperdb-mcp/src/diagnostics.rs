@@ -640,28 +640,28 @@ pub fn collect_doctor_report(
     if let Some(warning) = hyperd_resolution.warning {
         warnings.push(warning);
     }
-    if let Some(verified) = daemon_report.verified.as_ref() {
-        if let Some(identity) = verified.record.identity() {
-            if identity.mcp_version() != installation.mcp.source {
-                warnings.push(doctor_warning(
-                    "daemon_client_build_mismatch",
-                    format!(
-                        "The live daemon MCP build '{}' differs from this client build '{}'.",
-                        identity.mcp_version(),
-                        installation.mcp.source
-                    ),
-                ));
-            }
-            if identity.executable_path() != &installation.native_executable {
-                warnings.push(doctor_warning(
-                    "daemon_client_executable_mismatch",
-                    format!(
-                        "The live daemon executable '{}' differs from this client executable '{}'.",
-                        identity.executable_path().display,
-                        installation.native_executable.display
-                    ),
-                ));
-            }
+    if let Some(verified) = daemon_report.verified.as_ref()
+        && let Some(identity) = verified.record.identity()
+    {
+        if identity.mcp_version() != installation.mcp.source {
+            warnings.push(doctor_warning(
+                "daemon_client_build_mismatch",
+                format!(
+                    "The live daemon MCP build '{}' differs from this client build '{}'.",
+                    identity.mcp_version(),
+                    installation.mcp.source
+                ),
+            ));
+        }
+        if identity.executable_path() != &installation.native_executable {
+            warnings.push(doctor_warning(
+                "daemon_client_executable_mismatch",
+                format!(
+                    "The live daemon executable '{}' differs from this client executable '{}'.",
+                    identity.executable_path().display,
+                    installation.native_executable.display
+                ),
+            ));
         }
     }
     warnings.push(doctor_warning(
@@ -1302,7 +1302,9 @@ fn daemon_doctor_warning(warning: &DoctorDaemonWarning) -> DoctorWarning {
         ),
         DoctorDaemonWarning::DiscoveryCandidateUnreachable { responding_port } => doctor_warning(
             "daemon_discovery_candidate_unreachable",
-            format!("The recorded daemon candidate on port {responding_port} did not return fresh enriched STATUS."),
+            format!(
+                "The recorded daemon candidate on port {responding_port} did not return fresh enriched STATUS."
+            ),
         ),
         DoctorDaemonWarning::StaleOrReplacedDiscovery { mismatches } => {
             let facts = mismatches
@@ -1320,11 +1322,15 @@ fn daemon_doctor_warning(warning: &DoctorDaemonWarning) -> DoctorWarning {
             reported_port,
         } => doctor_warning(
             "daemon_status_health_port_mismatch",
-            format!("STATUS from port {responding_port} reported health port {reported_port}; the candidate was rejected."),
+            format!(
+                "STATUS from port {responding_port} reported health port {reported_port}; the candidate was rejected."
+            ),
         ),
         DoctorDaemonWarning::MalformedStatus { responding_port } => doctor_warning(
             "daemon_status_malformed",
-            format!("Port {responding_port} returned malformed or unenriched STATUS; the candidate was rejected."),
+            format!(
+                "Port {responding_port} returned malformed or unenriched STATUS; the candidate was rejected."
+            ),
         ),
     }
 }
@@ -1650,27 +1656,27 @@ mod tests {
     use std::cell::RefCell;
     use std::ffi::OsStr;
     use std::io;
-    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use tempfile::TempDir;
 
     use crate::daemon::discovery::{
-        read_discovery_file_raw, DaemonBuildIdentity, DaemonInfo, DaemonRecord, PortScan,
-        RawDiscoveryRead,
+        DaemonBuildIdentity, DaemonInfo, DaemonRecord, PortScan, RawDiscoveryRead,
+        read_discovery_file_raw,
     };
     use crate::daemon::health::{DaemonState, HealthListener};
 
     use super::{
-        collect_doctor_daemon, collect_real_doctor_daemon, real_network_test_guard,
         DiscoveryFactMismatch, DoctorCollectRequest, DoctorCollectorDependencies,
         DoctorDaemonState, DoctorDaemonWarning, DoctorDeadline, DoctorMoment, DoctorScanCandidate,
-        DoctorScanRequest, DoctorStatusProbe, ReportedPath,
+        DoctorScanRequest, DoctorStatusProbe, ReportedPath, collect_doctor_daemon,
+        collect_real_doctor_daemon, real_network_test_guard,
     };
 
     #[derive(Debug, Clone, PartialEq, Eq)]

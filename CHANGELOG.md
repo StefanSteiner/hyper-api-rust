@@ -2,13 +2,11 @@
 
 ## [0.7.3](https://github.com/tableau/hyper-api-rust/compare/v0.7.2...v0.7.3) (2026-08-28)
 
-
 ### Bug Fixes
 
 * **mcp:** improve diagnostics, daemon resilience, and chart UX ([#243](https://github.com/tableau/hyper-api-rust/issues/243)) ([44bdf1e](https://github.com/tableau/hyper-api-rust/commit/44bdf1e5551e8936a568a1ce6ca07ac4ca5e75c7))
 
 ## [0.7.2](https://github.com/tableau/hyper-api-rust/compare/v0.7.1...v0.7.2) (2026-08-26)
-
 
 ### Bug Fixes
 
@@ -16,14 +14,12 @@
 
 ## [0.7.1](https://github.com/tableau/hyper-api-rust/compare/v0.7.0...v0.7.1) (2026-08-25)
 
-
 ### Bug Fixes
 
 * **bootstrap:** bump pinned hyperd to 0.0.26359 (r07abb490) ([#237](https://github.com/tableau/hyper-api-rust/issues/237)) ([1ea0375](https://github.com/tableau/hyper-api-rust/commit/1ea037548746600ec718c51517898a5e42da6be4))
 * **deps:** bump h2 for RUSTSEC-2026-0258, fix new clippy unused_async_trait_impl lint ([#235](https://github.com/tableau/hyper-api-rust/issues/235)) ([753d1f5](https://github.com/tableau/hyper-api-rust/commit/753d1f571780360111b14306abff2f2b5bccae49))
 
 ## [0.7.0](https://github.com/tableau/hyper-api-rust/compare/v0.6.1...v0.7.0) (2026-07-11)
-
 
 ### ⚠ BREAKING CHANGES
 
@@ -50,7 +46,6 @@
 * **mcp:** kv_set reports created/value_bytes, adds overwrite guard + value_path ([fd89084](https://github.com/tableau/hyper-api-rust/commit/fd89084afdbfb3ffac41ae4ee255cc2312c9c557))
 * **mcp:** kv_size reports total value bytes ([0967c05](https://github.com/tableau/hyper-api-rust/commit/0967c05eb7f27667ad9e1f792bc039ad332a8d06))
 
-
 ### Bug Fixes
 
 * **mcp:** [#192](https://github.com/tableau/hyper-api-rust/issues/192) cap kv_set value_path file size before reading ([0fda8ec](https://github.com/tableau/hyper-api-rust/commit/0fda8ece5ac0e6065c2b797fd9fe26d6221279e9))
@@ -58,20 +53,17 @@
 
 ## [0.6.1](https://github.com/tableau/hyper-api-rust/compare/v0.6.0...v0.6.1) (2026-07-10)
 
-
 ### Bug Fixes
 
 * **mcp:** surface the KV store in the crates.io README and map caller-fixable identifier errors to INVALID_ARGUMENT ([#188](https://github.com/tableau/hyper-api-rust/issues/188)) ([a5993d5](https://github.com/tableau/hyper-api-rust/commit/a5993d5e9901a5bcc02bb9d7fbfe850ad36fe272))
 
 ## [0.6.0](https://github.com/tableau/hyper-api-rust/compare/v0.5.6...v0.6.0) (2026-07-10)
 
-
 ### Features
 
 * **mcp:** key-value scratchpad tools + database-targeted KV API ([#185](https://github.com/tableau/hyper-api-rust/issues/185)) ([c24e291](https://github.com/tableau/hyper-api-rust/commit/c24e2918f60792e693b6b40f583562648233f7ac))
 
 ## [0.5.6](https://github.com/tableau/hyper-api-rust/compare/v0.5.5...v0.5.6) (2026-06-16)
-
 
 ### Bug Fixes
 
@@ -81,24 +73,21 @@
 
 ## [0.5.5](https://github.com/tableau/hyper-api-rust/compare/v0.5.4...v0.5.5) (2026-06-16)
 
-
 ### Bug Fixes
 
 * **deps:** bump npm dependencies to resolve Dependabot alerts ([f37c2d7](https://github.com/tableau/hyper-api-rust/commit/f37c2d7f79ba7f0864fea0416ff45b38d00ec932))
 
 ## [0.5.4](https://github.com/tableau/hyper-api-rust/compare/v0.5.3...v0.5.4) (2026-06-10)
 
-
 ### Bug Fixes
 
 * **api:** IntoValue + Inserter::add_geography for Geography ([#65](https://github.com/tableau/hyper-api-rust/issues/65)) ([c26242e](https://github.com/tableau/hyper-api-rust/commit/c26242e448055816ef5e01ef5e5a7509e06f2a77))
 * **api:** ToSqlParam for Numeric (scale=0), Interval, and JSON ([#65](https://github.com/tableau/hyper-api-rust/issues/65)) ([2e4a4d7](https://github.com/tableau/hyper-api-rust/commit/2e4a4d7ddf3d037a9e8068a1c97ecc7206aea3ed))
 * catalog rename metadata, data_url field, and ToSqlParam/IntoValue type coverage ([#134](https://github.com/tableau/hyper-api-rust/issues/134)) ([00fd333](https://github.com/tableau/hyper-api-rust/commit/00fd333ccc62c060707ed8d5105cdf9b7277a330))
-* **mcp:** add data_url field to _table_catalog for mechanical refresh ([#60](https://github.com/tableau/hyper-api-rust/issues/60)) ([50cdb25](https://github.com/tableau/hyper-api-rust/commit/50cdb25be7c4a57fe20490eeb1c83c21295d7146))
+* **mcp:** add data_url field to_table_catalog for mechanical refresh ([#60](https://github.com/tableau/hyper-api-rust/issues/60)) ([50cdb25](https://github.com/tableau/hyper-api-rust/commit/50cdb25be7c4a57fe20490eeb1c83c21295d7146))
 * **mcp:** preserve catalog metadata on ALTER TABLE RENAME ([#59](https://github.com/tableau/hyper-api-rust/issues/59)) ([e979bba](https://github.com/tableau/hyper-api-rust/commit/e979bba606737c8ce46d97fa495278cd6a51ed9e))
 
 ## [0.5.3](https://github.com/tableau/hyper-api-rust/compare/v0.5.2...v0.5.3) (2026-06-09)
-
 
 ### Bug Fixes
 
@@ -110,13 +99,11 @@
 
 ## [0.5.2](https://github.com/tableau/hyper-api-rust/compare/v0.5.1...v0.5.2) (2026-06-08)
 
-
 ### Bug Fixes
 
 * **bootstrap:** download hyperd from the Java API bundle, not C++ ([#121](https://github.com/tableau/hyper-api-rust/issues/121)) ([9ca4f24](https://github.com/tableau/hyper-api-rust/commit/9ca4f240c17ff816f9d2cfb833a344def2c7fbfc))
 
 ## [0.5.1](https://github.com/tableau/hyper-api-rust/compare/v0.5.0...v0.5.1) (2026-06-08)
-
 
 ### Bug Fixes
 
@@ -125,7 +112,6 @@
 
 ## [0.5.0](https://github.com/tableau/hyper-api-rust/compare/v0.4.0...v0.5.0) (2026-06-07)
 
-
 ### Features
 
 * **daemon:** identified PONG handshake + port-scan resolver groundwork ([751fd75](https://github.com/tableau/hyper-api-rust/commit/751fd7576f82aa22c4ac619bcf7a17b89f904bc0))
@@ -133,19 +119,16 @@
 * **daemon:** port-scanning locator + newer-client version takeover ([114a155](https://github.com/tableau/hyper-api-rust/commit/114a1551b040084142540c124de27cbdb23cfd59))
 * **mcp:** surface hyperd endpoint + daemon health port in status tool ([293a7a0](https://github.com/tableau/hyper-api-rust/commit/293a7a0fe860d5e3b2a69f7a52e89c2b0530374b))
 
-
 ### Bug Fixes
 
 * **mcp:** harden daemon discovery — identified PONG, port scanning, version takeover, resident-by-default ([#115](https://github.com/tableau/hyper-api-rust/issues/115)) ([05019b9](https://github.com/tableau/hyper-api-rust/commit/05019b958fc12f35efe13a47931a50d66496ad80))
 
 ## [0.4.0](https://github.com/tableau/hyper-api-rust/compare/v0.3.1...v0.4.0) (2026-06-02)
 
-
 ### Features
 
 * streaming FromRow mapping (stream_as) — constant-memory struct-mapped queries ([#91](https://github.com/tableau/hyper-api-rust/issues/91)) ([#94](https://github.com/tableau/hyper-api-rust/issues/94)) ([3327fc0](https://github.com/tableau/hyper-api-rust/commit/3327fc0fd8d61faaa55b8d5ae2922ff7284348c5))
 * opt-in compile-time SQL validation — `query_as!` / `query_scalar!` validate SQL against `#[derive(Table)]` structs at build time, with VS Code diagnostics ([#93](https://github.com/tableau/hyper-api-rust/issues/93)) ([73f9b0f](https://github.com/tableau/hyper-api-rust/commit/73f9b0f))
-
 
 ### Bug Fixes
 
@@ -183,15 +166,14 @@ This release aggregates a coordinated set of breaking and additive API changes t
 ### Deferred
 
 * Internal `client::Error` flatten — deferred to v0.3.x as [#75](https://github.com/tableau/hyper-api-rust/issues/75) (internal type, zero external consumers; scope grew on second look).
-## [0.2.3](https://github.com/tableau/hyper-api-rust/compare/v0.2.2...v0.2.3) (2026-05-27)
 
+## [0.2.3](https://github.com/tableau/hyper-api-rust/compare/v0.2.2...v0.2.3) (2026-05-27)
 
 ### Bug Fixes
 
 * **ci:** use exact-name match for required check-runs (no regex) ([#54](https://github.com/tableau/hyper-api-rust/issues/54)) ([fc13637](https://github.com/tableau/hyper-api-rust/commit/fc13637b0da39e98f0dc3da3034b23014ba6dc33))
 
 ## [0.2.2](https://github.com/tableau/hyper-api-rust/compare/v0.2.1...v0.2.2) (2026-05-27)
-
 
 ### Bug Fixes
 
@@ -200,13 +182,11 @@ This release aggregates a coordinated set of breaking and additive API changes t
 
 ## [0.2.1](https://github.com/tableau/hyper-api-rust/compare/v0.2.0...v0.2.1) (2026-05-26)
 
-
 ### Bug Fixes
 
 * **build:** add make targets for API-only build and test ([#44](https://github.com/tableau/hyper-api-rust/issues/44)) ([7f81ead](https://github.com/tableau/hyper-api-rust/commit/7f81eadd690bdd09fe04a9ec2f819fbc0e041004))
 
 ## [0.2.0](https://github.com/tableau/hyper-api-rust/compare/v0.1.3...v0.2.0) (2026-05-26)
-
 
 ### Features
 
@@ -214,7 +194,6 @@ This release aggregates a coordinated set of breaking and additive API changes t
 * **mcp:** finish persistent — remove all v1 limitations + per-database catalog ([#32](https://github.com/tableau/hyper-api-rust/issues/32)) ([b420532](https://github.com/tableau/hyper-api-rust/commit/b42053253a282a93e128c7035f4d25b0bc8971b3))
 * **mcp:** per-tool database parameter and persist shorthand ([#31](https://github.com/tableau/hyper-api-rust/issues/31)) ([37336c8](https://github.com/tableau/hyper-api-rust/commit/37336c8791f8cdde1a14054636a09676527944fc))
 * single-instance daemon for shared hyperd across MCP clients ([#26](https://github.com/tableau/hyper-api-rust/issues/26)) ([e2c6204](https://github.com/tableau/hyper-api-rust/commit/e2c6204ee22970d853d478e7679b6963e31bbc66))
-
 
 ### Bug Fixes
 
@@ -228,13 +207,11 @@ This release aggregates a coordinated set of breaking and additive API changes t
 
 ## [0.1.3](https://github.com/tableau/hyper-api-rust/compare/v0.1.2...v0.1.3) (2026-05-18)
 
-
 ### Bug Fixes
 
 * v0.1.2 release — bump versions and add safety net ([#17](https://github.com/tableau/hyper-api-rust/issues/17)) ([bae4536](https://github.com/tableau/hyper-api-rust/commit/bae453600ce94ddc318ccb1cfe89be8fa32eef85))
 
 ## [0.1.2](https://github.com/tableau/hyper-api-rust/compare/v0.1.1...v0.1.2) (2026-05-18)
-
 
 ### Bug Fixes
 

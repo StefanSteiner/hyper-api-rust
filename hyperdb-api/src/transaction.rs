@@ -39,7 +39,7 @@ impl<'conn> Transaction<'conn> {
         // Use the crate-internal `_raw` family. The matching `pub`
         // methods on `Connection` are `#[deprecated]` for downstream
         // consumers; this guard is the recommended replacement.
-        connection.begin_transaction_raw()?;
+        connection.begin_transaction_unguarded()?;
         Ok(Self {
             connection,
             completed: false,
@@ -55,7 +55,7 @@ impl<'conn> Transaction<'conn> {
     /// rollback.
     pub fn commit(mut self) -> Result<()> {
         self.completed = true;
-        self.connection.commit_raw()
+        self.connection.commit_unguarded()
     }
 
     /// Rolls back the transaction explicitly.
@@ -66,7 +66,7 @@ impl<'conn> Transaction<'conn> {
     /// is marked completed regardless.
     pub fn rollback(mut self) -> Result<()> {
         self.completed = true;
-        self.connection.rollback_raw()
+        self.connection.rollback_unguarded()
     }
 
     /// Returns a reference to the underlying connection.
@@ -165,7 +165,7 @@ impl Drop for Transaction<'_> {
         if !self.completed {
             // Best-effort rollback; ignore errors during drop.
             // Hyper produces a WARNING (not error) if no active transaction.
-            let _ = self.connection.rollback_raw();
+            let _ = self.connection.rollback_unguarded();
         }
     }
 }

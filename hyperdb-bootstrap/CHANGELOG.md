@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **BREAKING:** the minimum supported Rust version is now **1.88**, up from
+  1.81, and the crate is compiled with **edition 2024**. 1.88 is the version
+  Red Hat Enterprise Linux 9.7 ships as `rust-toolset`.
+- **BREAKING:** the TLS crypto provider is now **ring** rather than AWS-LC.
+  This crate declares its own `reqwest` dependency rather than inheriting the
+  workspace entry, and asked for the `rustls` feature — which forces the
+  `aws-lc-rs` provider and, through Cargo's feature unification, imposed it on
+  every crate in the workspace. It now uses `rustls-no-provider`.
+
+  That feature links *no* provider at all, and `reqwest` resolves one through
+  `CryptoProvider::get_default()`, which has no crate-feature fallback — so
+  `scrape_latest` now installs ring as the process-wide default before building
+  its HTTP client. **Embedders take note:** if your application installs its own
+  `CryptoProvider`, install it before calling into this crate; ours defers to an
+  already-installed provider rather than replacing it.
+
+  Guarded by a unit test that builds a `reqwest` client, which needs no network
+  because the failure is a panic inside `build()`.
+
 - **Bump the pinned `hyperd` release to `0.0.26359` (`r07abb490`).** This
   supersedes the never-shipped `0.0.26225` bump attempt (PR #219), which was
   held because `0.0.26225` deadlocked on Apple Silicon Macs running macOS

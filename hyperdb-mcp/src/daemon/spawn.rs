@@ -223,10 +223,10 @@ fn maybe_take_over(info: DaemonInfo, _scan: PortScan) -> io::Result<DaemonInfo> 
             // already published a fresh, identity-verified daemon on this port,
             // adopt it instead of spawning — this avoids returning the stale
             // `info` (old endpoint) we were carrying and skips a redundant spawn.
-            if let Some(fresh) = discovery::discover() {
-                if fresh.health_port == info.health_port {
-                    return Ok(fresh);
-                }
+            if let Some(fresh) = discovery::discover()
+                && fresh.health_port == info.health_port
+            {
+                return Ok(fresh);
             }
             spawn_detached(info.health_port)?;
             return wait_for_daemon();

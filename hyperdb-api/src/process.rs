@@ -65,8 +65,8 @@ use std::io::Read;
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -354,7 +354,7 @@ impl HyperProcess {
         })?;
 
         // Check if user wants to disable default parameters
-        let use_defaults = parameters.map_or(true, |p| !p.contains_key(NO_DEFAULT_PARAMETERS));
+        let use_defaults = parameters.is_none_or(|p| !p.contains_key(NO_DEFAULT_PARAMETERS));
 
         // Get the listen mode
         let listen_mode = parameters.and_then(|p| p.listen_mode).unwrap_or_default();
@@ -531,10 +531,10 @@ impl HyperProcess {
             }
 
             // Set default log directory to current directory
-            if !user_has_param("log_dir") {
-                if let Ok(cwd) = std::env::current_dir() {
-                    cmd.arg(format!("--log-dir={}", cwd.display()));
-                }
+            if !user_has_param("log_dir")
+                && let Ok(cwd) = std::env::current_dir()
+            {
+                cmd.arg(format!("--log-dir={}", cwd.display()));
             }
 
             // Disable password requirement for local development
@@ -672,10 +672,10 @@ impl HyperProcess {
             }
             // TCP endpoint (host:port format)
             let parts: Vec<&str> = ep.split(':').collect();
-            if parts.len() == 2 {
-                if let Ok(port) = parts[1].parse::<u16>() {
-                    return ConnectionEndpoint::tcp(parts[0], port);
-                }
+            if parts.len() == 2
+                && let Ok(port) = parts[1].parse::<u16>()
+            {
+                return ConnectionEndpoint::tcp(parts[0], port);
             }
             ConnectionEndpoint::tcp("localhost", 7483) // fallback
         });
@@ -1105,7 +1105,7 @@ impl HyperProcess {
                             thread::sleep(Duration::from_millis(100));
                         }
                         Err(e) => {
-                            break Err(Error::connection_with_io("Failed to wait for hyperd", e))
+                            break Err(Error::connection_with_io("Failed to wait for hyperd", e));
                         }
                     }
                 }

@@ -146,15 +146,15 @@ mod rustls_tests {
         let addr = listener.local_addr().unwrap();
 
         let handle = tokio::spawn(async move {
-            if let Ok((stream, _)) = listener.accept().await {
-                if let Ok(mut tls_stream) = acceptor.accept(stream).await {
-                    let mut buf = [0u8; 1024];
-                    if let Ok(n) = tls_stream.read(&mut buf).await {
-                        let msg = std::str::from_utf8(&buf[..n]).unwrap_or("?");
-                        let response = format!("echo:{msg}");
-                        let _ = tls_stream.write_all(response.as_bytes()).await;
-                        let _ = tls_stream.shutdown().await;
-                    }
+            if let Ok((stream, _)) = listener.accept().await
+                && let Ok(mut tls_stream) = acceptor.accept(stream).await
+            {
+                let mut buf = [0u8; 1024];
+                if let Ok(n) = tls_stream.read(&mut buf).await {
+                    let msg = std::str::from_utf8(&buf[..n]).unwrap_or("?");
+                    let response = format!("echo:{msg}");
+                    let _ = tls_stream.write_all(response.as_bytes()).await;
+                    let _ = tls_stream.shutdown().await;
                 }
             }
         });

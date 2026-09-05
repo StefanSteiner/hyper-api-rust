@@ -252,11 +252,11 @@ impl<'conn> AsyncInserter<'conn> {
             let table_name = self.table_def.qualified_name();
             self.writer = Some(client.copy_in(&table_name, &columns).await?);
         }
-        if let Some(buffer) = self.chunk.take() {
-            if let Some(writer) = self.writer.as_mut() {
-                writer.send(&buffer).await?;
-                self.chunk_count += 1;
-            }
+        if let Some(buffer) = self.chunk.take()
+            && let Some(writer) = self.writer.as_mut()
+        {
+            writer.send(&buffer).await?;
+            self.chunk_count += 1;
         }
         Ok(())
     }

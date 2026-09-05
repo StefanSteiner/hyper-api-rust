@@ -112,7 +112,7 @@ mod result;
 mod authenticated_client;
 
 pub use client::{GrpcChunkStreamSync, GrpcClient, GrpcClientSync};
-pub use config::{GrpcConfig, DEFAULT_MAX_MESSAGE_SIZE};
+pub use config::{DEFAULT_MAX_MESSAGE_SIZE, GrpcConfig};
 pub use error::GrpcError;
 pub use executor::GrpcChunkStream;
 pub use params::{JsonNamedParamsBuilder, ParameterStyle, QueryParameters};

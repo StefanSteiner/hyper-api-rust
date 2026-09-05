@@ -292,15 +292,15 @@ impl OwnedPreparedStatement {
 impl Drop for OwnedPreparedStatement {
     fn drop(&mut self) {
         // Best-effort cleanup - log errors but don't panic during drop
-        if let Some(conn) = self.connection.upgrade() {
-            if let Err(e) = close_statement_internal(&conn, &self.statement) {
-                warn!(
-                    target: "hyperdb_api",
-                    statement_name = %self.statement.name,
-                    error = %e,
-                    "failed-to-close-prepared-statement-during-drop"
-                );
-            }
+        if let Some(conn) = self.connection.upgrade()
+            && let Err(e) = close_statement_internal(&conn, &self.statement)
+        {
+            warn!(
+                target: "hyperdb_api",
+                statement_name = %self.statement.name,
+                error = %e,
+                "failed-to-close-prepared-statement-during-drop"
+            );
         }
         // If the connection is already dropped, we can't close the statement
         // but that's okay - the server will clean it up when the connection closes

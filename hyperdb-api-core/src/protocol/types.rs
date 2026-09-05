@@ -145,14 +145,12 @@ pub fn i16_to_hyper_binary(v: i16, buf: &mut BytesMut) {
 /// Returns `ParseError::InvalidLength` if the buffer is not exactly 2 bytes.
 #[inline]
 pub fn i16_from_hyper_binary(buf: &[u8]) -> Result<i16, ParseError> {
-    if buf.len() != 2 {
-        return Err(ParseError::InvalidLength {
-            type_name: "i16",
-            expected: 2,
-            actual: buf.len(),
-        });
-    }
-    Ok(i16::from_le_bytes([buf[0], buf[1]]))
+    let bytes = buf.try_into().map_err(|_| ParseError::InvalidLength {
+        type_name: "i16",
+        expected: 2,
+        actual: buf.len(),
+    })?;
+    Ok(i16::from_le_bytes(bytes))
 }
 
 /// Serializes an i32 value to `HyperBinary` format (`LittleEndian`).
@@ -177,14 +175,12 @@ pub fn i32_to_hyper_binary(v: i32, buf: &mut BytesMut) {
 /// Returns `ParseError::InvalidLength` if the buffer is not exactly 4 bytes.
 #[inline]
 pub fn i32_from_hyper_binary(buf: &[u8]) -> Result<i32, ParseError> {
-    if buf.len() != 4 {
-        return Err(ParseError::InvalidLength {
-            type_name: "i32",
-            expected: 4,
-            actual: buf.len(),
-        });
-    }
-    Ok(i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]))
+    let bytes = buf.try_into().map_err(|_| ParseError::InvalidLength {
+        type_name: "i32",
+        expected: 4,
+        actual: buf.len(),
+    })?;
+    Ok(i32::from_le_bytes(bytes))
 }
 
 /// Serializes an i64 value to `HyperBinary` format (`LittleEndian`).
@@ -209,16 +205,12 @@ pub fn i64_to_hyper_binary(v: i64, buf: &mut BytesMut) {
 /// Returns `ParseError::InvalidLength` if the buffer is not exactly 8 bytes.
 #[inline]
 pub fn i64_from_hyper_binary(buf: &[u8]) -> Result<i64, ParseError> {
-    if buf.len() != 8 {
-        return Err(ParseError::InvalidLength {
-            type_name: "i64",
-            expected: 8,
-            actual: buf.len(),
-        });
-    }
-    Ok(i64::from_le_bytes([
-        buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
-    ]))
+    let bytes = buf.try_into().map_err(|_| ParseError::InvalidLength {
+        type_name: "i64",
+        expected: 8,
+        actual: buf.len(),
+    })?;
+    Ok(i64::from_le_bytes(bytes))
 }
 
 /// Serializes an f32 value to `HyperBinary` format (`LittleEndian`).
@@ -243,14 +235,12 @@ pub fn f32_to_hyper_binary(v: f32, buf: &mut BytesMut) {
 /// Returns `ParseError::InvalidLength` if the buffer is not exactly 4 bytes.
 #[inline]
 pub fn f32_from_hyper_binary(buf: &[u8]) -> Result<f32, ParseError> {
-    if buf.len() != 4 {
-        return Err(ParseError::InvalidLength {
-            type_name: "f32",
-            expected: 4,
-            actual: buf.len(),
-        });
-    }
-    Ok(f32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]))
+    let bytes = buf.try_into().map_err(|_| ParseError::InvalidLength {
+        type_name: "f32",
+        expected: 4,
+        actual: buf.len(),
+    })?;
+    Ok(f32::from_le_bytes(bytes))
 }
 
 /// Serializes an f64 value to `HyperBinary` format (`LittleEndian`).
@@ -275,16 +265,12 @@ pub fn f64_to_hyper_binary(v: f64, buf: &mut BytesMut) {
 /// Returns `ParseError::InvalidLength` if the buffer is not exactly 8 bytes.
 #[inline]
 pub fn f64_from_hyper_binary(buf: &[u8]) -> Result<f64, ParseError> {
-    if buf.len() != 8 {
-        return Err(ParseError::InvalidLength {
-            type_name: "f64",
-            expected: 8,
-            actual: buf.len(),
-        });
-    }
-    Ok(f64::from_le_bytes([
-        buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
-    ]))
+    let bytes = buf.try_into().map_err(|_| ParseError::InvalidLength {
+        type_name: "f64",
+        expected: 8,
+        actual: buf.len(),
+    })?;
+    Ok(f64::from_le_bytes(bytes))
 }
 
 /// Serializes a text value to `HyperBinary` format.
@@ -314,18 +300,16 @@ pub fn text_to_hyper_binary(v: &str, buf: &mut BytesMut) {
 /// or the declared data length. Returns `ParseError::InvalidUtf8` if the data is not valid UTF-8.
 #[inline]
 pub fn text_from_hyper_binary(buf: &[u8]) -> Result<&str, ParseError> {
-    if buf.len() < 4 {
-        return Err(ParseError::BufferTooShort {
+    let (len_bytes, rest) = buf
+        .split_first_chunk::<4>()
+        .ok_or(ParseError::BufferTooShort {
             context: "text length",
-        });
-    }
-    let len = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-    if buf.len() < 4 + len {
-        return Err(ParseError::BufferTooShort {
-            context: "text data",
-        });
-    }
-    Ok(std::str::from_utf8(&buf[4..4 + len])?)
+        })?;
+    let len = u32::from_le_bytes(*len_bytes) as usize;
+    let data = rest.get(..len).ok_or(ParseError::BufferTooShort {
+        context: "text data",
+    })?;
+    Ok(std::str::from_utf8(data)?)
 }
 
 /// Serializes a bytea value to `HyperBinary` format.
@@ -352,23 +336,83 @@ pub fn bytea_to_hyper_binary(v: &[u8], buf: &mut BytesMut) {
 /// or the declared data length.
 #[inline]
 pub fn bytea_from_hyper_binary(buf: &[u8]) -> Result<&[u8], ParseError> {
-    if buf.len() < 4 {
-        return Err(ParseError::BufferTooShort {
+    let (len_bytes, rest) = buf
+        .split_first_chunk::<4>()
+        .ok_or(ParseError::BufferTooShort {
             context: "bytea length",
-        });
-    }
-    let len = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-    if buf.len() < 4 + len {
-        return Err(ParseError::BufferTooShort {
-            context: "bytea data",
-        });
-    }
-    Ok(&buf[4..4 + len])
+        })?;
+    let len = u32::from_le_bytes(*len_bytes) as usize;
+    rest.get(..len).ok_or(ParseError::BufferTooShort {
+        context: "bytea data",
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A declared length that no buffer can satisfy must be rejected, not
+    /// trusted. `u32::MAX` is the interesting value: the previous
+    /// implementation computed `4 + len`, which overflows `usize` on a 32-bit
+    /// target and wraps to a small number, making the bounds check pass and
+    /// the subsequent slice index panic. `split_at_checked` plus
+    /// `slice::get` cannot overflow.
+    #[test]
+    fn oversized_declared_length_is_rejected() {
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(&u32::MAX.to_le_bytes());
+        buf.extend_from_slice(b"only a few bytes");
+
+        assert!(matches!(
+            text_from_hyper_binary(&buf),
+            Err(ParseError::BufferTooShort {
+                context: "text data"
+            })
+        ));
+        assert!(matches!(
+            bytea_from_hyper_binary(&buf),
+            Err(ParseError::BufferTooShort {
+                context: "bytea data"
+            })
+        ));
+    }
+
+    /// A buffer too short to even hold the 4-byte length prefix.
+    #[test]
+    fn truncated_length_prefix_is_rejected() {
+        for short in [&[][..], &[0][..], &[0, 0][..], &[0, 0, 0][..]] {
+            assert!(matches!(
+                text_from_hyper_binary(short),
+                Err(ParseError::BufferTooShort {
+                    context: "text length"
+                })
+            ));
+        }
+    }
+
+    /// The fixed-width readers require an exact length; `try_into` enforces it.
+    #[test]
+    fn fixed_width_readers_require_exact_length() {
+        assert!(i16_from_hyper_binary(&[0]).is_err());
+        assert!(i16_from_hyper_binary(&[0, 0, 0]).is_err());
+        assert!(i32_from_hyper_binary(&[0, 0, 0]).is_err());
+        assert!(i64_from_hyper_binary(&[0; 7]).is_err());
+        assert!(f32_from_hyper_binary(&[0; 5]).is_err());
+        assert!(f64_from_hyper_binary(&[0; 9]).is_err());
+
+        assert_eq!(i16_from_hyper_binary(&[0, 0]).unwrap(), 0);
+        assert_eq!(i32_from_hyper_binary(&[0; 4]).unwrap(), 0);
+        assert_eq!(i64_from_hyper_binary(&[0; 8]).unwrap(), 0);
+    }
+
+    /// A zero-length payload is valid and distinct from a truncated buffer.
+    #[test]
+    fn zero_length_payload_is_valid() {
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        assert_eq!(text_from_hyper_binary(&buf).unwrap(), "");
+        assert_eq!(bytea_from_hyper_binary(&buf).unwrap(), b"");
+    }
 
     #[test]
     fn test_i32_roundtrip() {

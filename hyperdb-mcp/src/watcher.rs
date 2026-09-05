@@ -51,15 +51,15 @@ use crate::attach::{AttachRegistry, AttachSource};
 use crate::engine::Engine;
 use crate::error::{ErrorCode, McpError};
 use crate::ingest::{
-    detect_file_format, ingest_csv_file_async, ingest_json_file_async, InferredFileFormat,
-    IngestOptions,
+    InferredFileFormat, IngestOptions, detect_file_format, ingest_csv_file_async,
+    ingest_json_file_async,
 };
 use crate::ingest_arrow::{ingest_arrow_ipc_file_async, ingest_parquet_file_async};
-use crate::subscriptions::{uris_for_table_change, SubscriptionRegistry};
-use hyperdb_api::pool::{create_pool, Pool, PoolConfig};
+use crate::subscriptions::{SubscriptionRegistry, uris_for_table_change};
 use hyperdb_api::CreateMode;
+use hyperdb_api::pool::{Pool, PoolConfig, create_pool};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -820,25 +820,23 @@ async fn process_ready_with_recovery(
     // every connection in the pool; without this branch the watcher
     // would route every subsequent file to `failed/` until the user
     // notices and re-issues `watch_directory`.
-    if let Err(ref err) = result {
-        if crate::error::is_connection_lost(&err.message) {
-            tracing::warn!(
-                err = %err.message,
-                "watcher: detected connection-lost error, rebuilding pool and retrying"
-            );
-            match rebuild_watcher_pool(pool_slot, engine, attachments, target_db, concurrency).await
-            {
-                Ok(()) => {
-                    let active_pool = pool_slot.read().await.clone();
-                    result =
-                        ingest_one_ready_file(&active_pool, table, ready_path, &data_path).await;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        err = %e.message,
-                        "watcher: pool rebuild failed; the original ingest error will surface"
-                    );
-                }
+    if let Err(ref err) = result
+        && crate::error::is_connection_lost(&err.message)
+    {
+        tracing::warn!(
+            err = %err.message,
+            "watcher: detected connection-lost error, rebuilding pool and retrying"
+        );
+        match rebuild_watcher_pool(pool_slot, engine, attachments, target_db, concurrency).await {
+            Ok(()) => {
+                let active_pool = pool_slot.read().await.clone();
+                result = ingest_one_ready_file(&active_pool, table, ready_path, &data_path).await;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    err = %e.message,
+                    "watcher: pool rebuild failed; the original ingest error will surface"
+                );
             }
         }
     }
@@ -872,26 +870,25 @@ async fn process_ready_with_recovery(
                 "database": target_db.unwrap_or("local"),
             }))
             .ok();
-            if let Ok(guard) = engine.lock() {
-                if let Some(eng) = guard.as_ref() {
-                    if let Err(e) = crate::table_catalog::upsert_stub_in(
-                        eng,
-                        table,
-                        "watch_directory",
-                        load_params.as_deref(),
-                        Some(row_count_i64),
-                        true,
-                        target_db,
-                        None,
-                    ) {
-                        tracing::warn!(
-                            table = %table,
-                            target_db = ?target_db,
-                            err = %e.message,
-                            "watcher: failed to update _table_catalog after ingest"
-                        );
-                    }
-                }
+            if let Ok(guard) = engine.lock()
+                && let Some(eng) = guard.as_ref()
+                && let Err(e) = crate::table_catalog::upsert_stub_in(
+                    eng,
+                    table,
+                    "watch_directory",
+                    load_params.as_deref(),
+                    Some(row_count_i64),
+                    true,
+                    target_db,
+                    None,
+                )
+            {
+                tracing::warn!(
+                    table = %table,
+                    target_db = ?target_db,
+                    err = %e.message,
+                    "watcher: failed to update _table_catalog after ingest"
+                );
             }
             if let Some(subs) = subscriptions {
                 for uri in uris_for_table_change(table) {

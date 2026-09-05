@@ -87,6 +87,7 @@ impl Type {
 ### 2. Add the SqlType variant (`sql_type.rs`)
 
 Add a variant to the `SqlType` enum, a constructor method, and handle it in:
+
 - `SqlType::internal_oid()`
 - `SqlType::from_oid()`
 - `SqlType::from_oid_and_modifier()` (if the type has a modifier)
@@ -96,6 +97,7 @@ Add a variant to the `SqlType` enum, a constructor method, and handle it in:
 ### 3. Define the Rust type (`special.rs` or inline)
 
 For types that need a dedicated struct (like `Date`, `Numeric`), add it to `special.rs` with:
+
 - `encode()` / `decode()` methods for the wire format
 - `Display` impl
 - Descriptive doc comments including wire format details
@@ -126,6 +128,7 @@ impl ToHyperBinary for MyType {
 ### 5. Wire up higher layers
 
 These changes are outside `hyper-types` but complete the integration:
+
 - `hyper-protocol`: Handle the type in COPY row parsing (if variable-length)
 - `hyperapi`: Add `row.get::<MyType>()` support in `result.rs`
 - `hyperapi`: Add `Inserter` support if the type can be inserted

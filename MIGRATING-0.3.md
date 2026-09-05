@@ -114,6 +114,7 @@ If you have callers that previously parsed SQLSTATE out of the message string fo
 ### Migration recipes
 
 **Match on error kind** — before:
+
 ```rust
 match err.kind() {
     Some(ErrorKind::Connection) => retry(),
@@ -123,6 +124,7 @@ match err.kind() {
 ```
 
 after:
+
 ```rust
 match err {
     Error::Connection { .. } => retry(),
@@ -132,11 +134,13 @@ match err {
 ```
 
 **Wrap an `io::Error`** — before:
+
 ```rust
 return Err(Error::with_cause("read failed", io_err));
 ```
 
 after:
+
 ```rust
 return Err(Error::connection_with_io("read failed", io_err));
 // or, if the failure is a generic file-system I/O outside the connection
@@ -144,17 +148,20 @@ return Err(Error::connection_with_io("read failed", io_err));
 ```
 
 **Generic state assertion** — before:
+
 ```rust
 return Err(Error::new("connection already closed"));
 ```
 
 after:
+
 ```rust
 return Err(Error::internal("connection already closed"));
 // Or, if recoverable (closed mid-operation), Error::Closed("...".into()).
 ```
 
 **Pattern-match on `Error::Other`** — before:
+
 ```rust
 if let Error::Other { message, .. } = &err { /* … */ }
 ```
@@ -162,11 +169,13 @@ if let Error::Other { message, .. } = &err { /* … */ }
 after — the variant is gone. Match on the specific new variant the call site produces. Most former `Other` constructions are now `Error::Conversion`, `Error::Internal`, `Error::Config`, `Error::FeatureNotSupported`, or `Error::InvalidName`/`InvalidTableDefinition` based on the original message.
 
 **Inspect the SQLSTATE of a server error** — `Error::sqlstate()` is preserved for backward-compatible inspection:
+
 ```rust
 if err.sqlstate() == Some("23505") { /* duplicate-key path */ }
 ```
 
 **Read SQLSTATE / detail / hint structurally** — new in v0.3.0:
+
 ```rust
 if let Error::Server { sqlstate: Some(code), detail, hint, .. } = &err {
     log::warn!("server error {code}: detail={detail:?} hint={hint:?}");
@@ -196,7 +205,7 @@ AsyncConnection::commit(&self)              // -> #[doc(hidden)] #[deprecated]
 AsyncConnection::rollback(&self)            // -> #[doc(hidden)] #[deprecated]
 ```
 
-These methods still exist and still work — your build will see compiler warnings rather than errors. They will be deleted in a future release; new code must use the RAII guard.
+At 0.3 these methods still existed and still worked, so a build saw compiler warnings rather than errors. **They were removed in 1.0.0.** If the guard's `&mut conn` borrow is impossible in your code, the replacements are `begin_transaction_unguarded` / `commit_unguarded` / `rollback_unguarded` — see [docs/TRANSACTIONS.md](docs/TRANSACTIONS.md#unguarded-transaction-control).
 
 ### Migration recipe
 

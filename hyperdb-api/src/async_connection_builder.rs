@@ -15,7 +15,7 @@ use crate::async_connection::AsyncConnection;
 use crate::async_transport::AsyncTransport;
 use crate::connection::CreateMode;
 use crate::error::{Error, Result};
-use crate::transport::{detect_transport_type, TransportType};
+use crate::transport::{TransportType, detect_transport_type};
 use hyperdb_api_core::client::{AsyncClient, Config};
 
 /// An async builder for creating database connections.
@@ -239,7 +239,7 @@ impl AsyncConnectionBuilder {
             match endpoint {
                 ConnectionEndpoint::DomainSocket { directory, name } => directory.join(&name),
                 ConnectionEndpoint::Tcp { .. } => {
-                    return Err(Error::config("expected Unix domain socket endpoint"))
+                    return Err(Error::config("expected Unix domain socket endpoint"));
                 }
             }
         } else {

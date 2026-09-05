@@ -7,8 +7,8 @@
 
 mod common;
 use common::TestEngine;
-use hyperdb_mcp::export::{export_to_file, ExportOptions};
-use hyperdb_mcp::ingest::{ingest_csv, ingest_json, IngestOptions};
+use hyperdb_mcp::export::{ExportOptions, export_to_file};
+use hyperdb_mcp::ingest::{IngestOptions, ingest_csv, ingest_json};
 
 /// Load two related JSON datasets (orders + customers), then run a JOIN with
 /// GROUP BY aggregation. Verifies multi-table workspace queries work end-to-end.

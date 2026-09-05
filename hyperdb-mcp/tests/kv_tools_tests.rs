@@ -1056,177 +1056,145 @@ async fn resolved_database_kv_success_shapes() -> TestResult {
         "kv_get missing local key",
         "kv_get",
         serde_json::json!({"store": "empty_local", "key": "missing"})
-    ) {
-        if let Some(payload) = record_kv_response(
-            &mut failures,
-            "kv_get missing local key",
-            &result,
-            "local",
-            &["found", "resolved_database", "value"],
-        ) {
-            if payload["found"] != serde_json::json!(false)
-                || payload["value"] != serde_json::Value::Null
-            {
-                failures.push(format!(
-                    "kv_get missing local key: legacy miss shape changed: {payload}"
-                ));
-            }
-        }
+    ) && let Some(payload) = record_kv_response(
+        &mut failures,
+        "kv_get missing local key",
+        &result,
+        "local",
+        &["found", "resolved_database", "value"],
+    ) && (payload["found"] != serde_json::json!(false)
+        || payload["value"] != serde_json::Value::Null)
+    {
+        failures.push(format!(
+            "kv_get missing local key: legacy miss shape changed: {payload}"
+        ));
     }
 
     if let Some(result) = call_case!(
         "kv_list empty local keys",
         "kv_list",
         serde_json::json!({"store": "empty_local"})
-    ) {
-        if let Some(payload) = record_kv_response(
-            &mut failures,
-            "kv_list empty local keys",
-            &result,
-            "local",
-            &["count", "keys", "resolved_database", "store"],
-        ) {
-            if payload["store"] != serde_json::json!("empty_local")
-                || payload["count"] != serde_json::json!(0)
-                || payload["keys"] != serde_json::json!([])
-            {
-                failures.push(format!(
-                    "kv_list empty local keys: legacy empty shape changed: {payload}"
-                ));
-            }
-        }
+    ) && let Some(payload) = record_kv_response(
+        &mut failures,
+        "kv_list empty local keys",
+        &result,
+        "local",
+        &["count", "keys", "resolved_database", "store"],
+    ) && (payload["store"] != serde_json::json!("empty_local")
+        || payload["count"] != serde_json::json!(0)
+        || payload["keys"] != serde_json::json!([]))
+    {
+        failures.push(format!(
+            "kv_list empty local keys: legacy empty shape changed: {payload}"
+        ));
     }
 
     if let Some(result) = call_case!(
         "kv_list empty local entries",
         "kv_list",
         serde_json::json!({"store": "empty_local", "values": true})
-    ) {
-        if let Some(payload) = record_kv_response(
-            &mut failures,
-            "kv_list empty local entries",
-            &result,
-            "local",
-            &["entries", "resolved_database", "store"],
-        ) {
-            if payload["store"] != serde_json::json!("empty_local")
-                || payload["entries"] != serde_json::json!([])
-            {
-                failures.push(format!(
-                    "kv_list empty local entries: legacy empty values shape changed: {payload}"
-                ));
-            }
-        }
+    ) && let Some(payload) = record_kv_response(
+        &mut failures,
+        "kv_list empty local entries",
+        &result,
+        "local",
+        &["entries", "resolved_database", "store"],
+    ) && (payload["store"] != serde_json::json!("empty_local")
+        || payload["entries"] != serde_json::json!([]))
+    {
+        failures.push(format!(
+            "kv_list empty local entries: legacy empty values shape changed: {payload}"
+        ));
     }
 
     if let Some(result) = call_case!(
         "kv_list_stores empty local database",
         "kv_list_stores",
         serde_json::json!({})
-    ) {
-        if let Some(payload) = record_kv_response(
-            &mut failures,
-            "kv_list_stores empty local database",
-            &result,
-            "local",
-            &["count", "resolved_database", "stores"],
-        ) {
-            if payload["count"] != serde_json::json!(0)
-                || payload["stores"] != serde_json::json!([])
-            {
-                failures.push(format!(
-                    "kv_list_stores empty local database: legacy empty shape changed: {payload}"
-                ));
-            }
-        }
+    ) && let Some(payload) = record_kv_response(
+        &mut failures,
+        "kv_list_stores empty local database",
+        &result,
+        "local",
+        &["count", "resolved_database", "stores"],
+    ) && (payload["count"] != serde_json::json!(0) || payload["stores"] != serde_json::json!([]))
+    {
+        failures.push(format!(
+            "kv_list_stores empty local database: legacy empty shape changed: {payload}"
+        ));
     }
 
     if let Some(result) = call_case!(
         "kv_size empty local store",
         "kv_size",
         serde_json::json!({"store": "empty_local"})
-    ) {
-        if let Some(payload) = record_kv_response(
-            &mut failures,
-            "kv_size empty local store",
-            &result,
-            "local",
-            &["bytes", "resolved_database", "size", "store"],
-        ) {
-            if payload["store"] != serde_json::json!("empty_local")
-                || payload["size"] != serde_json::json!(0)
-                || payload["bytes"] != serde_json::json!(0)
-            {
-                failures.push(format!(
-                    "kv_size empty local store: legacy empty size changed: {payload}"
-                ));
-            }
-        }
+    ) && let Some(payload) = record_kv_response(
+        &mut failures,
+        "kv_size empty local store",
+        &result,
+        "local",
+        &["bytes", "resolved_database", "size", "store"],
+    ) && (payload["store"] != serde_json::json!("empty_local")
+        || payload["size"] != serde_json::json!(0)
+        || payload["bytes"] != serde_json::json!(0))
+    {
+        failures.push(format!(
+            "kv_size empty local store: legacy empty size changed: {payload}"
+        ));
     }
 
     if let Some(result) = call_case!(
         "kv_pop empty local store",
         "kv_pop",
         serde_json::json!({"store": "empty_local"})
-    ) {
-        if let Some(payload) = record_kv_response(
-            &mut failures,
-            "kv_pop empty local store",
-            &result,
-            "local",
-            &["found", "resolved_database"],
-        ) {
-            if payload["found"] != serde_json::json!(false) {
-                failures.push(format!(
-                    "kv_pop empty local store: legacy empty pop changed: {payload}"
-                ));
-            }
-        }
+    ) && let Some(payload) = record_kv_response(
+        &mut failures,
+        "kv_pop empty local store",
+        &result,
+        "local",
+        &["found", "resolved_database"],
+    ) && payload["found"] != serde_json::json!(false)
+    {
+        failures.push(format!(
+            "kv_pop empty local store: legacy empty pop changed: {payload}"
+        ));
     }
 
     if let Some(result) = call_case!(
         "kv_delete missing local key",
         "kv_delete",
         serde_json::json!({"store": "empty_local", "key": "missing"})
-    ) {
-        if let Some(payload) = record_kv_response(
-            &mut failures,
-            "kv_delete missing local key",
-            &result,
-            "local",
-            &["deleted", "key", "resolved_database", "store"],
-        ) {
-            if payload["deleted"] != serde_json::json!(false)
-                || payload["store"] != serde_json::json!("empty_local")
-                || payload["key"] != serde_json::json!("missing")
-            {
-                failures.push(format!(
-                    "kv_delete missing local key: legacy idempotent delete changed: {payload}"
-                ));
-            }
-        }
+    ) && let Some(payload) = record_kv_response(
+        &mut failures,
+        "kv_delete missing local key",
+        &result,
+        "local",
+        &["deleted", "key", "resolved_database", "store"],
+    ) && (payload["deleted"] != serde_json::json!(false)
+        || payload["store"] != serde_json::json!("empty_local")
+        || payload["key"] != serde_json::json!("missing"))
+    {
+        failures.push(format!(
+            "kv_delete missing local key: legacy idempotent delete changed: {payload}"
+        ));
     }
 
     if let Some(result) = call_case!(
         "kv_clear explicit local wins over persist",
         "kv_clear",
         serde_json::json!({"store": "empty_local", "database": "LoCaL", "persist": true})
-    ) {
-        if let Some(payload) = record_kv_response(
-            &mut failures,
-            "kv_clear explicit local wins over persist",
-            &result,
-            "local",
-            &["removed", "resolved_database", "store"],
-        ) {
-            if payload["removed"] != serde_json::json!(0)
-                || payload["store"] != serde_json::json!("empty_local")
-            {
-                failures.push(format!(
-                    "kv_clear explicit local wins over persist: legacy idempotent clear changed: {payload}"
-                ));
-            }
-        }
+    ) && let Some(payload) = record_kv_response(
+        &mut failures,
+        "kv_clear explicit local wins over persist",
+        &result,
+        "local",
+        &["removed", "resolved_database", "store"],
+    ) && (payload["removed"] != serde_json::json!(0)
+        || payload["store"] != serde_json::json!("empty_local"))
+    {
+        failures.push(format!(
+            "kv_clear explicit local wins over persist: legacy idempotent clear changed: {payload}"
+        ));
     }
 
     if let Some(result) = call_case!(
@@ -1238,32 +1206,28 @@ async fn resolved_database_kv_success_shapes() -> TestResult {
             "value": "one",
             "persist": true
         })
-    ) {
-        if let Some(payload) = record_kv_response(
-            &mut failures,
-            "kv_set persistent insert via persist",
-            &result,
-            "persistent",
-            &[
-                "created",
-                "key",
-                "resolved_database",
-                "store",
-                "stored",
-                "value_bytes",
-            ],
-        ) {
-            if payload["stored"] != serde_json::json!(true)
-                || payload["created"] != serde_json::json!(true)
-                || payload["store"] != serde_json::json!("persistent_store")
-                || payload["key"] != serde_json::json!("p")
-                || payload["value_bytes"] != serde_json::json!(3)
-            {
-                failures.push(format!(
-                    "kv_set persistent insert via persist: legacy insert shape changed: {payload}"
-                ));
-            }
-        }
+    ) && let Some(payload) = record_kv_response(
+        &mut failures,
+        "kv_set persistent insert via persist",
+        &result,
+        "persistent",
+        &[
+            "created",
+            "key",
+            "resolved_database",
+            "store",
+            "stored",
+            "value_bytes",
+        ],
+    ) && (payload["stored"] != serde_json::json!(true)
+        || payload["created"] != serde_json::json!(true)
+        || payload["store"] != serde_json::json!("persistent_store")
+        || payload["key"] != serde_json::json!("p")
+        || payload["value_bytes"] != serde_json::json!(3))
+    {
+        failures.push(format!(
+            "kv_set persistent insert via persist: legacy insert shape changed: {payload}"
+        ));
     }
 
     if let Some(result) = call_case!(
@@ -1274,22 +1238,18 @@ async fn resolved_database_kv_success_shapes() -> TestResult {
             "key": "p",
             "database": "PERSISTENT"
         })
-    ) {
-        if let Some(payload) = record_kv_response(
-            &mut failures,
-            "kv_get persistent found",
-            &result,
-            "persistent",
-            &["found", "resolved_database", "value"],
-        ) {
-            if payload["found"] != serde_json::json!(true)
-                || payload["value"] != serde_json::json!("one")
-            {
-                failures.push(format!(
-                    "kv_get persistent found: legacy hit shape changed: {payload}"
-                ));
-            }
-        }
+    ) && let Some(payload) = record_kv_response(
+        &mut failures,
+        "kv_get persistent found",
+        &result,
+        "persistent",
+        &["found", "resolved_database", "value"],
+    ) && (payload["found"] != serde_json::json!(true)
+        || payload["value"] != serde_json::json!("one"))
+    {
+        failures.push(format!(
+            "kv_get persistent found: legacy hit shape changed: {payload}"
+        ));
     }
 
     if let Some(result) = call_case!(
@@ -1301,30 +1261,26 @@ async fn resolved_database_kv_success_shapes() -> TestResult {
             "value": "two",
             "database": "Persistent"
         })
-    ) {
-        if let Some(payload) = record_kv_response(
-            &mut failures,
-            "kv_set persistent overwrite",
-            &result,
-            "persistent",
-            &[
-                "created",
-                "key",
-                "resolved_database",
-                "store",
-                "stored",
-                "value_bytes",
-            ],
-        ) {
-            if payload["stored"] != serde_json::json!(true)
-                || payload["created"] != serde_json::json!(false)
-                || payload["value_bytes"] != serde_json::json!(3)
-            {
-                failures.push(format!(
-                    "kv_set persistent overwrite: legacy overwrite shape changed: {payload}"
-                ));
-            }
-        }
+    ) && let Some(payload) = record_kv_response(
+        &mut failures,
+        "kv_set persistent overwrite",
+        &result,
+        "persistent",
+        &[
+            "created",
+            "key",
+            "resolved_database",
+            "store",
+            "stored",
+            "value_bytes",
+        ],
+    ) && (payload["stored"] != serde_json::json!(true)
+        || payload["created"] != serde_json::json!(false)
+        || payload["value_bytes"] != serde_json::json!(3))
+    {
+        failures.push(format!(
+            "kv_set persistent overwrite: legacy overwrite shape changed: {payload}"
+        ));
     }
 
     if let Some(result) = call_case!(
@@ -1337,32 +1293,28 @@ async fn resolved_database_kv_success_shapes() -> TestResult {
             "overwrite": false,
             "database": "persistent"
         })
-    ) {
-        if let Some(payload) = record_kv_response(
-            &mut failures,
-            "kv_set persistent guard skip",
-            &result,
-            "persistent",
-            &[
-                "created",
-                "existed",
-                "key",
-                "resolved_database",
-                "store",
-                "stored",
-                "value_bytes",
-            ],
-        ) {
-            if payload["stored"] != serde_json::json!(false)
-                || payload["created"] != serde_json::json!(false)
-                || payload["existed"] != serde_json::json!(true)
-                || payload["value_bytes"] != serde_json::json!(5)
-            {
-                failures.push(format!(
-                    "kv_set persistent guard skip: legacy guard shape changed: {payload}"
-                ));
-            }
-        }
+    ) && let Some(payload) = record_kv_response(
+        &mut failures,
+        "kv_set persistent guard skip",
+        &result,
+        "persistent",
+        &[
+            "created",
+            "existed",
+            "key",
+            "resolved_database",
+            "store",
+            "stored",
+            "value_bytes",
+        ],
+    ) && (payload["stored"] != serde_json::json!(false)
+        || payload["created"] != serde_json::json!(false)
+        || payload["existed"] != serde_json::json!(true)
+        || payload["value_bytes"] != serde_json::json!(5))
+    {
+        failures.push(format!(
+            "kv_set persistent guard skip: legacy guard shape changed: {payload}"
+        ));
     }
 
     if let Some(result) = call_case!(
@@ -1375,13 +1327,12 @@ async fn resolved_database_kv_success_shapes() -> TestResult {
             "writable": true,
             "on_missing": "create"
         })
-    ) {
-        if is_error(&result) {
-            failures.push(format!(
-                "setup mixed-case KV attachment: {:?}",
-                first_text(&result)
-            ));
-        }
+    ) && is_error(&result)
+    {
+        failures.push(format!(
+            "setup mixed-case KV attachment: {:?}",
+            first_text(&result)
+        ));
     }
 
     if let Some(result) = call_case!(
@@ -1395,30 +1346,26 @@ async fn resolved_database_kv_success_shapes() -> TestResult {
             ],
             "database": "MiXeD_Kv"
         })
-    ) {
-        if let Some(payload) = record_kv_response(
-            &mut failures,
-            "kv_set_many attached create batch",
-            &result,
-            "mixed_kv",
-            &[
-                "created",
-                "overwritten",
-                "resolved_database",
-                "stored",
-                "total_bytes",
-            ],
-        ) {
-            if payload["stored"] != serde_json::json!(2)
-                || payload["created"] != serde_json::json!(2)
-                || payload["overwritten"] != serde_json::json!(0)
-                || payload["total_bytes"] != serde_json::json!(5)
-            {
-                failures.push(format!(
-                    "kv_set_many attached create batch: legacy batch shape changed: {payload}"
-                ));
-            }
-        }
+    ) && let Some(payload) = record_kv_response(
+        &mut failures,
+        "kv_set_many attached create batch",
+        &result,
+        "mixed_kv",
+        &[
+            "created",
+            "overwritten",
+            "resolved_database",
+            "stored",
+            "total_bytes",
+        ],
+    ) && (payload["stored"] != serde_json::json!(2)
+        || payload["created"] != serde_json::json!(2)
+        || payload["overwritten"] != serde_json::json!(0)
+        || payload["total_bytes"] != serde_json::json!(5))
+    {
+        failures.push(format!(
+            "kv_set_many attached create batch: legacy batch shape changed: {payload}"
+        ));
     }
 
     if let Some(result) = call_case!(
@@ -1432,30 +1379,26 @@ async fn resolved_database_kv_success_shapes() -> TestResult {
             ],
             "database": "MIXED_KV"
         })
-    ) {
-        if let Some(payload) = record_kv_response(
-            &mut failures,
-            "kv_set_many attached mixed overwrite batch",
-            &result,
-            "mixed_kv",
-            &[
-                "created",
-                "overwritten",
-                "resolved_database",
-                "stored",
-                "total_bytes",
-            ],
-        ) {
-            if payload["stored"] != serde_json::json!(2)
-                || payload["created"] != serde_json::json!(1)
-                || payload["overwritten"] != serde_json::json!(1)
-                || payload["total_bytes"] != serde_json::json!(4)
-            {
-                failures.push(format!(
-                    "kv_set_many attached mixed overwrite batch: legacy batch shape changed: {payload}"
-                ));
-            }
-        }
+    ) && let Some(payload) = record_kv_response(
+        &mut failures,
+        "kv_set_many attached mixed overwrite batch",
+        &result,
+        "mixed_kv",
+        &[
+            "created",
+            "overwritten",
+            "resolved_database",
+            "stored",
+            "total_bytes",
+        ],
+    ) && (payload["stored"] != serde_json::json!(2)
+        || payload["created"] != serde_json::json!(1)
+        || payload["overwritten"] != serde_json::json!(1)
+        || payload["total_bytes"] != serde_json::json!(4))
+    {
+        failures.push(format!(
+            "kv_set_many attached mixed overwrite batch: legacy batch shape changed: {payload}"
+        ));
     }
 
     if let Some(result) = call_case!(
@@ -1470,230 +1413,192 @@ async fn resolved_database_kv_success_shapes() -> TestResult {
             "overwrite": false,
             "database": "mixed_kv"
         })
-    ) {
-        if let Some(payload) = record_kv_response(
-            &mut failures,
-            "kv_set_many attached guard batch",
-            &result,
-            "mixed_kv",
-            &[
-                "created",
-                "resolved_database",
-                "skipped",
-                "stored",
-                "total_bytes",
-            ],
-        ) {
-            if payload["stored"] != serde_json::json!(1)
-                || payload["created"] != serde_json::json!(1)
-                || payload["skipped"] != serde_json::json!(1)
-                || payload["total_bytes"] != serde_json::json!(7)
-            {
-                failures.push(format!(
-                    "kv_set_many attached guard batch: legacy guard shape changed: {payload}"
-                ));
-            }
-        }
+    ) && let Some(payload) = record_kv_response(
+        &mut failures,
+        "kv_set_many attached guard batch",
+        &result,
+        "mixed_kv",
+        &[
+            "created",
+            "resolved_database",
+            "skipped",
+            "stored",
+            "total_bytes",
+        ],
+    ) && (payload["stored"] != serde_json::json!(1)
+        || payload["created"] != serde_json::json!(1)
+        || payload["skipped"] != serde_json::json!(1)
+        || payload["total_bytes"] != serde_json::json!(7))
+    {
+        failures.push(format!(
+            "kv_set_many attached guard batch: legacy guard shape changed: {payload}"
+        ));
     }
 
     if let Some(result) = call_case!(
         "kv_list attached populated keys",
         "kv_list",
         serde_json::json!({"store": "routed", "database": "MiXeD_Kv"})
-    ) {
-        if let Some(payload) = record_kv_response(
-            &mut failures,
-            "kv_list attached populated keys",
-            &result,
-            "mixed_kv",
-            &["count", "keys", "resolved_database", "store"],
-        ) {
-            if payload["count"] != serde_json::json!(4)
-                || payload["keys"] != serde_json::json!(["a", "b", "c", "d"])
-            {
-                failures.push(format!(
-                    "kv_list attached populated keys: sorted keys changed: {payload}"
-                ));
-            }
-        }
+    ) && let Some(payload) = record_kv_response(
+        &mut failures,
+        "kv_list attached populated keys",
+        &result,
+        "mixed_kv",
+        &["count", "keys", "resolved_database", "store"],
+    ) && (payload["count"] != serde_json::json!(4)
+        || payload["keys"] != serde_json::json!(["a", "b", "c", "d"]))
+    {
+        failures.push(format!(
+            "kv_list attached populated keys: sorted keys changed: {payload}"
+        ));
     }
 
     if let Some(result) = call_case!(
         "kv_list attached populated entries",
         "kv_list",
         serde_json::json!({"store": "routed", "values": true, "database": "MIXED_KV"})
-    ) {
-        if let Some(payload) = record_kv_response(
-            &mut failures,
-            "kv_list attached populated entries",
-            &result,
-            "mixed_kv",
-            &["entries", "resolved_database", "store"],
-        ) {
-            if payload["entries"]
-                != serde_json::json!([
-                    {"key": "a", "value": "A"},
-                    {"key": "b", "value": "bbb"},
-                    {"key": "c", "value": "ccc"},
-                    {"key": "d", "value": "dddd"}
-                ])
-            {
-                failures.push(format!(
-                    "kv_list attached populated entries: entry ordering/values changed: {payload}"
-                ));
-            }
-        }
+    ) && let Some(payload) = record_kv_response(
+        &mut failures,
+        "kv_list attached populated entries",
+        &result,
+        "mixed_kv",
+        &["entries", "resolved_database", "store"],
+    ) && payload["entries"]
+        != serde_json::json!([
+            {"key": "a", "value": "A"},
+            {"key": "b", "value": "bbb"},
+            {"key": "c", "value": "ccc"},
+            {"key": "d", "value": "dddd"}
+        ])
+    {
+        failures.push(format!(
+            "kv_list attached populated entries: entry ordering/values changed: {payload}"
+        ));
     }
 
     if let Some(result) = call_case!(
         "kv_list_stores attached populated database",
         "kv_list_stores",
         serde_json::json!({"database": "mixed_kv"})
-    ) {
-        if let Some(payload) = record_kv_response(
-            &mut failures,
-            "kv_list_stores attached populated database",
-            &result,
-            "mixed_kv",
-            &["count", "resolved_database", "stores"],
-        ) {
-            if payload["count"] != serde_json::json!(1)
-                || payload["stores"] != serde_json::json!(["routed"])
-            {
-                failures.push(format!(
-                    "kv_list_stores attached populated database: legacy store list changed: {payload}"
-                ));
-            }
-        }
+    ) && let Some(payload) = record_kv_response(
+        &mut failures,
+        "kv_list_stores attached populated database",
+        &result,
+        "mixed_kv",
+        &["count", "resolved_database", "stores"],
+    ) && (payload["count"] != serde_json::json!(1)
+        || payload["stores"] != serde_json::json!(["routed"]))
+    {
+        failures.push(format!(
+            "kv_list_stores attached populated database: legacy store list changed: {payload}"
+        ));
     }
 
     if let Some(result) = call_case!(
         "kv_size attached populated store",
         "kv_size",
         serde_json::json!({"store": "routed", "database": "MiXeD_Kv"})
-    ) {
-        if let Some(payload) = record_kv_response(
-            &mut failures,
-            "kv_size attached populated store",
-            &result,
-            "mixed_kv",
-            &["bytes", "resolved_database", "size", "store"],
-        ) {
-            if payload["size"] != serde_json::json!(4) || payload["bytes"] != serde_json::json!(11)
-            {
-                failures.push(format!(
-                    "kv_size attached populated store: count/bytes changed: {payload}"
-                ));
-            }
-        }
+    ) && let Some(payload) = record_kv_response(
+        &mut failures,
+        "kv_size attached populated store",
+        &result,
+        "mixed_kv",
+        &["bytes", "resolved_database", "size", "store"],
+    ) && (payload["size"] != serde_json::json!(4) || payload["bytes"] != serde_json::json!(11))
+    {
+        failures.push(format!(
+            "kv_size attached populated store: count/bytes changed: {payload}"
+        ));
     }
 
     if let Some(result) = call_case!(
         "kv_pop attached found",
         "kv_pop",
         serde_json::json!({"store": "routed", "database": "mixed_kv"})
-    ) {
-        if let Some(payload) = record_kv_response(
-            &mut failures,
-            "kv_pop attached found",
-            &result,
-            "mixed_kv",
-            &["found", "key", "resolved_database", "value"],
-        ) {
-            if payload["found"] != serde_json::json!(true)
-                || payload["key"] != serde_json::json!("a")
-                || payload["value"] != serde_json::json!("A")
-            {
-                failures.push(format!(
-                    "kv_pop attached found: legacy pop ordering/value changed: {payload}"
-                ));
-            }
-        }
+    ) && let Some(payload) = record_kv_response(
+        &mut failures,
+        "kv_pop attached found",
+        &result,
+        "mixed_kv",
+        &["found", "key", "resolved_database", "value"],
+    ) && (payload["found"] != serde_json::json!(true)
+        || payload["key"] != serde_json::json!("a")
+        || payload["value"] != serde_json::json!("A"))
+    {
+        failures.push(format!(
+            "kv_pop attached found: legacy pop ordering/value changed: {payload}"
+        ));
     }
 
     if let Some(result) = call_case!(
         "kv_delete attached found",
         "kv_delete",
         serde_json::json!({"store": "routed", "key": "b", "database": "MIXED_KV"})
-    ) {
-        if let Some(payload) = record_kv_response(
-            &mut failures,
-            "kv_delete attached found",
-            &result,
-            "mixed_kv",
-            &["deleted", "key", "resolved_database", "store"],
-        ) {
-            if payload["deleted"] != serde_json::json!(true)
-                || payload["store"] != serde_json::json!("routed")
-                || payload["key"] != serde_json::json!("b")
-            {
-                failures.push(format!(
-                    "kv_delete attached found: legacy delete shape changed: {payload}"
-                ));
-            }
-        }
+    ) && let Some(payload) = record_kv_response(
+        &mut failures,
+        "kv_delete attached found",
+        &result,
+        "mixed_kv",
+        &["deleted", "key", "resolved_database", "store"],
+    ) && (payload["deleted"] != serde_json::json!(true)
+        || payload["store"] != serde_json::json!("routed")
+        || payload["key"] != serde_json::json!("b"))
+    {
+        failures.push(format!(
+            "kv_delete attached found: legacy delete shape changed: {payload}"
+        ));
     }
 
     if let Some(result) = call_case!(
         "kv_clear attached populated store",
         "kv_clear",
         serde_json::json!({"store": "routed", "database": "mixed_kv"})
-    ) {
-        if let Some(payload) = record_kv_response(
-            &mut failures,
-            "kv_clear attached populated store",
-            &result,
-            "mixed_kv",
-            &["removed", "resolved_database", "store"],
-        ) {
-            if payload["removed"] != serde_json::json!(2)
-                || payload["store"] != serde_json::json!("routed")
-            {
-                failures.push(format!(
-                    "kv_clear attached populated store: removed count changed: {payload}"
-                ));
-            }
-        }
+    ) && let Some(payload) = record_kv_response(
+        &mut failures,
+        "kv_clear attached populated store",
+        &result,
+        "mixed_kv",
+        &["removed", "resolved_database", "store"],
+    ) && (payload["removed"] != serde_json::json!(2)
+        || payload["store"] != serde_json::json!("routed"))
+    {
+        failures.push(format!(
+            "kv_clear attached populated store: removed count changed: {payload}"
+        ));
     }
 
     if let Some(result) = call_case!(
         "kv_pop attached empty after clear",
         "kv_pop",
         serde_json::json!({"store": "routed", "database": "MiXeD_Kv"})
-    ) {
-        if let Some(payload) = record_kv_response(
-            &mut failures,
-            "kv_pop attached empty after clear",
-            &result,
-            "mixed_kv",
-            &["found", "resolved_database"],
-        ) {
-            if payload["found"] != serde_json::json!(false) {
-                failures.push(format!(
-                    "kv_pop attached empty after clear: empty branch changed: {payload}"
-                ));
-            }
-        }
+    ) && let Some(payload) = record_kv_response(
+        &mut failures,
+        "kv_pop attached empty after clear",
+        &result,
+        "mixed_kv",
+        &["found", "resolved_database"],
+    ) && payload["found"] != serde_json::json!(false)
+    {
+        failures.push(format!(
+            "kv_pop attached empty after clear: empty branch changed: {payload}"
+        ));
     }
 
     if let Some(result) = call_case!(
         "kv_clear attached idempotent empty",
         "kv_clear",
         serde_json::json!({"store": "routed", "database": "mixed_kv"})
-    ) {
-        if let Some(payload) = record_kv_response(
-            &mut failures,
-            "kv_clear attached idempotent empty",
-            &result,
-            "mixed_kv",
-            &["removed", "resolved_database", "store"],
-        ) {
-            if payload["removed"] != serde_json::json!(0) {
-                failures.push(format!(
-                    "kv_clear attached idempotent empty: idempotent branch changed: {payload}"
-                ));
-            }
-        }
+    ) && let Some(payload) = record_kv_response(
+        &mut failures,
+        "kv_clear attached idempotent empty",
+        &result,
+        "mixed_kv",
+        &["removed", "resolved_database", "store"],
+    ) && payload["removed"] != serde_json::json!(0)
+    {
+        failures.push(format!(
+            "kv_clear attached idempotent empty: idempotent branch changed: {payload}"
+        ));
     }
 
     if let Err(error) = h.shutdown().await {

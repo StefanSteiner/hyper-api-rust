@@ -112,6 +112,7 @@ Connection (owns data)
 ```
 
 This is a **simple hierarchical design**, not a complex lifetime web:
+
 - **Single root owner**: `Connection` owns the underlying client
 - **Simple borrows**: All dependent types borrow `&'conn Connection`
 - **No circular references**: `Inserter` doesn't reference `Catalog`, etc.
@@ -251,7 +252,8 @@ classDiagram
 ## Dependencies
 
 The Rust Hyper API is built entirely with pure-Rust dependencies:
-- **No C compiler required** for builds (except `aws-lc-sys` compiled from source)
+
+- **No C compiler required** for builds
 - **No system library dependencies** (OpenSSL, etc.)
 - **Cross-compilation friendly** (WebAssembly, embedded, etc.)
 
@@ -272,7 +274,7 @@ The Rust Hyper API is built entirely with pure-Rust dependencies:
 |-------|--------|-------|
 | `rustls` | Pure Rust | TLS implementation (always-on); PEM parsing via re-exported `pki_types::pem` |
 | `webpki-roots` | Pure Rust | Mozilla CA root certificates (bundled) |
-| `aws-lc-sys` | C/ASM | Crypto provider for `rustls` (compiled from source) |
+| `ring` | Pure Rust + ASM | Crypto provider for `rustls` |
 
 ### Native Transitive Dependencies
 
@@ -281,7 +283,6 @@ transitive dependencies:
 
 | Crate | Source | Why |
 |-------|--------|-----|
-| `aws-lc-sys` | `rustls` -> `aws-lc-rs` | AWS-LC cryptographic library. Default crypto provider for `rustls`. Compiles from source. |
 | `core-foundation-sys` | `tonic` -> `rustls-native-certs` | macOS only. FFI bindings to Apple's Core Foundation. |
 | `security-framework-sys` | `tonic` -> `rustls-native-certs` | macOS only. FFI bindings to Apple's Security framework. |
 | `rustls-native-certs` | `tonic` (gRPC) | Loads OS-trusted root CA certificates. |
@@ -331,7 +332,7 @@ in companion crates:
 
 1. **Install Rust** (if not already installed):
    - Linux/macOS: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-   - Windows: Download from https://rustup.rs/
+   - Windows: Download from <https://rustup.rs/>
    - Verify: `cargo --version`
 
 2. **Install Protocol Buffers Compiler** (`protoc`):
@@ -339,6 +340,7 @@ in companion crates:
    The `hyperdb-api-core` crate uses gRPC and requires `protoc` to compile `.proto` files.
 
    **Linux:**
+
    ```bash
    # Ubuntu/Debian
    sudo apt-get install -y protobuf-compiler
@@ -351,11 +353,13 @@ in companion crates:
    ```
 
    **macOS:**
+
    ```bash
    brew install protobuf
    ```
 
    **Windows:**
+
    ```powershell
    # Option 1: Chocolatey
    choco install protoc
@@ -572,6 +576,7 @@ hyperdb-api-core/src/types/          # Unit tests (inline with code)
 ```
 
 **Test utilities:**
+
 - `hyperdb-api/tests/common/mod.rs` — shared test helpers
 - `hyperdb-api-core/src/client/test_util.rs` — client test utilities
 - Both use `HyperProcess::new()` to start temporary `hyperd` servers
@@ -634,6 +639,7 @@ cargo kani -p hyperdb-api
 ```
 
 Proof harness locations:
+
 - `hyperdb-api-core/src/types/proofs.rs` — type roundtrips, Date arithmetic, size constants
 - `hyperdb-api-core/src/protocol/proofs.rs` — COPY read safety, protocol type parsing, identifier validation
 - `hyperdb-api/src/proofs.rs` — name/identifier constants
@@ -679,6 +685,7 @@ in `hyperdb-api-core/src/types/special.rs`.
 | Speedup | baseline | 1.08-1.10x |
 
 **Memory Behavior:**
+
 - Insert (single-threaded): ~23 MB constant (16 MB chunk streaming)
 - Insert (multi-threaded): ~1.3 GB avg (queued chunks across workers)
 - Query: ~22 MB constant (64K row chunks) regardless of result set size
@@ -799,7 +806,7 @@ The Rust API is **API-compatible** with the C++ Hyper API while being idiomatic 
 
 **Date:** 2025-12-05 - 2025-12-30
 
-**Author:** Stefan Steiner (ssteiner@salesforce.com) with AI assistance (Cursor/Claude)
+**Author:** Stefan Steiner (<ssteiner@salesforce.com>) with AI assistance (Cursor/Claude)
 
 This project explored how far AI-assisted development could go in creating a full Hyper API
 Rust implementation. The author, one of the original Hyper API development team members,
@@ -860,6 +867,7 @@ This project uses standard Rust ecosystem crates licensed under MIT or Apache-2.
 All dependencies are listed in `Cargo.toml` and `Cargo.lock`.
 
 Key dependency categories:
+
 - **Data handling**: `bytes`, `byteorder`, `memchr`
 - **Error handling**: `thiserror`
 - **Logging**: `tracing`
@@ -887,6 +895,7 @@ For a complete list: `cargo tree -p hyperdb-api`
 | [docs/BENCHMARK_GUIDE.md](docs/BENCHMARK_GUIDE.md) | How to run benchmarks |
 
 Per-crate DEVELOPMENT.md files:
+
 - [hyperdb-api/DEVELOPMENT.md](hyperdb-api/DEVELOPMENT.md)
 - `hyperdb-api-core/docs/`: [DEVELOPMENT-client.md](hyperdb-api-core/docs/DEVELOPMENT-client.md), [DEVELOPMENT-protocol.md](hyperdb-api-core/docs/DEVELOPMENT-protocol.md), [DEVELOPMENT-types.md](hyperdb-api-core/docs/DEVELOPMENT-types.md)
 - [hyperdb-api-salesforce/DEVELOPMENT.md](hyperdb-api-salesforce/DEVELOPMENT.md)

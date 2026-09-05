@@ -50,11 +50,13 @@ Every task's requirements implicitly include this section. Values copied verbati
 The `created` bit is already computed in `upsert` (`updated == 0`) and discarded. Introduce the two outcome types, change `upsert` to return `Result<bool>` (`created`), and thread it up. This is the BREAKING change (`Result<()>` → `Result<SetOutcome>`).
 
 **Files:**
+
 - Modify: `hyperdb-api/src/kv_store.rs:184-222` (`set`, `upsert`), `:242-253` (`set_as`), `:403-430` (`set_batch`); add the two structs near the top of the module.
 - Modify: `hyperdb-api/src/lib.rs:217` (re-export)
 - Test: `hyperdb-api/tests/kv_store_tests.rs`
 
 **Interfaces:**
+
 - Produces: `pub struct SetOutcome { pub created: bool }`; `pub struct BatchSetOutcome { pub created: usize, pub overwritten: usize }`; `KvStore::set(&self, &str, &str) -> Result<SetOutcome>`; `KvStore::set_as<T: Serialize>(&self, &str, &T) -> Result<SetOutcome>`; `KvStore::set_batch(&self, &[(&str,&str)]) -> Result<BatchSetOutcome>`; private `KvStore::upsert(&self, &str, &str) -> Result<bool>`.
 - Consumed by: Task 2 (MCP `kv_set`), Task 7 (`kv_set_many`), Task 6 (async twin mirrors these names).
 
@@ -260,10 +262,12 @@ git commit -m "feat(kv)!: sync set/set_as/set_batch return SetOutcome/BatchSetOu
 Mirror Task 1 in the async file. The outcome types already exist (re-exported); this only changes `async_kv_store.rs`. Note the async `set_batch` uses a **different loop shape** than sync (mutable `inner` + `break`), which must be preserved.
 
 **Files:**
+
 - Modify: `hyperdb-api/src/async_kv_store.rs:100-146` (`set`, `upsert`), `:162-171` (`set_as`), `:331-358` (`set_batch`)
 - Test: `hyperdb-api/tests/async_kv_store_tests.rs`
 
 **Interfaces:**
+
 - Consumes: `SetOutcome`, `BatchSetOutcome` from Task 1.
 - Produces: `AsyncKvStore::set(&self, &str, &str) -> Result<SetOutcome>`; `set_as<T: Serialize>(&self, &str, &T) -> Result<SetOutcome>`; `set_batch(&self, &[(&str,&str)]) -> Result<BatchSetOutcome>`; private `upsert(&self, &str, &str) -> Result<bool>`.
 
@@ -414,10 +418,12 @@ git commit -m "feat(kv)!: async set/set_as/set_batch return SetOutcome/BatchSetO
 Add a non-breaking write guard that inserts only if the key is absent, in a single statement (no check-then-write race). This is the API primitive behind MCP `overwrite:false` (Task 5).
 
 **Files:**
+
 - Modify: `hyperdb-api/src/kv_store.rs` (add method after `set_as`, around `:253`)
 - Test: `hyperdb-api/tests/kv_store_tests.rs`
 
 **Interfaces:**
+
 - Produces: `KvStore::set_if_absent(&self, key: &str, value: &str) -> Result<bool>` — `true` if written, `false` if the key already existed (nothing written).
 - Consumed by: Task 5 (MCP `overwrite:false`), Task 6 (async twin).
 
@@ -491,10 +497,12 @@ git commit -m "feat(kv): add sync KvStore::set_if_absent write guard"
 Add `byte_size()` (total value bytes, for MCP `kv_size.bytes` in Task 5) and `entries()` (key+value pairs, for MCP `kv_list values:true` in Task 10). Both are non-breaking reads.
 
 **Files:**
+
 - Modify: `hyperdb-api/src/kv_store.rs` (add methods after `keys`, around `:333`)
 - Test: `hyperdb-api/tests/kv_store_tests.rs`
 
 **Interfaces:**
+
 - Produces: `KvStore::byte_size(&self) -> Result<i64>` (`COALESCE(SUM(OCTET_LENGTH(value)), 0)`; 0 for empty store); `KvStore::entries(&self) -> Result<Vec<(String, String)>>` (key+value, sorted by key ascending; mirrors `keys()` streaming).
 - Consumed by: Task 5 (`kv_size.bytes`), Task 10 (`kv_list values:true`), Task 6 (async twins).
 
@@ -596,10 +604,12 @@ git commit -m "feat(kv): add sync KvStore::byte_size and entries"
 The `overwrite:false` variant of `kv_set_many` (Task 10) needs an atomic, all-in-one-transaction batch that skips existing keys. Add it next to `set_batch`, built on the same validate-all-then-transaction shape but calling `set_if_absent` per entry and reporting `{written, skipped}`.
 
 **Files:**
+
 - Modify: `hyperdb-api/src/kv_store.rs` (add method after `set_batch`, around `:430`)
 - Test: `hyperdb-api/tests/kv_store_tests.rs`
 
 **Interfaces:**
+
 - Consumes: `set_if_absent` (Task 3), `BatchSetOutcome` is NOT reused here — a distinct outcome shape is needed (`written`/`skipped`, not `created`/`overwritten`).
 - Produces: `pub struct BatchGuardOutcome { pub written: usize, pub skipped: usize }` (`#[derive(Debug, Clone, Copy, PartialEq, Eq)]`); `KvStore::set_batch_if_absent(&self, entries: &[(&str,&str)]) -> Result<BatchGuardOutcome>`.
 - Consumed by: Task 10 (MCP `kv_set_many` with `overwrite:false`), Task 6 (async twin). Re-exported in Task 1's lib.rs line — **note:** add `BatchGuardOutcome` to that re-export too (see Step 4).
@@ -707,10 +717,12 @@ git commit -m "feat(kv): add sync KvStore::set_batch_if_absent atomic guard"
 Mirror Tasks 3–5 in `async_kv_store.rs`. `BatchGuardOutcome` already exists (Task 5). The async `set_batch_if_absent` uses the same mutable-`inner`+`break` loop shape as the async `set_batch` (Task 2), NOT the sync closure form.
 
 **Files:**
+
 - Modify: `hyperdb-api/src/async_kv_store.rs` (mirror the sync additions)
 - Test: `hyperdb-api/tests/async_kv_store_tests.rs`
 
 **Interfaces:**
+
 - Consumes: `BatchGuardOutcome` (Task 5).
 - Produces: `AsyncKvStore::set_if_absent(&self, &str, &str) -> Result<bool>`; `byte_size(&self) -> Result<i64>`; `entries(&self) -> Result<Vec<(String, String)>>`; `set_batch_if_absent(&self, &[(&str,&str)]) -> Result<BatchGuardOutcome>`.
 
@@ -871,10 +883,12 @@ git commit -m "feat(kv): add async set_if_absent/byte_size/entries/set_batch_if_
 Two independent fidelity fixes, both unit-testable in `error.rs` without a live `hyperd`: (a) an I/O-error → `McpError` mapper that preserves `PermissionDenied` instead of collapsing every file-read error to `FileNotFound`; (b) correct the `suggestion` on the JSON-in-TEXT errors so the LLM is told to cast (`value::json`) rather than to split its statement.
 
 **Files:**
+
 - Modify: `hyperdb-mcp/src/error.rs` (add `from_io_error`; adjust the `0A000` branch; add a `42601` branch)
 - Test: `hyperdb-mcp/src/error.rs` (inline `#[cfg(test)] mod tests`)
 
 **Interfaces:**
+
 - Produces: `McpError::from_io_error(err: &std::io::Error, context: &str) -> McpError` — `PermissionDenied` → `ErrorCode::PermissionDenied`, `NotFound` → `ErrorCode::FileNotFound`, else `ErrorCode::InternalError`; `context` (e.g. `"value_path"`, `"load_file"`) is prefixed to the message.
 - Consumed by: Task 8 (`value_path` read + `load_file` read-site).
 
@@ -1012,10 +1026,12 @@ git commit -m "fix(mcp): preserve PermissionDenied and steer JSON errors to ::js
 Overhaul the single most-used KV tool. `KvSetParams.value` becomes optional and gains `value_path` (server-side file read, exactly one of the two) and `overwrite` (default `true`; `false` → `set_if_absent`). The response reports `created`, `value_bytes`, and a soft `warning` over 1 MiB.
 
 **Files:**
+
 - Modify: `hyperdb-mcp/src/server.rs` — `KvSetParams` (`:844-861`), `kv_set` handler (`:3123-3139`); add a shared `KV_SOFT_SIZE_WARN_BYTES` const + a `kv_size_warning(bytes) -> Option<String>` helper near the KV handlers.
 - Test: `hyperdb-mcp/tests/kv_tools_tests.rs`
 
 **Interfaces:**
+
 - Consumes: `KvStore::set` → `SetOutcome` (Task 1), `set_if_absent` (Task 3), `McpError::from_io_error` (Task 7), `attach::validate_input_path` (existing, `attach.rs:672`).
 - Produces (const/helper reused by Task 10): `const KV_SOFT_SIZE_WARN_BYTES: usize = 1_048_576;` and `fn kv_size_warning(bytes: usize) -> Option<String>`.
 
@@ -1259,16 +1275,17 @@ git add hyperdb-mcp/src/server.rs hyperdb-mcp/tests/kv_tools_tests.rs
 git commit -m "feat(mcp): kv_set reports created/value_bytes, adds overwrite guard + value_path"
 ```
 
-
 ### Task 9: MCP `kv_size` — add `bytes` field for total value size
 
 Extend the `kv_size` MCP tool response to report the total byte length of all values in the store (summed from `OCTET_LENGTH(value)`). The existing `size` field (key count) stays unchanged; `bytes` is additive. Backed by the new `KvStore::byte_size()` from Task 4.
 
 **Files:**
+
 - Modify: `hyperdb-mcp/src/server.rs:3189-3204` (the `kv_size` handler in the `#[tool_router]` impl block); update the `#[tool(description=...)]` at `:3186-3187` to mention `{size, bytes}`.
 - Test: `hyperdb-mcp/tests/kv_tools_tests.rs`
 
 **Interfaces:**
+
 - Consumes: `KvStore::byte_size(&self) -> Result<i64>` (Task 4).
 - Produces: `kv_size` response JSON `{store, size, bytes}` — `size` remains the key count, `bytes` is the sum of `OCTET_LENGTH` over all values.
 
@@ -1352,10 +1369,12 @@ git commit -m "feat(mcp): kv_size reports total value bytes"
 Add a new MCP tool backed by the atomic `set_batch` (overwrite=true) and `set_batch_if_absent` (overwrite=false) primitives from Tasks 1/5. Batch-wide outcome (`{stored, created, overwritten}` or `{stored, created, skipped}`), total byte count, and per-entry soft-size warnings for oversized values.
 
 **Files:**
+
 - Modify: `hyperdb-mcp/src/server.rs` — add `KvEntry` and `KvSetManyParams` near `KvSetParams` (`:843`), add a `kv_set_many` handler in the `#[tool_router] impl` beside `kv_set` (`:3123`)
 - Test: `hyperdb-mcp/tests/kv_tools_tests.rs`
 
 **Interfaces:**
+
 - Consumes: `KvStore::set_batch` → `BatchSetOutcome` (Task 1), `set_batch_if_absent` → `BatchGuardOutcome` (Task 5), `KV_SOFT_SIZE_WARN_BYTES` + `kv_size_warning(bytes)` (Task 8), `McpError` + `ErrorCode`.
 - Produces: `struct KvEntry { key: String, value: String }`; `struct KvSetManyParams { store: String, entries: Vec<KvEntry>, overwrite: Option<bool>, database: Option<String>, persist: Option<bool> }` and the `kv_set_many` tool returning `{stored, created, overwritten/skipped, total_bytes, [warnings]}`.
 
@@ -1581,10 +1600,12 @@ git commit -m "feat(mcp): add kv_set_many atomic batch write tool"
 Move `kv_list` off the shared `KvStoreParams` onto its own `KvListParams` so the new `values` flag does not leak into `kv_size`/`kv_pop`/`kv_clear` schemas. When `values:true`, call `kv.entries()` (Task 4) and return `{store, entries:[{key,value},...]}` instead of the keys-only shape.
 
 **Files:**
+
 - Modify: `hyperdb-mcp/src/server.rs:863-876` (`KvStoreParams` — unchanged); add `KvListParams` after it; `:3169-3184` (`kv_list` handler); update the `kv_list` #[tool(description=...)] to document the `values` flag.
 - Test: `hyperdb-mcp/tests/kv_tools_tests.rs`
 
 **Interfaces:**
+
 - Consumes: `KvStore::entries()` from Task 4 (returns `Vec<(String, String)>` sorted by key).
 - Produces: `struct KvListParams { store: String, values: Option<bool>, database: Option<String>, persist: Option<bool> }`; `kv_list` handler signature changed to `Parameters<KvListParams>`.
 
@@ -1735,11 +1756,13 @@ git commit -m "feat(mcp): add values flag to kv_list for whole-store reads"
 This is a docs task driven by the structural test. Add `kv_set_many` to the tool-name enforcement list, then update the KV README section to document the new capabilities and the two SQL quirks LLMs hit during dogfooding.
 
 **Files:**
+
 - Modify: `hyperdb-mcp/tests/readme_tests.rs:56-63` (tool-name array)
 - Modify: `hyperdb-mcp/src/readme.rs:187-208` (KV section)
 - Test: `hyperdb-mcp/tests/readme_tests.rs` (structural test `readme_mentions_every_tool`)
 
 **Interfaces:**
+
 - Consumes: `kv_set_many` (Task 10), `value_path`/`overwrite` on `kv_set` (Task 8), `values` flag on `kv_list` (Task 11), byte reporting on `kv_set`/`kv_size` (Tasks 8/9).
 - Produces: updated README text covering the new surface + JSON-query/numeric cast docs.
 
@@ -1863,10 +1886,12 @@ git commit -m "docs(mcp): document kv JSON queries, ::numeric gotcha, batch/valu
 Per AGENTS.md rule 8, release-please owns the root `CHANGELOG.md`, all `Cargo.toml` versions, and `.release-please-manifest.json` — contributors only append per-crate `## [Unreleased]` bullets. The 0.6.1 → 0.7.0 bump is carried by the `feat!:` commits from Tasks 1–2; this task documents the user-visible changes in each crate's own `CHANGELOG.md`.
 
 **Files:**
+
 - Modify: `hyperdb-api/CHANGELOG.md:8-18` (`## [Unreleased]` section; create if absent)
 - Modify: `hyperdb-mcp/CHANGELOG.md:8-53` (`## [Unreleased]` section — runs from the `## [Unreleased]` heading down to the blank line before `## [0.5.0]`; create if absent)
 
 **Interfaces:**
+
 - Consumes: `SetOutcome`, `BatchSetOutcome`, `BatchGuardOutcome` (Tasks 1,5); `set_if_absent`, `byte_size`, `entries`, `set_batch_if_absent` (Tasks 3–6); `kv_set_many` (Task 10); `kv_set.value_path`/`overwrite`, `kv_list.values`, `kv_size.bytes` (Tasks 8,9,11); error fixes (Task 7).
 - Produces: no code; append bullets to each crate's `## [Unreleased]` section.
 

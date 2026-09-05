@@ -144,6 +144,13 @@
 //! ```
 
 #![warn(missing_docs, rust_2018_idioms, clippy::all)]
+// `must_use_candidate` is `allow` workspace-wide because it measures
+// *public API* ergonomics, and 140 of its 141 workspace-wide sites are in
+// places where that does not apply: `hyperdb-api-core` (explicitly not a
+// public API), the `hyperdb-mcp` binary's internal daemon helpers, and
+// prost-generated protobuf code. This crate *is* the public API, so it opts
+// back in.
+#![warn(clippy::must_use_candidate)]
 
 mod arrow_inserter;
 /// Semantic version of this crate, resolved at compile time from
@@ -194,7 +201,7 @@ mod proofs;
 pub use arrow_inserter::ArrowInserter;
 pub use arrow_reader::ArrowReader;
 pub use arrow_result::{
-    parse_arrow_ipc, ArrowChunk, ArrowRow, ArrowRowset, ChunkSource, FromArrowValue,
+    ArrowChunk, ArrowRow, ArrowRowset, ChunkSource, FromArrowValue, parse_arrow_ipc,
 };
 pub use async_arrow_inserter::{AsyncArrowInserter, AsyncArrowInserterOwned};
 pub use async_connection::AsyncConnection;
@@ -216,7 +223,7 @@ pub use hyperdb_api_core::client::{Notice, NoticeReceiver};
 pub use inserter::{ChunkSender, ColumnMapping, InsertChunk, Inserter, IntoValue, MappedInserter};
 pub use kv_store::{BatchGuardOutcome, BatchSetOutcome, KvStore, SetOutcome};
 pub use names::{
-    escape_name, escape_sql_path, escape_string_literal, DatabaseName, Name, SchemaName, TableName,
+    DatabaseName, Name, SchemaName, TableName, escape_name, escape_sql_path, escape_string_literal,
 };
 pub use process::{HyperProcess, ListenMode, Parameters, TransportMode};
 pub use query_stats::{LogFileStatsProvider, QueryStats, QueryStatsProvider};

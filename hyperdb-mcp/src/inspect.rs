@@ -22,11 +22,11 @@
 //! cheaply would mean decoding every batch.
 
 use crate::error::{ErrorCode, McpError};
-use crate::ingest::{detect_file_format, normalize_json_or_jsonl, InferredFileFormat};
+use crate::ingest::{InferredFileFormat, detect_file_format, normalize_json_or_jsonl};
 use crate::ingest_arrow::arrow_schema_to_columns;
-use crate::schema::{infer_csv_schema, infer_json_schema, widen_csv_numeric_columns, ColumnSchema};
+use crate::schema::{ColumnSchema, infer_csv_schema, infer_json_schema, widen_csv_numeric_columns};
 use arrow::datatypes::Schema as ArrowSchema;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -322,11 +322,11 @@ fn inspect_csv(path: &str, file_size: u64, sample_rows: usize) -> Result<Inspect
                     s.min_i128 = Some(s.min_i128.map_or(n, |m| m.min(n)));
                     s.max_i128 = Some(s.max_i128.map_or(n, |m| m.max(n)));
                 }
-            } else if col.hyper_type == "DOUBLE PRECISION" {
-                if let Ok(n) = trimmed.parse::<f64>() {
-                    s.min_f64 = Some(s.min_f64.map_or(n, |m| m.min(n)));
-                    s.max_f64 = Some(s.max_f64.map_or(n, |m| m.max(n)));
-                }
+            } else if col.hyper_type == "DOUBLE PRECISION"
+                && let Ok(n) = trimmed.parse::<f64>()
+            {
+                s.min_f64 = Some(s.min_f64.map_or(n, |m| m.min(n)));
+                s.max_f64 = Some(s.max_f64.map_or(n, |m| m.max(n)));
             }
         }
     }

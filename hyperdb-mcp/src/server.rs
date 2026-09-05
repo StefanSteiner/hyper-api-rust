@@ -13,22 +13,22 @@
 
 use crate::attach::{self, AttachRegistry, AttachRequest, AttachSource, LOCAL_ALIAS};
 use crate::chart::{
-    render_chart_with_measure_metadata, ChartFormat, ChartOptions, ChartPresentation, ChartType,
+    ChartFormat, ChartOptions, ChartPresentation, ChartType, render_chart_with_measure_metadata,
 };
-use crate::engine::{classify_statement, is_read_only_sql, Engine, StatementKind};
+use crate::engine::{Engine, StatementKind, classify_statement, is_read_only_sql};
 use crate::error::{ErrorCode, McpError};
-use crate::export::{export_to_file, ExportOptions};
+use crate::export::{ExportOptions, export_to_file};
 use crate::ingest::{
-    detect_file_format, ingest_csv, ingest_csv_file, ingest_csv_file_async, ingest_json,
-    ingest_json_file, ingest_json_file_async, InferredFileFormat, IngestOptions,
+    InferredFileFormat, IngestOptions, detect_file_format, ingest_csv, ingest_csv_file,
+    ingest_csv_file_async, ingest_json, ingest_json_file, ingest_json_file_async,
 };
 use crate::ingest_arrow::{
     ingest_arrow_ipc_file, ingest_arrow_ipc_file_async, ingest_parquet_file,
     ingest_parquet_file_async,
 };
-use crate::saved_queries::{build_store, SavedQuery, SavedQueryStore};
+use crate::saved_queries::{SavedQuery, SavedQueryStore, build_store};
 use crate::subscriptions::{
-    uris_for_table_change, uris_for_workspace_change, SubscriptionRegistry,
+    SubscriptionRegistry, uris_for_table_change, uris_for_workspace_change,
 };
 use base64::Engine as _;
 use rmcp::handler::server::router::prompt::PromptRouter;
@@ -43,12 +43,12 @@ use rmcp::model::{
 };
 use rmcp::service::RequestContext;
 use rmcp::{
-    prompt, prompt_handler, prompt_router, tool, tool_handler, tool_router, RoleServer,
-    ServerHandler,
+    RoleServer, ServerHandler, prompt, prompt_handler, prompt_router, tool, tool_handler,
+    tool_router,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sqlformat::{FormatOptions, Indent, QueryParams as SqlQueryParams};
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
@@ -1600,16 +1600,15 @@ impl HyperMcpServer {
                 "failed to reconcile persistent _table_catalog after execute"
             );
         }
-        if let Some(alias) = target_db {
-            if !alias.eq_ignore_ascii_case(Engine::PERSISTENT_ALIAS) {
-                if let Err(e) = crate::table_catalog::reconcile_in(engine, Some(alias)) {
-                    tracing::warn!(
-                        target_db = alias,
-                        err = %e.message,
-                        "failed to reconcile user-DB _table_catalog after execute"
-                    );
-                }
-            }
+        if let Some(alias) = target_db
+            && !alias.eq_ignore_ascii_case(Engine::PERSISTENT_ALIAS)
+            && let Err(e) = crate::table_catalog::reconcile_in(engine, Some(alias))
+        {
+            tracing::warn!(
+                target_db = alias,
+                err = %e.message,
+                "failed to reconcile user-DB _table_catalog after execute"
+            );
         }
     }
 
@@ -2228,8 +2227,8 @@ impl HyperMcpServer {
         &self,
         Parameters(params): Parameters<LoadFilesParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        use hyperdb_api::pool::{create_pool, PoolConfig};
         use hyperdb_api::CreateMode;
+        use hyperdb_api::pool::{PoolConfig, create_pool};
 
         if let Err(e) = self.check_writable("load_files") {
             return Self::err_content(e);
@@ -2322,7 +2321,7 @@ impl HyperMcpServer {
                 return Self::err_content(McpError::new(
                     ErrorCode::InternalError,
                     format!("Failed to build connection pool for load_files: {e}"),
-                ))
+                ));
             }
         };
 
@@ -3860,10 +3859,8 @@ impl HyperMcpServer {
         Parameters(params): Parameters<AttachDatabaseParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let writable = params.writable.unwrap_or(false);
-        if writable {
-            if let Err(e) = self.check_writable("attach_database(writable)") {
-                return Self::err_content(e);
-            }
+        if writable && let Err(e) = self.check_writable("attach_database(writable)") {
+            return Self::err_content(e);
         }
         let on_missing = match attach::OnMissing::parse(params.on_missing.as_deref()) {
             Ok(v) => v,
@@ -4645,9 +4642,12 @@ impl HyperMcpServer {
             md.push_str("## Related resources\n\n");
             for t in &tables {
                 if let Some(name) = t.get("name").and_then(|v| v.as_str()) {
-                    let _ = write!(md, "- `hyper://tables/{name}/schema` — JSON schema and row count\n\
+                    let _ = write!(
+                        md,
+                        "- `hyper://tables/{name}/schema` — JSON schema and row count\n\
                          - `hyper://tables/{name}/sample` — first {TABLE_SAMPLE_ROWS} rows as JSON\n\
-                         - `hyper://tables/{name}/csv-sample` — first {TABLE_CSV_SAMPLE_ROWS} rows as CSV\n");
+                         - `hyper://tables/{name}/csv-sample` — first {TABLE_CSV_SAMPLE_ROWS} rows as CSV\n"
+                    );
                 }
             }
             md.push('\n');
@@ -5398,11 +5398,7 @@ fn target_exists(engine: &Engine, db: Option<&str>, table: &str) -> Result<bool,
             let missing = m.contains("does not exist")
                 || m.contains("undefined table")
                 || e.message.contains("42P01");
-            if missing {
-                Ok(false)
-            } else {
-                Err(e)
-            }
+            if missing { Ok(false) } else { Err(e) }
         }
     }
 }

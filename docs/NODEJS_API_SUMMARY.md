@@ -81,6 +81,7 @@ graph TB
 | `executeQueryStream()` | 836K rows/sec | One chunk | Large results, row-level logic |
 
 **Result types:**
+
 - **`RowData`** — typed accessors: `getInt32`, `getInt64`, `getBigInt`, `getFloat64`, `getString`, `getBool`, `getBytes`, `getDateMs`, `getTimestampMs`, `getJson`, `isNull`; `toJSON()` with `setColumnNames()` for schema-aware serialization
 - **`QueryStream`** — `nextChunk()` + `for await...of` async iteration
 - **`ColumnarStream`** / **`ColumnarChunk`** — typed arrays per column: `getInt32Column`, `getFloat64Column`, `getStringColumn`, `getNulls`

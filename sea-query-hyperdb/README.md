@@ -14,7 +14,7 @@ syntax where needed.
 
 ```toml
 [dependencies]
-sea-query-hyperdb = "0.1"
+sea-query-hyperdb = "1.0"
 sea-query = "0.30"
 ```
 

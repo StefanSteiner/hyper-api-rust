@@ -65,8 +65,8 @@ use hyperdb_api::{
 };
 
 use common::{
-    fmt_count, fmt_rate, gen_id, gen_sensor_id, gen_timestamp, gen_value, records_to_json,
-    records_to_markdown, BenchRecord, HostEnv, BYTES_PER_ROW, MEASUREMENTS_DDL,
+    BYTES_PER_ROW, BenchRecord, HostEnv, MEASUREMENTS_DDL, fmt_count, fmt_rate, gen_id,
+    gen_sensor_id, gen_timestamp, gen_value, records_to_json, records_to_markdown,
 };
 
 const DEFAULT_ROWS_PER_WORKLOAD: i64 = 10_000_000;

@@ -320,12 +320,10 @@ fn rustc_version_runtime() -> String {
     if let Ok(out) = std::process::Command::new("rustc")
         .arg("--version")
         .output()
+        && out.status.success()
+        && let Ok(s) = String::from_utf8(out.stdout)
     {
-        if out.status.success() {
-            if let Ok(s) = String::from_utf8(out.stdout) {
-                return s.trim().to_string();
-            }
-        }
+        return s.trim().to_string();
     }
     "rustc (unknown)".to_string()
 }
@@ -433,7 +431,9 @@ pub(crate) fn records_to_json(records: &[BenchRecord], env: &HostEnv) -> String 
     );
     out.push_str("},\n  \"records\": [\n");
     for (i, r) in records.iter().enumerate() {
-        let _ = writeln!(out, "    {{\"workload\": {:?}, \"variant\": {:?}, \"flavor\": {:?}, \"rows\": {}, \"bytes\": {}, \"elapsed_secs\": {:.6}, \"rows_per_sec\": {:.3}, \"mb_per_sec\": {:.3}}}{}\n",
+        let _ = writeln!(
+            out,
+            "    {{\"workload\": {:?}, \"variant\": {:?}, \"flavor\": {:?}, \"rows\": {}, \"bytes\": {}, \"elapsed_secs\": {:.6}, \"rows_per_sec\": {:.3}, \"mb_per_sec\": {:.3}}}{}\n",
             r.workload,
             r.variant,
             r.flavor,
@@ -442,7 +442,8 @@ pub(crate) fn records_to_json(records: &[BenchRecord], env: &HostEnv) -> String 
             r.elapsed_secs,
             r.rows_per_sec(),
             r.mb_per_sec(),
-            if i + 1 < records.len() { "," } else { "" });
+            if i + 1 < records.len() { "," } else { "" }
+        );
     }
     out.push_str("  ]\n}\n");
     out

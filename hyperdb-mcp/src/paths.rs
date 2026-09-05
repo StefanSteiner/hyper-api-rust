@@ -171,10 +171,10 @@ pub(crate) fn effective_persistent_db_path(path: &OsStr) -> PathBuf {
 
 fn persistent_home_dir() -> Option<PathBuf> {
     if cfg!(windows) {
-        if let Some(profile) = std::env::var_os("USERPROFILE") {
-            if !profile.is_empty() {
-                return Some(PathBuf::from(profile));
-            }
+        if let Some(profile) = std::env::var_os("USERPROFILE")
+            && !profile.is_empty()
+        {
+            return Some(PathBuf::from(profile));
         }
         let drive = std::env::var_os("HOMEDRIVE")?;
         let relative = std::env::var_os("HOMEPATH")?;
@@ -303,8 +303,7 @@ mod tests {
 
         const CHILD_SENTINEL: &str = "HYPERDB_MCP_PATHS_NESTED_TILDE_CHILD";
         const CHILD_SENTINEL_VALUE: &str = "nested-tilde-source-child-v1";
-        const TEST_NAME: &str =
-            "paths::tests::nested_tilde_source_resolution_preserves_raw_input_for_one_runtime_expansion";
+        const TEST_NAME: &str = "paths::tests::nested_tilde_source_resolution_preserves_raw_input_for_one_runtime_expansion";
 
         if std::env::var(CHILD_SENTINEL).as_deref() == Ok(CHILD_SENTINEL_VALUE) {
             let legacy = resolve_persistent_db_path(Some("~/data.hyper"));

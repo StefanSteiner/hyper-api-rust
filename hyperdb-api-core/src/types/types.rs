@@ -28,7 +28,7 @@ use bytes::{BufMut, BytesMut};
 use std::error::Error;
 
 use super::traits::{
-    write_not_null_indicator, FromHyperBinary, ToHyperBinary, NULL_INDICATOR_SIZE,
+    FromHyperBinary, NULL_INDICATOR_SIZE, ToHyperBinary, write_not_null_indicator,
 };
 
 // =============================================================================

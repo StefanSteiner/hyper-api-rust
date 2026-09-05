@@ -4,8 +4,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use napi::bindgen_prelude::*;
 use napi::Unknown;
+use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 #[allow(
@@ -317,12 +317,52 @@ fn encode_rows(
 
 /// Adds a value to the chunk using the column's SQL type for correct binary encoding.
 ///
-/// All narrowing casts in this function are caller-selected type coercions:
-/// the JS value was classified by `js_value_to_insert_value` (which bins based
+/// Narrows an integer to `i16` for a `SMALLINT` destination column, or fails.
+///
+/// Truncating with `as` would be silent data corruption: `add_i16` encodes two
+/// bytes, so a wrapped value is a *valid* encoding of the wrong number and
+/// Hyper cannot detect it.
+fn narrow_i16(v: i64) -> std::result::Result<i16, hyperdb_api::Error> {
+    i16::try_from(v).map_err(|_| {
+        hyperdb_api::Error::invalid_operation(format!(
+            "value {v} does not fit the destination SMALLINT column (valid range {}..={})",
+            i16::MIN,
+            i16::MAX
+        ))
+    })
+}
+
+/// Narrows an `i64` to `i32` for an `INT` destination column, or fails.
+///
+/// See [`narrow_i16`] for why this cannot use `as`.
+fn narrow_i32(v: i64) -> std::result::Result<i32, hyperdb_api::Error> {
+    i32::try_from(v).map_err(|_| {
+        hyperdb_api::Error::invalid_operation(format!(
+            "value {v} does not fit the destination INT column (valid range {}..={})",
+            i32::MIN,
+            i32::MAX
+        ))
+    })
+}
+
+/// Encodes an `InsertValue` according to the destination column's SQL type.
+///
+/// The JS value was classified by `js_value_to_insert_value` (which bins based
 /// on JS-side integer/float detection), but the destination column's SQL type
-/// governs the final binary encoding. If a caller supplies a value that does
-/// not fit the declared column type, Hyper will reject the insert at
-/// `execute()` time — that is the documented contract of this path.
+/// governs the final binary encoding.
+///
+/// **Integer-to-integer narrowing is rejected, not truncated.** An earlier
+/// version of this function claimed Hyper would reject an oversized value at
+/// `execute()` time. That is not true for the narrowing paths: `as` wraps to a
+/// value that is a perfectly valid encoding of the wrong number, so Hyper
+/// accepts it and the `.hyper` file silently holds corrupt data. Those three
+/// paths now go through [`narrow_i16`] / [`narrow_i32`] and surface an error to
+/// JS instead.
+///
+/// Float-to-integer coercions keep using `as`, which is *saturating* in Rust
+/// rather than wrapping — an out-of-range `f64` clamps to `i32::MIN`/`MAX` and
+/// `NaN` becomes 0. That is lossy but bounded, and it remains the documented
+/// coercion for this path.
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
@@ -340,7 +380,7 @@ fn add_value_typed(
         InsertValue::String(s) => chunk.add_str(s),
         InsertValue::Bytes(b) => chunk.add_bytes(b),
         InsertValue::I32(n) => match col_type {
-            Some(hyperdb_api::SqlType::SmallInt) => chunk.add_i16(*n as i16),
+            Some(hyperdb_api::SqlType::SmallInt) => chunk.add_i16(narrow_i16(i64::from(*n))?),
             Some(hyperdb_api::SqlType::BigInt) => chunk.add_i64(*n as i64),
             Some(hyperdb_api::SqlType::Double) => chunk.add_f64(*n as f64),
             Some(hyperdb_api::SqlType::Float) => chunk.add_f32(*n as f32),
@@ -349,8 +389,8 @@ fn add_value_typed(
         InsertValue::I64(n) => match col_type {
             Some(hyperdb_api::SqlType::Double) => chunk.add_f64(*n as f64),
             Some(hyperdb_api::SqlType::Float) => chunk.add_f32(*n as f32),
-            Some(hyperdb_api::SqlType::Int) => chunk.add_i32(*n as i32),
-            Some(hyperdb_api::SqlType::SmallInt) => chunk.add_i16(*n as i16),
+            Some(hyperdb_api::SqlType::Int) => chunk.add_i32(narrow_i32(*n)?),
+            Some(hyperdb_api::SqlType::SmallInt) => chunk.add_i16(narrow_i16(*n)?),
             _ => chunk.add_i64(*n),
         },
         InsertValue::F64(n) => match col_type {

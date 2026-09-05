@@ -59,7 +59,7 @@ use hyperdb_api::{
     InsertChunk, Parameters, Result, SqlType, TableDefinition,
 };
 
-use common::{fmt_count, fmt_rate, BYTES_PER_ROW};
+use common::{BYTES_PER_ROW, fmt_count, fmt_rate};
 
 /// Await all `handles`, converting join errors into `hyperdb_api::Error`
 /// and collecting successful results. Replaces `futures::try_join_all`

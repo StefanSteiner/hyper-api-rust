@@ -10,13 +10,15 @@ A **pure-Rust** implementation of the Hyper database API, using the PostgreSQL
 wire protocol with Hyper-specific extensions. Create, read, and manipulate Hyper
 database files (`.hyper`) without any C library dependencies.
 
-> **Project Status — 0.4.x, AI-Assisted**
+> **Project Status — 1.0.0, AI-Assisted**
 >
 > This crate is **AI-assisted but human-directed**: much of the code was written
 > by AI coding assistants under close review, with the design, architecture, and
-> engineering trade-offs decided by an experienced developer. The pre-1.0
-> (**0.x**) line will probably undergo more large breaking changes; the public
-> API won't settle until the 1.0.0 release.
+> engineering trade-offs decided by an experienced developer.
+>
+> As of **1.0.0** the public API is stable and follows [semantic versioning](https://semver.org/):
+> breaking changes require a major release, so the frequent churn of the `0.x`
+> line is behind us.
 >
 > Contributors and reviewers should, at a minimum, run an **AI code reviewer**
 > over any changes, following the conventions, layering rules, and patterns
@@ -24,10 +26,26 @@ database files (`.hyper`) without any C library dependencies.
 > [`hyperdb-api-node/AGENTS.md`](hyperdb-api-node/AGENTS.md)). Those files are
 > the authoritative guidance for AI assistants working in this repository.
 
+## Requirements
+
+- **Rust 1.88 or newer.** 1.88 is the MSRV (minimum supported Rust version) and
+  a floor, not a pin — newer toolchains are fine, and the workspace itself is
+  built on **edition 2024**.
+- **RHEL 9.7** and binary-compatible distributions are supported using Red Hat's
+  system-native `rust-toolset`, with **no `rustup` required**. This is why the
+  MSRV is 1.88: it is the version RHEL 9.7 documents. The AppStream module is a
+  rolling stream and is currently ahead of that floor, and CI verifies the
+  workspace against it — see [Enterprise Compatibility](#enterprise-compatibility)
+  for the package list and caveats.
+
+Also required at build time: `protoc` (for the gRPC bindings) and the `hyperd`
+executable, obtained with `make download-hyperd`. See
+[Platform Support](#platform-support) for the full OS and architecture matrix.
+
 ## Key Features
 
 - **Pure Rust** — no C library dependencies, standard `cargo build`
-- **High Performance** — 22-24M rows/sec inserts, 18M rows/sec queries (100M row benchmark)
+- **High Performance** — 25M rows/sec inserts, 31M rows/sec queries on a single connection; 48M / 73M across 4 (100M row benchmark, Apple M3 Max — see [benchmarks](docs/BENCHMARK_GUIDE.md))
 - **Memory Safe** — streaming by default, constant memory for billion-row results
 - **Dual Architecture** — sync (`Connection`) and async (`AsyncConnection`) APIs
 - **Typed Row Mapping** — `#[derive(FromRow)]` structs, including streaming `stream_as` for constant-memory typed queries
@@ -156,7 +174,7 @@ fn main() -> Result<()> {
         .add_required_column("name", SqlType::text());
     Catalog::new(&conn).create_table(&table_def)?;
 
-    // Insert data (COPY protocol, 22M+ rows/sec)
+    // Insert data (COPY protocol, 25M+ rows/sec)
     {
         let mut inserter = Inserter::new(&conn, &table_def)?;
         inserter.add_row(&[&1i32, &"Alice"])?;
@@ -336,7 +354,50 @@ See [hyperdb-api-node/README.md](hyperdb-api-node/README.md) for full documentat
 | Windows | Supported | `.\build.ps1 build` |
 | WSL | Supported | `make build` |
 
-**MSRV:** Check `rust-version` in `Cargo.toml`.
+**MSRV:** Rust 1.88 (see `rust-version` in `Cargo.toml`), chosen to match the
+`rust-toolset` version Red Hat Enterprise Linux 9.7 ships. The workspace uses
+edition 2024.
+
+## Enterprise Compatibility
+
+This workspace builds with Red Hat's **system-native Rust toolchain and no
+`rustup`**, which is how enterprise environments typically consume it. RHEL
+provides `rust-toolset` in AppStream as a rolling Application Stream:
+
+    dnf install -y rust-toolset gcc gcc-c++ fontconfig-devel unzip
+    cargo build --release
+
+Notes for system-toolchain builds, all verified against `ubi9/ubi`:
+
+- **`protoc` is required and is *not* packaged for UBI.** `hyperdb-api-core`
+  generates its gRPC bindings at build time via `tonic-prost-build`.
+  `dnf search protobuf` offers only `protobuf-c` and `python3-protobuf`, and
+  `ubi-9-codeready-builder-rpms` is already enabled by default, so install
+  `protoc` from the [upstream release][protoc] and put it on `PATH`.
+- **`gcc`, `gcc-c++` and `fontconfig-devel` are needed for chart rendering
+  only.** They come from `hyperdb-mcp`'s `plotters` dependency, whose font
+  stack compiles C and C++. Nothing in this workspace's own code requires a
+  C or C++ compiler.
+- **`.cargo/config.toml` is a developer convenience, not a build
+  requirement.** It selects clang plus the mold linker on
+  `x86_64-unknown-linux-gnu` for faster local linking; mold is not packaged for
+  UBI. Either remove it or neutralize it with `RUSTFLAGS=` and
+  `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=cc`. Note that
+  `--config target.<triple>.rustflags=[]` does *not* work, because Cargo joins
+  `rustflags` across configuration sources rather than replacing them.
+- **`rust-toolchain.toml` can be ignored.** It is read only by `rustup`'s proxy
+  shims, so a distro-packaged `cargo` never consults it.
+- **RHEL's `rust-toolset` is a rolling stream** and is currently *ahead* of the
+  1.88.0 documented in the RHEL 9.7 release notes. The MSRV floor of 1.88 is
+  therefore conservative and safe.
+
+Compatibility is enforced by
+`.github/workflows/rhel-compatibility.yml`, which runs
+`cargo check --workspace --locked --all-targets` in a `ubi9/ubi` container
+using nothing but the distro toolchain. Reproduce it locally with
+`make check-rhel`.
+
+[protoc]: https://github.com/protocolbuffers/protobuf/releases
 
 ## Documentation
 

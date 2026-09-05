@@ -15,7 +15,7 @@ mod common;
 use common::TestEngine;
 use hyperdb_mcp::engine::Engine;
 use hyperdb_mcp::error::ErrorCode;
-use hyperdb_mcp::ingest::{ingest_csv, ingest_json, qualified_table, IngestOptions};
+use hyperdb_mcp::ingest::{IngestOptions, ingest_csv, ingest_json, qualified_table};
 use tempfile::TempDir;
 
 // --- qualified_table helper -------------------------------------------------

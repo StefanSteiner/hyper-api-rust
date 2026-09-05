@@ -78,11 +78,13 @@ fn upsert_stub_creates_row_with_null_prose_fields() {
     assert_eq!(entry.table_name, "widgets");
     assert_eq!(entry.load_tool.as_deref(), Some("load_file"));
     assert_eq!(entry.row_count, Some(42));
-    assert!(entry
-        .load_params
-        .as_deref()
-        .unwrap()
-        .contains("widgets.csv"));
+    assert!(
+        entry
+            .load_params
+            .as_deref()
+            .unwrap()
+            .contains("widgets.csv")
+    );
     assert!(entry.source_url.is_none());
     assert!(entry.purpose.is_none());
 }

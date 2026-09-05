@@ -15,7 +15,7 @@ use std::error::Error;
 use std::fmt;
 
 use super::traits::{
-    write_not_null_indicator, FromHyperBinary, ToHyperBinary, NULL_INDICATOR_SIZE,
+    FromHyperBinary, NULL_INDICATOR_SIZE, ToHyperBinary, write_not_null_indicator,
 };
 
 // =============================================================================
@@ -1786,8 +1786,8 @@ mod geo_impl {
                 ))));
             }
 
-            use geozero::wkb::Wkb;
             use geozero::ToGeo;
+            use geozero::wkb::Wkb;
 
             let wkb = Wkb(bytes.to_vec());
             wkb.to_geo().map(|_: Geometry<f64>| ()).map_err(|e| {
@@ -1853,8 +1853,8 @@ mod geo_impl {
         /// - Returns an error if the stored bytes cannot be parsed as WKB
         ///   by `geozero`.
         pub fn to_geometry(&self) -> Result<Geometry<f64>, Box<dyn Error + Send + Sync>> {
-            use geozero::wkb::Wkb;
             use geozero::ToGeo;
+            use geozero::wkb::Wkb;
 
             if self.format == GeographyBinaryFormat::HyperLegacy {
                 return Err(Box::new(GeoError(
@@ -1889,8 +1889,8 @@ mod geo_impl {
         /// - Returns an error if the stored bytes cannot be serialized to
         ///   WKT by `geozero` (malformed WKB).
         pub fn to_wkt(&self) -> Result<String, Box<dyn Error + Send + Sync>> {
-            use geozero::wkb::Wkb;
             use geozero::ToWkt;
+            use geozero::wkb::Wkb;
 
             if self.format == GeographyBinaryFormat::HyperLegacy {
                 return Err(Box::new(GeoError(

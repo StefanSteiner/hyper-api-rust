@@ -14,8 +14,8 @@
 //! Run with: cargo run -p hyperdb-api --example `insert_geospatial_data_to_a_hyper_file`
 
 use hyperdb_api::{
-    escape_name, Catalog, ColumnMapping, Connection, CreateMode, HyperProcess, Inserter, Result,
-    SqlType, TableDefinition,
+    Catalog, ColumnMapping, Connection, CreateMode, HyperProcess, Inserter, Result, SqlType,
+    TableDefinition, escape_name,
 };
 
 /// Creates the Extract table definition (target table).

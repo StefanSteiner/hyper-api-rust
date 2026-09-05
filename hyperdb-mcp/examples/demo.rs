@@ -32,9 +32,9 @@
 //! rendering of each result set, so the console output doubles as a
 //! reproducible recipe the reader can paste into their own MCP client.
 
-use hyperdb_mcp::chart::{render_chart, ChartFormat, ChartOptions, ChartResult, ChartType};
+use hyperdb_mcp::chart::{ChartFormat, ChartOptions, ChartResult, ChartType, render_chart};
 use hyperdb_mcp::engine::Engine;
-use hyperdb_mcp::ingest::{ingest_csv_file, IngestOptions};
+use hyperdb_mcp::ingest::{IngestOptions, ingest_csv_file};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 

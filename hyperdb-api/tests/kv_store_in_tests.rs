@@ -7,7 +7,7 @@
 mod common;
 
 use common::{test_hyper_params, test_result_path};
-use hyperdb_api::{escape_sql_path, AsyncConnection, Connection, CreateMode, HyperProcess, Result};
+use hyperdb_api::{AsyncConnection, Connection, CreateMode, HyperProcess, Result, escape_sql_path};
 
 /// A KV store opened in an attached database is isolated from the primary DB,
 /// round-trips set/get through the attached location, and is enumerated by the
