@@ -847,10 +847,120 @@ No new machinery is needed — this is all already wired:
 - crates.io behaves equivalently: `cargo add hyperdb-api` skips prereleases
   unless a user opts in with `@1.0.0-rc.1`.
 
+### Task 4.0 — Benchmark regression gate (before cutting the RC)
+
+Nothing ships until a fresh benchmark run shows no performance regression
+against pre-migration `main`. This runs after all of Phases 1 through 3 are
+merged and before Task 4.1.
+
+**Use a same-session A/B baseline, not the numbers already in the docs.**
+This is the methodology `docs/hyperd-release-benchmarks.md` already follows —
+it records "Same-session 0.0.25080 A/B baseline: 27.17 / 26.12 / 31.33" and
+warns that "the insert path carries cold-start variance," so cross-session
+comparison against a published table is not trustworthy on a thermally
+throttled laptop. Measure the old and new builds back to back, same machine,
+same session.
+
+- [ ] Benchmark pre-migration `main` first, from a clean worktree at
+      `28c8813` (the plan's integration base), in **release mode** — debug
+      builds are not representative (AGENTS.md reminder 5):
+
+Use the Methodology the tracker mandates, **not** the suite's defaults:
+median of **≥3 runs at 100M rows**, TCP, 4 workers, and single-connection
+figures only. `docs/hyperd-release-benchmarks.md` is explicit that a 10M-row
+run "is too short to distinguish signal from variance," and that multi-connection
+(`× 4`) workloads throttle thermally on laptops and are excluded from headline
+deltas.
+
+```bash
+export HYPERD_PATH=~/dev/bin/hyperd
+
+# 100M rows per workload, 4 workers. Run at least 3 times; take the median.
+cargo run -p hyperdb-api --release --example benchmark_suite -- 100000000 4
+```
+
+(The benchmarks live in `hyperdb-api/benches/` but are registered as
+`[[example]]` targets — the manifest comment says "registered as examples for
+easy `cargo run`" — so `--example` is correct and there are no `[[bench]]`
+targets.)
+
+- [ ] Save the baseline artifacts before they are overwritten — the suite
+      writes `test_results/benchmark_suite.md` and
+      `test_results/benchmark_suite.json` on every run:
+
+```bash
+cp test_results/benchmark_suite.md   /tmp/bench-baseline-28c8813.md
+cp test_results/benchmark_suite.json /tmp/bench-baseline-28c8813.json
+```
+
+- [ ] Re-run the identical command on the migrated branch, same session.
+- [ ] Repeat both legs with `BENCH_TRANSPORT=ipc` — the default is TCP, and
+      the IPC path is what most local consumers actually use.
+- [ ] **Run the Node.js bench too.** It is a separate harness
+      (`hyperdb-api-node/__test__/benchmark.mjs`, via `npm run build && npm
+      run benchmark`) and it is the *only* one that exercises Task 2.6's cast
+      conversions. Skipping it would miss the most likely regression.
+
+**Where regressions would plausibly come from**, in rough order of risk:
+
+- **Task 2.6's `as` to `TryFrom` conversions** on the JS boundary. Each adds
+  a branch per value in insert and read paths, at roughly 14 sites. This is
+  the top suspect and only the Node bench sees it.
+- **Task 2.5's `split_at_checked`** in `hyperdb-api-core/src/protocol/types.rs`
+  — per-value wire decode, genuinely hot.
+- **Edition 2024 drop-order changes.** Locks and guards releasing at
+  different points can shift throughput in the concurrent insert and parallel
+  query workloads, which is a second reason to take Task 1.4's triage
+  seriously.
+- **Dependency movement.** If Blocker B1 was resolved by downgrading
+  `sysinfo`, or if resolver v3 changed any resolved version, codegen changed
+  with it.
+- Let chains, `is_none_or`, and `use<..>` should all be neutral — same
+  branching, or type-level only with no codegen effect. A delta there points
+  at measurement noise rather than the change.
+
+**Judging the result:**
+
+- [ ] Compare the insert table (`Inserter` sync, `ChunkSender` sync,
+      `AsyncArrowInserter`) and the query table (`full_scan` and `filtered`,
+      sync and async) leg by leg.
+- [ ] Treat a marginal delta as unproven rather than real: re-run the baseline
+      leg a second time and see whether the gap survives. The tracker's own
+      notes call small insert deltas "soft" for exactly this reason.
+- [ ] Any sustained regression on a dominant path blocks the RC until it is
+      explained. "Explained" is a permissible outcome — a documented, accepted
+      cost is fine; an unexplained one is not.
+- [ ] Attach both A/B artifact pairs to the release PR as the evidence record.
+- [ ] **Record the 1.0.0 row in
+      [`docs/hyperd-release-benchmarks.md`](../../../hyperd-release-benchmarks.md)**
+      — one insert row and one query row. This is the whole point of the run:
+      that row becomes the baseline the *next* engine bump measures against,
+      and a new `hyperd` pin is already planned for 1.0.1. Without an API-only
+      row here, the 1.0.1 A/B would compare new-engine-plus-migrated-API
+      against old-engine-plus-pre-migration-API and report the sum as an
+      engine delta.
+
+      Repeat the `Release` and `Build` values from the row above — hyperd does
+      not change in 1.0.0 — and set the new `API` column to `1.0.0`. In Notes,
+      say what the migration changed and which paths could plausibly move, so
+      a later reader can distinguish an accepted cost from an unexplained one.
+      The tracker's "How to add a row" section covers this trigger.
+- [ ] If numbers shift materially, also refresh the relevant platform table
+      under "Results by platform" in `docs/BENCHMARK_GUIDE.md`.
+
+**Confirmed coupling to Blocker B1.** `benchmark_suite.rs` does `mod common;`,
+`hyperdb-api/benches/common.rs` uses `sysinfo` (lines 38, 142, 258), and
+`sysinfo` is a dev-dependency of `hyperdb-api` — which examples build against.
+So **this gate cannot run on a 1.88 toolchain** unless B1 was resolved by
+downgrading `sysinfo`. Running it on local `stable` is fine and is what the
+tracker's existing rows did, but it means the benchmark gate never exercises
+the MSRV floor. Worth stating in the tracker row's Notes.
+
 ### Task 4.1 — Cut `1.0.0-rc.1`
 
-- [ ] Confirm Phases 0 through 3 are all merged and the five-command gate plus
-      the RHEL job are green on `main`.
+- [ ] Confirm Phases 0 through 3 are all merged, the five-command gate plus
+      the RHEL job are green on `main`, and **Task 4.0's benchmark gate
+      passed** with its A/B artifacts recorded.
 - [ ] Land a commit on `main` carrying the footer:
 
 ```
@@ -978,7 +1088,9 @@ Beyond the five-command gate above:
   && npm test`, mirroring the `node-bindings` CI job.
 - **Phase 3:** `make check-rhel` green locally with captured `rustc --version`
   showing 1.88.0, then the workflow green on a PR.
-- **Phase 4:** the five-command gate plus the RHEL job green on `main` before
-  cutting `1.0.0-rc.1`; Task 4.2's measured lint baseline captured (not
-  assumed) before promoting to `1.0.0`; and `npm dist-tag ls` output confirming
-  `rc` and `latest` point where they should at each step.
+- **Phase 4:** the five-command gate plus the RHEL job green on `main`, and
+  Task 4.0's same-session A/B benchmark showing no unexplained regression,
+  both before cutting `1.0.0-rc.1`. Then Task 4.2's measured lint baseline
+  captured (not assumed) before promoting to `1.0.0`, and `npm dist-tag ls`
+  output confirming `rc` and `latest` point where they should at each step.
+  Benchmarks run in release mode only, per AGENTS.md reminder 5.

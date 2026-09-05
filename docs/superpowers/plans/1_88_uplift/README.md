@@ -39,9 +39,13 @@ Four phases, executed in order.
 * **Phase 3 — enterprise CI.** A UBI9 container job proving the workspace
   builds with nothing but `dnf install rust-toolset`, plus a local
   `make check-rhel` mirror and a README section documenting the contract.
-* **Phase 4 — release as 1.0.0.** Phases 0 through 3 land unreleased, then a
-  single `1.0.0-rc.1` covers the whole migration. Promotion to `1.0.0` is
-  gated on the public-API audit that closes out the lints
+* **Phase 4 — benchmark gate, then release as 1.0.0.** Phases 0 through 3 land
+  unreleased. A fresh same-session A/B benchmark run against pre-migration
+  `main` must show no unexplained regression (Task 4.0) before anything ships
+  — the Node.js bench included, since it is the only harness that exercises
+  the cast conversions. Then a single `1.0.0-rc.1` covers the whole migration.
+  Promotion to `1.0.0` is gated on the public-API audit that closes out the
+  lints
   [`docs/RUST_GUIDELINES.md`](../../../RUST_GUIDELINES.md) defers "post-1.0".
   Needs no new release machinery — the `Release-As:` footer, the
   `x-release-please` version markers, and the npm `rc` dist-tag routing all
