@@ -664,10 +664,8 @@ impl HyperProcess {
             #[cfg(windows)]
             {
                 // Check if it's a Named Pipe endpoint
-                if pipe_name.is_some() {
-                    if let Some(ref pname) = pipe_name {
-                        return ConnectionEndpoint::named_pipe(".", pname);
-                    }
+                if let Some(ref pname) = pipe_name {
+                    return ConnectionEndpoint::named_pipe(".", pname);
                 }
             }
             // TCP endpoint (host:port format)
