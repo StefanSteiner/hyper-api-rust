@@ -100,6 +100,81 @@ jobs:
           HYPERD_PATH: ${{ github.workspace }}/.hyperd/current
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+  msrv:
+    # Compiles against the declared MSRV floor so `rust-version` is enforced by
+    # a compiler rather than asserted in docs. Every other job runs `stable`,
+    # and the RHEL job installs a *rolling* `rust-toolset` that is currently
+    # ahead of the floor, so without this nothing would catch a dependency or
+    # language feature that quietly raises the minimum.
+    #
+    # Pinned deliberately: this job must fail when the floor is exceeded, which
+    # is the signal to make raising it a conscious decision.
+    name: msrv (1.88)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install system libraries (fontconfig for plotters, protobuf)
+        run: sudo apt-get update -q && sudo apt-get install -y libfontconfig1-dev mold protobuf-compiler
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          # Keep in sync with `rust-version` in Cargo.toml and `msrv` in
+          # clippy.toml.
+          toolchain: "1.88"
+          cache-key: msrv
+          rustflags: ""
+      - name: Cache hyperd binary
+        # --all-features enables the compile-time feature, whose proc macro
+        # starts an embedded Hyper instance at expansion time.
+        id: hyperd-cache
+        uses: actions/cache@v6
+        with:
+          path: .hyperd
+          key: hyperd-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hyperdb-bootstrap/hyperd-version.toml') }}
+      - name: Download hyperd
+        if: steps.hyperd-cache.outputs.cache-hit != 'true'
+        run: cargo run --release -p hyperdb-bootstrap --bin hyperdb-bootstrap -- download
+      - name: Check workspace at the MSRV floor
+        env:
+          HYPERD_PATH: ${{ github.workspace }}/.hyperd/current
+        run: cargo check --workspace --locked --all-targets --all-features
+      - name: Check hyperdb-compile-check at the MSRV floor
+        # Declares its own [workspace] so it can build standalone, which means
+        # `--workspace` above skips it — yet it is published like the rest.
+        run: cargo check --locked --all-targets --manifest-path hyperdb-compile-check/Cargo.toml
+
+  doc:
+    # rustdoc warnings are errors here. This gate was documented as CI-enforced
+    # long before it could pass; it went green once the broken intra-doc links
+    # in hyperdb-mcp and hyperdb-api-derive were fixed, so it is now wired up.
+    name: doc
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install system libraries (fontconfig for plotters, protobuf)
+        run: sudo apt-get update -q && sudo apt-get install -y libfontconfig1-dev mold protobuf-compiler
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          cache-key: doc
+          rustflags: ""
+      - name: Build docs for every published crate
+        # Mirrors `make doc`. --no-deps keeps the failure surface to our own
+        # rustdoc, not a dependency's.
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: |
+          cargo doc --no-deps \
+            -p hyperdb-api \
+            -p hyperdb-api-core \
+            -p hyperdb-api-derive \
+            -p hyperdb-api-node \
+            -p hyperdb-api-salesforce \
+            -p hyperdb-bootstrap \
+            -p hyperdb-mcp \
+            -p sea-query-hyperdb
+
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
