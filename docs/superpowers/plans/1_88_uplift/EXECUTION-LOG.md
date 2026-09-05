@@ -645,11 +645,27 @@ accidental. `Columnar Filtered` (100K rows) shows no measurable change,
 and the write path that uses `narrow_i16`/`narrow_i32`
 (`RowInserter`, −0.3%) is flat because 4.6 s of COPY dominates it.
 
-A two-pass restructure — validate the slice in one vectorizable pass, then
-narrow in another — would likely recover the 4 ms while keeping the rejection
-behavior. Deliberately **not** done here: it is surgery on a data path at the
-release gate, for 4 ms per million rows, and perf is not API so it can land
-any time after 1.0.0.
+**Fixed, by operator decision, in `3b8a5b4`.** Splitting the fused check into
+a bounds scan plus a narrowing pass cut the cost from +5.6% to **+1.4%**,
+which is inside the session-to-session drift measured on this box (the
+pre-migration baseline itself moved 0.0720 → 0.0730 → 0.0740 across three
+sessions as the machine warmed over ~90 minutes of benchmarking).
+
+Two forms of the second pass were measured at 15 runs per side and are
+**indistinguishable at +1.4% each**:
+
+1. `i32::try_from(x).expect(...)`, relying on the scan for the invariant.
+2. A bounds-justified `as i32` under an `#[expect(cast_possible_truncation)]`.
+
+So the residual is not the per-element branch — it is the second read of the
+slice. Form 1 ships, because it performs the same while needing no
+`cast_possible_truncation` exception, which keeps reminder 7's posture intact.
+This also corrects the original diagnosis: the first attempt assumed
+`expect()` would restore vectorization, and variant 2 proved it does not.
+
+Rejection behavior and the error message are unchanged, and `smoke.mjs`'s
+narrowing tests still pass. Clippy caught a `manual_range_contains` on the
+first draft of the bounds predicate, so the scan uses `!(LO..=HI).contains(&x)`.
 
 **IPC could not be measured.** `BENCH_TRANSPORT=ipc` fails identically on
 *both* sides — `hyperd` never creates the Unix socket the client dials
@@ -662,6 +678,35 @@ work — **no IPC numbers are claimed.**
 
 Not logged to `docs/hyperd-release-benchmarks.md`: that table is keyed by
 `hyperd` release, and the pin is unchanged here.
+
+**`BENCHMARK_GUIDE.md`'s macOS section was refreshed** with the shipping
+1.0.0 numbers, by operator decision. The previous entry was from 2026-05-02 on
+`hyperdb-api` 0.1.0-rc.1, rustc 1.94, and macOS 26.4, and disagreed with this
+box on *both* sides of the A/B — it claimed 18.81 M rows/s for the sync
+full-scan where base and branch both measure ~31 M/s. Because that gap spans a
+different `hyperd`, compiler, and OS, the guide now says explicitly that the
+improvement is not a controlled comparison and cannot be pinned on any one
+change.
+
+Three things the refresh had to get right, which the old entry did not say:
+
+- The `× 4` rows carry a ±20–61% spread on this host, so the table now warns
+  to read them as order-of-magnitude and to compare only single-connection
+  figures across releases.
+- Three Node paths are **bimodal**, so the Node table is a median of 15 runs
+  rather than 5. A 5-run sample put `executeQueryToArrow`-filtered at 0.178 s;
+  15 runs put it at 0.005 s, with 10 of 15 in the fast mode. Publishing the
+  5-run median would have shown a fabricated ~35× regression.
+- The Rust-vs-Node table needed Rust at **10M** to match the Node bench, not
+  the 100M used above it, so a separate 5-run 10M collection was taken.
+
+That comparison also flipped: Node's `ArrowInserter` (41.3 M/s) now measures
+*ahead* of Rust's `AsyncArrowInserter × 4` (37.8 M/s) at 10M. Verified as a
+scale artifact, not JS beating native — Rust's parallel variant pays a fixed
+4-worker setup cost and reaches 48.5 M/s at 100M. The Node harness's timed
+region was read to confirm it is end-to-end (typed-array fill, Arrow build,
+IPC serialize, execute), so the number is fair. The guide frames it as "the
+Arrow path costs you nothing at 10M" rather than a language ranking.
 
 ## Previously deferred (now complete)
 

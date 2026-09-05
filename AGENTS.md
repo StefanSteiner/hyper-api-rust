@@ -29,7 +29,7 @@ This is a **pure-Rust implementation** of the Hyper database API, using the Post
 
 **Key characteristics:**
 - 100% pure Rust (no FFI, no C dependencies)
-- High performance (22-24M rows/sec inserts, 18M rows/sec queries)
+- High performance (25M rows/sec inserts, 31M rows/sec queries single-connection; 48M / 73M across 4 connections)
 - Independent library (can be extracted from this repository)
 - Zero build system dependencies (uses standard Cargo)
 - **No feature flags on `hyperdb-api`** — every capability of the flagship crate (TLS, pooling, geography, transactions, chrono) is always available. A few companion crates do carry optional features; see [Feature Flags](#feature-flags) for the complete list.
@@ -391,7 +391,7 @@ fail loudly when stale.
 
 - **Inserter API uses binary COPY protocol** - 10-100x faster than INSERT statements
 - **Streaming results** - Always process in chunks, never load all rows
-- **Arrow batching** - Use `ArrowInserter` for maximum throughput (22M+ rows/sec)
+- **Arrow batching** - Use `ArrowInserter` for maximum throughput (30M rows/sec single-connection, 48M+ across 4)
 - **Release builds** - Use `--release` for benchmarks (debug is 10x+ slower)
 - **Connection pooling** - Use `pool` module for async high-concurrency scenarios
 
