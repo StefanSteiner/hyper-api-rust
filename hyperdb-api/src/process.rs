@@ -354,7 +354,7 @@ impl HyperProcess {
         })?;
 
         // Check if user wants to disable default parameters
-        let use_defaults = parameters.map_or(true, |p| !p.contains_key(NO_DEFAULT_PARAMETERS));
+        let use_defaults = parameters.is_none_or(|p| !p.contains_key(NO_DEFAULT_PARAMETERS));
 
         // Get the listen mode
         let listen_mode = parameters.and_then(|p| p.listen_mode).unwrap_or_default();

@@ -28,7 +28,7 @@ exclude = ["hyperdb-compile-check"]
 [workspace.package]
 version = "0.7.3"
 edition = "2021"
-rust-version = "1.81"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/tableau/hyper-api-rust"
 homepage = "https://github.com/tableau/hyper-api-rust"
@@ -47,7 +47,7 @@ rand = "0.10"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 sha2 = "0.11"
 socket2 = "0.6"
-sysinfo = "0.39"
+sysinfo = "0.38"
 tempfile = "3.20"
 thiserror = "2.0"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros"] }

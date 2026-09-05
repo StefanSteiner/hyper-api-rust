@@ -4,7 +4,7 @@
 # workspace Cargo.toml. This file holds lint *parameters* — thresholds, paths,
 # and other tuning knobs that clippy reads separately.
 
-msrv = "1.81"
+msrv = "1.88"
 too-many-arguments-threshold = 10
 type-complexity-threshold = 300
 trivial-copy-size-limit = 8

@@ -215,7 +215,7 @@ fn run_threaded_insert(
         }
 
         // Progress update every 10 chunks
-        if chunks_received % 10 == 0 {
+        if chunks_received.is_multiple_of(10) {
             let elapsed = start.elapsed();
             let rows_so_far = sender.total_rows();
             let rate = rows_so_far as f64 / elapsed.as_secs_f64();

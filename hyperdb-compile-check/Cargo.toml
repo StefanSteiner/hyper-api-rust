@@ -10,7 +10,7 @@ name = "hyperdb-compile-check"
 version = "0.7.3"
 # x-release-please-end
 edition = "2021"
-rust-version = "1.81"
+rust-version = "1.88"
 description = "Compile-time SQL validation logic for hyperdb-api (not a proc-macro)"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/tableau/hyper-api-rust"

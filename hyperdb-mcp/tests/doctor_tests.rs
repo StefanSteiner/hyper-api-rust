@@ -837,7 +837,7 @@ fn non_utf8_overlong_path(root: &Path) -> OsString {
 
     let mut bytes = root.as_os_str().as_bytes().to_vec();
     bytes.extend_from_slice(b"/hyperd-\xff-");
-    bytes.extend(std::iter::repeat(b'x').take(5 * 1024));
+    bytes.extend(std::iter::repeat_n(b'x', 5 * 1024));
     OsString::from_vec(bytes)
 }
 

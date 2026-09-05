@@ -53,7 +53,7 @@ use super::statement::Column;
 fn decode_bytea_hex(data: &[u8]) -> Option<Vec<u8>> {
     if data.len() >= 2 && data[0] == b'\\' && data[1] == b'x' {
         let hex_data = &data[2..];
-        if hex_data.len() % 2 != 0 {
+        if !hex_data.len().is_multiple_of(2) {
             return None;
         }
         let mut result = Vec::with_capacity(hex_data.len() / 2);
@@ -152,7 +152,7 @@ impl Row {
     pub fn is_null(&self, idx: usize) -> bool {
         self.ranges
             .get(idx)
-            .map_or(true, std::option::Option::is_none)
+            .is_none_or(std::option::Option::is_none)
     }
 
     #[inline]
@@ -514,7 +514,7 @@ impl BatchRow {
     pub fn is_null(&self, idx: usize) -> bool {
         self.offsets
             .get(idx)
-            .map_or(true, std::option::Option::is_none)
+            .is_none_or(std::option::Option::is_none)
     }
 
     /// Gets an i16 value.

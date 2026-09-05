@@ -366,7 +366,7 @@ impl DataCloudTokenProvider {
         let token_changed = self
             .cached_oauth_token
             .as_ref()
-            .map_or(true, |old| old.token != oauth_response.access_token);
+            .is_none_or(|old| old.token != oauth_response.access_token);
 
         debug!(
             instance_url = %oauth_response.instance_url,

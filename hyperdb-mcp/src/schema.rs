@@ -556,12 +556,12 @@ pub fn widen_csv_numeric_columns<R: std::io::Read>(
                 if s.has_decimal {
                     col.hyper_type = "DOUBLE PRECISION".into();
                 } else if s.overflow_i128
-                    || !s.min.map_or(true, |m| i64_range.contains(&m))
-                    || !s.max.map_or(true, |m| i64_range.contains(&m))
+                    || !s.min.is_none_or(|m| i64_range.contains(&m))
+                    || !s.max.is_none_or(|m| i64_range.contains(&m))
                 {
                     col.hyper_type = "NUMERIC(38,0)".into();
-                } else if !s.min.map_or(true, |m| i32_range.contains(&m))
-                    || !s.max.map_or(true, |m| i32_range.contains(&m))
+                } else if !s.min.is_none_or(|m| i32_range.contains(&m))
+                    || !s.max.is_none_or(|m| i32_range.contains(&m))
                 {
                     col.hyper_type = "BIGINT".into();
                 }
@@ -570,8 +570,8 @@ pub fn widen_csv_numeric_columns<R: std::io::Read>(
                 if s.has_decimal {
                     col.hyper_type = "DOUBLE PRECISION".into();
                 } else if s.overflow_i128
-                    || !s.min.map_or(true, |m| i64_range.contains(&m))
-                    || !s.max.map_or(true, |m| i64_range.contains(&m))
+                    || !s.min.is_none_or(|m| i64_range.contains(&m))
+                    || !s.max.is_none_or(|m| i64_range.contains(&m))
                 {
                     col.hyper_type = "NUMERIC(38,0)".into();
                 }

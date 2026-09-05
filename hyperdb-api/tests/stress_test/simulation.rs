@@ -417,7 +417,7 @@ fn user_thread_loop(
         }
 
         // Periodic progress (every 1000 ops)
-        if op_count % 1000 == 0 {
+        if op_count.is_multiple_of(1000) {
             eprintln!(
                 "[stress-user-{}] {} ops completed ({:.1}s elapsed)",
                 desc.user_id,
