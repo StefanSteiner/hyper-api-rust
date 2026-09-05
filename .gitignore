@@ -1,5 +1,8 @@
-# Rust build artifacts
+# Rust build artifacts. `hyperdb-compile-check` declares its own [workspace],
+# so building it produces a second target/ that a root-anchored /target does
+# not cover — hence the unanchored pattern as well.
 /target
+**/target/
 
 # Local profiling / benchmarking scratch dirs
 /target-prof
@@ -8,6 +11,10 @@
 
 # Editor / IDE
 /.vscode
+
+# Python bytecode cache (e.g. from .github/scripts)
+__pycache__/
+*.py[cod]
 
 # hyperd binary downloaded via `make download-hyperd`
 /.hyperd
