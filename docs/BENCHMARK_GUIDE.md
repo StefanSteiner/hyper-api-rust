@@ -176,7 +176,7 @@ block from the suite's stdout.
 
 **Headline takeaways (Rust, macOS / M3 Max):**
 
-- **Parallel reads are the standout** — `query.full_scan × 4` reaches **73 M rows/s / 1763 MB/s**, a 2.4× wall-clock speedup over the single-connection sync scan. Parallel inserts lead too, with `AsyncArrowInserter × 4` at **48 M rows/s / 1163 MB/s**.
+- **Parallel reads are the standout** — `query.full_scan × 4` reaches roughly **73 M rows/s / 1763 MB/s**, very approximately 2× the single-connection sync scan. Parallel inserts lead too, at roughly **48 M rows/s** for `AsyncArrowInserter × 4`. Per the note above these are order-of-magnitude figures, so do not read a precise speedup ratio out of them; the single-connection rows are the ones with a tight enough spread to compare.
 - **Sync beats async on single-connection reads.** `query.full_scan` sync runs 31.1 M rows/s against async's 24.9 M rows/s, and `query.filtered` 33.2 vs 26.9 M rows/s. Async wins only once it can use multiple connections, so prefer the sync path for a single streaming consumer and reach for async when you have concurrency to exploit.
 - **Async still wins single-connection *inserts*** — `AsyncArrowInserter` at 29.8 M rows/s versus sync `Inserter` at 25.0 M rows/s.
 - **Single-connection scans are much faster than the previous entry** (18.8 → 31.1 M rows/s sync full-scan). Note this is *not* a controlled comparison: the prior numbers were taken on a different `hyperd`, rustc 1.94, and macOS 26.4, so the gain cannot be attributed to any single change.
@@ -216,6 +216,30 @@ eager scan exhausts the heap. For large reads through
 > unreliable. The sub-10 ms measurements in particular are dominated by one
 > GC pause or JIT decision.
 
+#### Rust suite — 10M rows per workload, 4 parallel workers
+
+Same host and `hyperd` as the 100M table above, collected separately on
+2026-09-05 (median of 5 runs). This exists so the Rust-vs-Node comparison
+below is checkable: that comparison runs both harnesses at 10M, and quoting
+Rust figures with only a 100M table published made them impossible to verify.
+
+| Workload | Variant | Flavor | Rows | Time (s) | Rows/sec | MB/sec |
+|---|---|---|---:|---:|---:|---:|
+| insert.bulk | AsyncArrowInserter | async | 10.00M | 0.354 | 28.27 M/s | 678.5 |
+| insert.bulk | AsyncArrowInserter × 4 | async | 10.00M | 0.263 | 37.97 M/s | 911.2 |
+| insert.bulk | ChunkSender × 4 | sync | 10.00M | 0.435 | 23.00 M/s | 551.9 |
+| insert.bulk | Inserter (HyperBinary) | sync | 10.00M | 0.423 | 23.64 M/s | 567.4 |
+| insert.bulk | spawn_blocking+ChunkSender × 4 | async | 10.00M | 0.271 | 36.86 M/s | 884.7 |
+| query.aggregation | 4 parallel connections | async | 40 | 0.035 | 1 K/s | 0.0 |
+| query.aggregation | single connection | async | 10 | 0.007 | 1 K/s | 0.0 |
+| query.aggregation | single connection | sync | 10 | 0.007 | 1 K/s | 0.0 |
+| query.filtered | 4 parallel connections | async | 1.00M | 0.042 | 23.84 M/s | 286.0 |
+| query.filtered | single connection | async | 1.00M | 0.040 | 25.29 M/s | 303.5 |
+| query.filtered | single connection | sync | 1.00M | 0.032 | 31.42 M/s | 377.1 |
+| query.full_scan | 4 parallel connections | async | 10.00M | 0.180 | 55.43 M/s | 1330.4 |
+| query.full_scan | single connection | async | 10.00M | 0.405 | 24.69 M/s | 592.6 |
+| query.full_scan | single connection | sync | 10.00M | 0.322 | 31.03 M/s | 744.6 |
+
 #### Rust vs Node.js — 10M apples-to-apples
 
 Same schema, same dataset shape, **both harnesses run at 10M rows** so the
@@ -225,10 +249,10 @@ building the Arrow table, and IPC-serializing it, all inside the measurement.
 
 | Workload | Rust (best) | Node (best) | Rust factor |
 |---|---|---|---:|
-| insert.bulk | AsyncArrowInserter × 4 — 37.8 M/s / 907.9 MB/s | **ArrowInserter — 41.3 M/s / 991.7 MB/s** | **0.9× (Node ahead)** |
-| insert.bulk (row API) | sync Inserter — **23.1 M/s / 553.1 MB/s** | RowInserter — 2.15 M/s / 51.5 MB/s | ~11× (CPU-bound JS encode) |
-| query.full_scan | async × 4 — **54.3 M/s / 1302 MB/s** | executeQueryToArrow — 28.6 M/s / 685.7 MB/s | 1.9× |
-| query.filtered | sync — **31.0 M/s / 372.2 MB/s** | executeQueryToArrow — 20.0 M/s / 480.0 MB/s | 1.6× |
+| insert.bulk | AsyncArrowInserter × 4 — 37.97 M/s / 911.2 MB/s | **ArrowInserter — 41.3 M/s / 991.7 MB/s** | **0.9× (Node ahead)** |
+| insert.bulk (row API) | sync Inserter — **23.64 M/s / 567.4 MB/s** | RowInserter — 2.15 M/s / 51.5 MB/s | ~11× (CPU-bound JS encode) |
+| query.full_scan | async × 4 — **55.43 M/s / 1330.4 MB/s** | executeQueryToArrow — 28.6 M/s / 685.7 MB/s | 1.9× |
+| query.filtered | sync — **31.42 M/s / 377.1 MB/s** | executeQueryToArrow — 20.0 M/s / 480.0 MB/s | 1.6× |
 | query.aggregation | sync — ~1 K/s | GROUP BY — 167 M/s | — (server-side; both latency-bound) |
 
 Reading: on the **Arrow-IPC ingest path Node is at parity with Rust, and at
