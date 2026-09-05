@@ -13,6 +13,20 @@ test_results/
 # so hand-editing it is undone by the next refresh.
 hyperdb-mcp/scripts/dc_sql_reference.md
 
+# Root changelog only -- release-please generates it (the sole changelog-path
+# in release-please-config.json), so hand-fixes are clobbered on the next
+# release. The leading slash is load-bearing: an unanchored "CHANGELOG.md"
+# would also hide the nine hand-maintained per-crate changelogs, which are in
+# scope. (markdownlint-cli2 matches its own list as globs, not gitignore
+# patterns, so the equivalent entry there needs no slash.)
+/CHANGELOG.md
+
+# Point-in-time planning artifacts (see AGENTS.md "Documentation
+# Conventions"): a spec and plan are written before a feature, reviewed
+# alongside the change that implements it, and then not maintained.
+# Reflowing prose in a settled record is churn no reader benefits from.
+docs/superpowers/
+
 # npm platform sub-packages: packaging boilerplate, largely generated
 hyperdb-api-node/npm/
 hyperdb-mcp/npm/
