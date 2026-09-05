@@ -10,7 +10,7 @@ For documentation conventions specific to JavaScript/TypeScript, see the [Docume
 
 `hyperdb-api-node` is a **napi-rs** native addon that exposes the Rust `hyperdb-api` crate to JavaScript and TypeScript. The Rust side (`src/*.rs`) compiles to a `.node` shared library; the JS side (`index.js`, `index.d.ts`, `pool.mjs`, `arrow.mjs`) adds ergonomic wrappers on top.
 
-```
+```text
 ┌──────────────────────────────────────────────────┐
 │  JS/TS application code                          │
 ├──────────────────────────────────────────────────┤

@@ -198,7 +198,7 @@ This is a cross-crate change. Start at the bottom of the stack:
 
 ### Test Structure
 
-```
+```text
 hyperdb-api/tests/              # Integration tests (require live hyperd)
 hyperdb-api/tests/common/       # Shared test utilities (TestConnection)
 hyperdb-api/src/result.rs       # Unit tests (arrow_path_tests, no hyperd needed)

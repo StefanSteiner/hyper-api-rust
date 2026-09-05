@@ -29,7 +29,7 @@ encoding, use LittleEndian for the value bytes. The inline doc comments in
 
 ### Module Layout
 
-```
+```text
 src/
   lib.rs              # Crate root, re-exports
   message/

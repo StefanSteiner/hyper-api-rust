@@ -9,7 +9,7 @@ see [README.md](README.md).
 `hyperdb-api-node` is a three-layer stack: pure-JS extensions on top of napi-rs
 bindings on top of the Rust `hyperdb-api` crate.
 
-```
+```text
 ┌───────────────────────────────────────────────────────┐
 │  JS extensions                                        │
 │  index.js   — native loader + tagged templates,       │

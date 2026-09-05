@@ -51,7 +51,7 @@ the GitHub Release after merging the release PR) or via manual
 `workflow_dispatch` with an explicit tag input (for re-runs or
 emergency releases). Structure:
 
-```
+```text
 verify          ← full test suite + hyperd URL check, single-platform
    │
    └─► publish          ← crates.io publish in dependency order
@@ -104,7 +104,7 @@ without needing Rust toolchains or manual hyperd setup.
 
 **Structure:**
 
-```
+```text
 verify-ci       ← checks that CI passed for this commit (gh api commit status)
    │
    └─► build-npm (matrix × 4 platforms)
@@ -340,7 +340,7 @@ semver: `feat!:` will bump `1.2.3` → `2.0.0` as expected. To stabilize
 the API and cut `1.0.0`, add a `Release-As: 1.0.0` footer to a
 conventional-commit on `main`:
 
-```
+```text
 feat: stabilize public API
 
 Release-As: 1.0.0
@@ -351,7 +351,7 @@ Release-As: 1.0.0
 For an `-rc.N` / `-alpha.N` / `-beta.N` release, add a footer to a
 commit on `main`:
 
-```
+```text
 Release-As: 0.2.0-rc.1
 ```
 

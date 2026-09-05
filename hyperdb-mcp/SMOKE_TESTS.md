@@ -66,7 +66,7 @@ it started in. The final section is a verification checklist for that.
 - The `hyperdb` MCP tools connected and responding.
 - Confirm the server is up and note its mode before you start:
 
-```
+```text
 status
 ```
 
@@ -122,7 +122,7 @@ resource.
 
 ## 2. Create / read / overwrite (upsert)
 
-```
+```text
 kv_set   store=smoke key=greeting value="hello world"     → {"stored": true, "created": true, "value_bytes": 11, "store": "smoke", "key": "greeting", "resolved_database": "local"}
 kv_get   store=smoke key=greeting                          → {"found": true, "value": "hello world", "resolved_database": "local"}
 kv_get   store=smoke key=does_not_exist                    → {"found": false, "value": null, "resolved_database": "local"}
@@ -132,7 +132,7 @@ A miss is **not** an error — `found: false` with a `null` value.
 
 Batch writes are atomic and validate every key before writing:
 
-```
+```text
 kv_set_many store=smoke_batch entries=[{"key":"batch_a","value":"A"},{"key":"batch_b","value":"B"}]
   → {"stored": 2, "created": 2, "overwritten": 0, "total_bytes": 2, "resolved_database": "local"}
 kv_list store=smoke_batch
@@ -144,7 +144,7 @@ kv_clear store=smoke_batch
 **Overwrite must not create a duplicate row** (the backing table is
 indexless; `kv_set` is an app-side upsert):
 
-```
+```text
 kv_size  store=smoke                                       → {"store": "smoke", "size": 1, "bytes": 11, "resolved_database": "local"}
 kv_set   store=smoke key=greeting value="HELLO AGAIN"      → {"stored": true, "resolved_database": "local", ...}
 kv_size  store=smoke                                       → {"store": "smoke", "size": 1, "bytes": 11, "resolved_database": "local"}   # still 1, not 2
@@ -157,7 +157,7 @@ kv_get   store=smoke key=greeting                          → {"found": true, "
 
 Seed a few keys, then list:
 
-```
+```text
 kv_set store=smoke key=alpha   value=1
 kv_set store=smoke key=bravo   value=2
 kv_set store=smoke key=charlie value=3
@@ -175,7 +175,7 @@ emptied store disappears from the list; see §5).
 
 ## 4. Value fidelity — JSON, empty, large
 
-```
+```text
 kv_set store=smoke key=config    value='{"retries": 3, "nested": {"flag": true}}'
 kv_get store=smoke key=config    → {"found": true, "value": "{\"retries\": 3, \"nested\": {\"flag\": true}}", "resolved_database": "local"}   # byte-for-byte
 
@@ -195,7 +195,7 @@ must stay distinct from a miss `{"found": false, "value": null}`.
 
 **Delete is idempotent and reports whether the key existed:**
 
-```
+```text
 kv_delete store=smoke key=greeting        → {"deleted": true, "resolved_database": "local", ...}   # existed
 kv_delete store=smoke key=greeting        → {"deleted": false, "resolved_database": "local", ...}   # already gone — no error
 kv_delete store=smoke key=never_existed   → {"deleted": false, "resolved_database": "local", ...}
@@ -204,7 +204,7 @@ kv_delete store=smoke key=never_existed   → {"deleted": false, "resolved_datab
 **`kv_pop` destructively removes the lowest-keyed entry** (a work-queue
 drain in ascending key order):
 
-```
+```text
 # with keys [alpha, bravo, charlie, config, empty_val, big_blob] present
 kv_pop store=smoke   → {"found": true, "key": "alpha",    "value": "1",   "resolved_database": "local"}
 kv_pop store=smoke   → {"found": true, "key": "big_blob", "value": "...", "resolved_database": "local"}   # 'b' < 'c'
@@ -213,7 +213,7 @@ kv_pop store=smoke   → {"found": true, "key": "bravo",    "value": "2",   "res
 
 **`kv_clear` empties the store and returns the count removed:**
 
-```
+```text
 kv_size  store=smoke   → {"store": "smoke", "size": N, "bytes": B, "resolved_database": "local"}
 kv_clear store=smoke   → {"store": "smoke", "removed": N, "resolved_database": "local"}
 kv_size  store=smoke   → {"store": "smoke", "size": 0, "bytes": 0, "resolved_database": "local"}
@@ -224,7 +224,7 @@ of the remaining values' UTF-8 byte lengths at that point.
 
 **Empty-store edge cases:**
 
-```
+```text
 kv_pop   store=smoke   → {"found": false, "resolved_database": "local"}          # nothing to pop
 kv_clear store=smoke   → {"store": "smoke", "removed": 0, "resolved_database": "local"}   # idempotent
 kv_list_stores         → {"count": 0, "stores": [], "resolved_database": "local"}   # emptied store drops out
@@ -238,7 +238,7 @@ kv_list_stores         → {"count": 0, "stores": [], "resolved_database": "loca
 Violations are rejected as **`INVALID_ARGUMENT`** (not `INTERNAL_ERROR`)
 with a message that names the offending byte or the actual length:
 
-```
+```text
 kv_set store=smoke      key="has a space" value=x
   → error INVALID_ARGUMENT: "invalid name: KV key contains an invalid byte 0x20; allowed: A-Z a-z 0-9 _ . -"
 
@@ -260,7 +260,7 @@ Only relevant when the server runs with `--read-only` (`status` shows
 `"read_only": true`). Start such a server yourself for this check — do not
 assume the shared daemon is read-only.
 
-```
+```text
 # readers work:
 kv_get store=smoke key=k    → {"found": false, "value": null, "resolved_database": "local"}
 kv_list store=smoke         → {"store": "smoke", "count": 0, "keys": [], "resolved_database": "local"}
@@ -299,7 +299,7 @@ an explicit `database` wins over `persist: true` (for example,
 `database=PeRsIsTeNt` resolves to `persistent`; mixed-case attached aliases
 resolve to the registry's lowercase alias.
 
-```
+```text
 kv_set store=smoke_routing key=where  value="local"                           # → local (default)
 kv_set store=smoke_routing key=where  value="persistent" database=persistent  # → persistent
 kv_set store=smoke_routing key=where2 value="via-flag"    persist=true        # → persistent (same DB)
@@ -329,7 +329,7 @@ The backing table `_hyperdb_kv_store(store_name, key, value)` is hidden from
 store: annotate analytical rows with scratchpad metadata via a plain SQL
 join. **Run this in the local DB** (create a `smoke_`-prefixed table):
 
-```
+```text
 kv_set store=product_notes key=P1 value="flagship - review pricing Q3"
 kv_set store=product_notes key=P3 value="discontinue candidate"
 
@@ -351,7 +351,7 @@ Expected: P1 and P3 carry their notes; **P2 survives with `note: null`**
 
 ## 10. Table is hidden but accessible
 
-```
+```text
 describe                    → table list does NOT include _hyperdb_kv_store
 query SELECT COUNT(*) FROM _hyperdb_kv_store   → succeeds (directly queryable)
 ```
@@ -388,7 +388,7 @@ DB constraint — that limitation is documented, not a smoke-test failure.)
 Purge every scratch store and table, then confirm the databases are back to
 their starting state:
 
-```
+```text
 kv_clear store=smoke
 kv_clear store=smoke_routing
 kv_clear store=smoke_routing database=persistent
