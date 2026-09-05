@@ -1,5 +1,49 @@
 # Changelog
 
+## [1.0.0-rc.1](https://github.com/tableau/hyper-api-rust/compare/v0.7.3...v1.0.0-rc.1) (2026-09-05)
+
+
+### ⚠ BREAKING CHANGES
+
+* uplift to Rust 1.88 / edition 2024 and add a RHEL rust-toolset gate ([#250](https://github.com/tableau/hyper-api-rust/issues/250))
+* **deps:** bump arrow/parquet to 59, removing the thrift advisory
+* **api:** replace the deprecated transaction methods with *_unguarded
+* **deps:** drop the aws-lc-rs crypto provider in favour of ring
+* **node:** reject integer narrowing instead of silently truncating
+* **toolchain:** migrate the workspace to Rust edition 2024
+* **toolchain:** raise MSRV floor to Rust 1.88
+
+### Features
+
+* **api:** replace the deprecated transaction methods with *_unguarded ([bd9dc6d](https://github.com/tableau/hyper-api-rust/commit/bd9dc6dffdce9a8b4d25d5082ffa74eb50609cf1))
+* **node:** reject integer narrowing instead of silently truncating ([82db12d](https://github.com/tableau/hyper-api-rust/commit/82db12ddd2cbfd2756249a5cf532db2fe24aff28))
+* **toolchain:** flatten 127 nested conditionals into let chains ([352a0c4](https://github.com/tableau/hyper-api-rust/commit/352a0c433f26d8c780a0a9cccadc1a75fc506c6a))
+* **toolchain:** migrate the workspace to Rust edition 2024 ([efbf704](https://github.com/tableau/hyper-api-rust/commit/efbf7043e925565d67c0af44edca6d6b082153bc))
+* **toolchain:** raise MSRV floor to Rust 1.88 ([091327c](https://github.com/tableau/hyper-api-rust/commit/091327cba856fcb35d8d52652037f4c6957c5e2c))
+* uplift to Rust 1.88 / edition 2024 and add a RHEL rust-toolset gate ([#250](https://github.com/tableau/hyper-api-rust/issues/250)) ([567f819](https://github.com/tableau/hyper-api-rust/commit/567f819f95b00e933296a15fb9a1df619da4c12a))
+
+
+### Bug Fixes
+
+* **deps:** bump arrow/parquet to 59, removing the thrift advisory ([3cb4b26](https://github.com/tableau/hyper-api-rust/commit/3cb4b266b40216139506e82b7deb3b5005875c1b))
+* **deps:** drop the aws-lc-rs crypto provider in favour of ring ([909127c](https://github.com/tableau/hyper-api-rust/commit/909127ce4bafe996b462fed7442c73636979d264))
+* **docs:** restore README structure mangled by a markdown formatter ([2b275ea](https://github.com/tableau/hyper-api-rust/commit/2b275ea097528bbda535a8b68aba94eb955ce1ae))
+* ignore nested target/ dirs and Python bytecode caches ([e87e7ec](https://github.com/tableau/hyper-api-rust/commit/e87e7ecb909dd0bd43bf9a7f5074a95c22ce30f5))
+* **protocol:** remove a latent usize overflow in the variable-length readers ([d7157c3](https://github.com/tableau/hyper-api-rust/commit/d7157c3587383325af6d2e87f6b75525c3c02870))
+* **release:** unblock prerelease versions in CI ([224890a](https://github.com/tableau/hyper-api-rust/commit/224890a5d5a73d6ce0b81230ee38c8568ba804ac))
+* **release:** unblock prerelease versions in CI ([#252](https://github.com/tableau/hyper-api-rust/issues/252)) ([0b111b3](https://github.com/tableau/hyper-api-rust/commit/0b111b32bc4fa44a1c740931ceadd15f5998d755))
+* **tls:** install the ring crypto provider before building HTTP clients ([0cb8a36](https://github.com/tableau/hyper-api-rust/commit/0cb8a36fc36bb99c4917e6acd5fa0d28d9d711d7))
+
+
+### Performance Improvements
+
+* **node:** split the columnar Int32 narrowing into two passes ([3b8a5b4](https://github.com/tableau/hyper-api-rust/commit/3b8a5b49484808f05a2cc5d9166b23922f2e0eaa))
+
+
+### Miscellaneous Chores
+
+* release 1.0.0-rc.1 ([7bf2dff](https://github.com/tableau/hyper-api-rust/commit/7bf2dff0909c4d39ec33cdf320bc190f88618ead))
+
 ## [0.7.3](https://github.com/tableau/hyper-api-rust/compare/v0.7.2...v0.7.3) (2026-08-28)
 
 ### Bug Fixes
