@@ -1,4 +1,4 @@
-.PHONY: clean clean-test-files clean-doc build build-api build-release build-api-release test test-api test-release test-api-release doc examples download-hyperd verify-hyperd-pin npm-pack check-rhel
+.PHONY: clean clean-test-files clean-doc build build-api build-release build-api-release test test-api test-release test-api-release doc examples download-hyperd verify-hyperd-pin npm-pack check-rhel help
 
 # Environment variables for runtime
 # HYPERD_PATH points to the Hyper server executable.
