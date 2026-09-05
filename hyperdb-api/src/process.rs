@@ -256,7 +256,7 @@ impl HyperProcess {
     /// directory containing it.
     ///
     /// If `HYPERD_PATH` is unset, returns an error instructing the caller
-    /// to either set it or run the `hyperd-bootstrap` downloader to
+    /// to either set it or run the `hyperdb-bootstrap` downloader to
     /// install a pinned release at `.hyperd/current/hyperd`.
     fn find_hyperd() -> Result<PathBuf> {
         #[cfg(windows)]
@@ -266,7 +266,7 @@ impl HyperProcess {
 
         let Ok(path_str) = std::env::var("HYPERD_PATH") else {
             // Walk up from CWD looking for .hyperd/current/<exe> written by
-            // `hyperd-bootstrap download`. This lets `node examples/foo.mjs`
+            // `hyperdb-bootstrap download`. This lets `node examples/foo.mjs`
             // run from any subdirectory of the repo without exporting HYPERD_PATH.
             if let Ok(cwd) = std::env::current_dir() {
                 let mut dir = cwd.as_path();
@@ -283,7 +283,7 @@ impl HyperProcess {
             }
             return Err(Error::config(
                 "HYPERD_PATH is not set. Point it at a hyperd executable, \
-                or run `make download-hyperd` (or `cargo run -p hyperd-bootstrap -- download`) \
+                or run `make download-hyperd` (or `cargo run -p hyperdb-bootstrap -- download`) \
                 to install a pinned release at `.hyperd/current/hyperd`.",
             ));
         };

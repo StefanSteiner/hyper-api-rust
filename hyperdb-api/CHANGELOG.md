@@ -29,6 +29,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   unmatched begin wedges the session in a way reconnect logic cannot clear.
   Reach for them only when the guard's `&mut self` borrow is impossible.
 
+### Fixed
+
+- The `HYPERD_PATH is not set` error suggested
+  `cargo run -p hyperd-bootstrap -- download`, a package that has not existed
+  since the rename to `hyperdb-bootstrap`. The command failed with
+  "package(s) `hyperd-bootstrap` not found in workspace", which is the first
+  thing a new user saw when `HYPERD_PATH` was unset.
+
 ### Changed
 
 - **BREAKING:** the `arrow` dependency moved from **58** to **59**. Arrow types

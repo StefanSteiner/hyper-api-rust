@@ -1,4 +1,4 @@
-# Pinned Hyper **Java** API release used by hyperd-bootstrap.
+# Pinned Hyper **Java** API release used by hyperdb-bootstrap.
 #
 # We pull `hyperd` from the Java binding's bundle, NOT the C++ one: the
 # C++ macos-arm64 zip ships an x86_64 `hyperd` (upstream packaging defect),

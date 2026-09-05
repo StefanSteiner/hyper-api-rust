@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- The "no hyperd installed" error suggested `hyperd-bootstrap download`, but
+  the binary is `hyperdb-bootstrap` — the suggested command did not exist.
+  Doc comments across the crate carried the same pre-rename name, as did the
+  `hyperdb-bootstrap/hyperd-version.toml` path in `release.rs`.
+
 ### Changed
 
 - **BREAKING:** the minimum supported Rust version is now **1.88**, up from
