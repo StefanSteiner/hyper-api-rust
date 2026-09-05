@@ -640,28 +640,28 @@ pub fn collect_doctor_report(
     if let Some(warning) = hyperd_resolution.warning {
         warnings.push(warning);
     }
-    if let Some(verified) = daemon_report.verified.as_ref() {
-        if let Some(identity) = verified.record.identity() {
-            if identity.mcp_version() != installation.mcp.source {
-                warnings.push(doctor_warning(
-                    "daemon_client_build_mismatch",
-                    format!(
-                        "The live daemon MCP build '{}' differs from this client build '{}'.",
-                        identity.mcp_version(),
-                        installation.mcp.source
-                    ),
-                ));
-            }
-            if identity.executable_path() != &installation.native_executable {
-                warnings.push(doctor_warning(
-                    "daemon_client_executable_mismatch",
-                    format!(
-                        "The live daemon executable '{}' differs from this client executable '{}'.",
-                        identity.executable_path().display,
-                        installation.native_executable.display
-                    ),
-                ));
-            }
+    if let Some(verified) = daemon_report.verified.as_ref()
+        && let Some(identity) = verified.record.identity()
+    {
+        if identity.mcp_version() != installation.mcp.source {
+            warnings.push(doctor_warning(
+                "daemon_client_build_mismatch",
+                format!(
+                    "The live daemon MCP build '{}' differs from this client build '{}'.",
+                    identity.mcp_version(),
+                    installation.mcp.source
+                ),
+            ));
+        }
+        if identity.executable_path() != &installation.native_executable {
+            warnings.push(doctor_warning(
+                "daemon_client_executable_mismatch",
+                format!(
+                    "The live daemon executable '{}' differs from this client executable '{}'.",
+                    identity.executable_path().display,
+                    installation.native_executable.display
+                ),
+            ));
         }
     }
     warnings.push(doctor_warning(

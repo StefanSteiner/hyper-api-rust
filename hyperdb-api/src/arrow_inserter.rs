@@ -506,10 +506,10 @@ impl<'conn> ArrowInserter<'conn> {
             let buf = ipc.into_inner().map_err(|e| {
                 Error::conversion(format!("Failed to finalize Arrow IPC stream: {e}"))
             })?;
-            if !buf.is_empty() {
-                if let Some(ref mut writer) = self.writer {
-                    writer.send_direct(&buf)?;
-                }
+            if !buf.is_empty()
+                && let Some(ref mut writer) = self.writer
+            {
+                writer.send_direct(&buf)?;
             }
         }
 

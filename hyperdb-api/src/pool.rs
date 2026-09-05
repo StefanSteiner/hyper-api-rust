@@ -506,15 +506,15 @@ impl Manager for ConnectionManager {
         // Retire connections that have outlived their configured caps before
         // spending a round-trip probing them. Returning a `Message` error evicts
         // the connection; deadpool then builds a fresh one transparently.
-        if let Some(max_lifetime) = self.config.max_lifetime {
-            if metrics.age() >= max_lifetime {
-                return Err(RecycleError::message("connection exceeded max_lifetime"));
-            }
+        if let Some(max_lifetime) = self.config.max_lifetime
+            && metrics.age() >= max_lifetime
+        {
+            return Err(RecycleError::message("connection exceeded max_lifetime"));
         }
-        if let Some(idle_timeout) = self.config.idle_timeout {
-            if metrics.last_used() >= idle_timeout {
-                return Err(RecycleError::message("connection exceeded idle_timeout"));
-            }
+        if let Some(idle_timeout) = self.config.idle_timeout
+            && metrics.last_used() >= idle_timeout
+        {
+            return Err(RecycleError::message("connection exceeded idle_timeout"));
         }
 
         // Active health probe per the configured strategy.
@@ -828,10 +828,10 @@ impl SyncPoolInner {
     /// so keeps the live count at or above `min_idle` (idle connections are kept
     /// warm down to that floor).
     fn should_evict(&self, idle: &IdleConn, live_size: usize) -> bool {
-        if let Some(max_lifetime) = self.config.max_lifetime {
-            if idle.created.elapsed() >= max_lifetime {
-                return true;
-            }
+        if let Some(max_lifetime) = self.config.max_lifetime
+            && idle.created.elapsed() >= max_lifetime
+        {
+            return true;
         }
         if let Some(idle_timeout) = self.config.idle_timeout {
             let min_idle = self.config.min_idle.unwrap_or(0) as usize;

@@ -249,8 +249,7 @@ fn resolve_output_dir(config: &SimulationConfig) -> PathBuf {
     if let Some(ref dir) = config.output_dir {
         dir.clone()
     } else {
-        let dir = std::env::temp_dir().join(format!("hyper_stress_{}", std::process::id()));
-        dir
+        std::env::temp_dir().join(format!("hyper_stress_{}", std::process::id()))
     }
 }
 

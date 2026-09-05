@@ -515,16 +515,17 @@ where
         // Common case: ADAPTIVE with a small result that fit entirely in
         // chunk 0 (delivered inline). `next_server_chunk_id` starts at 1
         // and `chunk_count` is 1, so we skip straight to Finished.
-        if let Some(ref status) = self.query_status {
-            if status.chunk_count > 0 && self.next_server_chunk_id >= status.chunk_count {
-                debug!(
-                    total_chunks = status.chunk_count,
-                    next_chunk = self.next_server_chunk_id,
-                    "No more chunks to fetch",
-                );
-                self.state = ExecutorState::Finished;
-                return Ok(());
-            }
+        if let Some(ref status) = self.query_status
+            && status.chunk_count > 0
+            && self.next_server_chunk_id >= status.chunk_count
+        {
+            debug!(
+                total_chunks = status.chunk_count,
+                next_chunk = self.next_server_chunk_id,
+                "No more chunks to fetch",
+            );
+            self.state = ExecutorState::Finished;
+            return Ok(());
         }
 
         let query_id = self

@@ -363,12 +363,11 @@ impl Engine {
         })?;
 
         // Try daemon mode first unless disabled
-        if !no_daemon {
-            if let Some(engine) =
+        if !no_daemon
+            && let Some(engine) =
                 Self::try_daemon_mode(&ephemeral_path, persistent_path.clone(), &log_dir)?
-            {
-                return Ok(engine);
-            }
+        {
+            return Ok(engine);
         }
 
         // Fall back to spawning a local HyperProcess
@@ -709,10 +708,10 @@ impl Engine {
     {
         let key = alias.to_ascii_lowercase();
         // Fast path: cache already populated.
-        if let Ok(guard) = self.catalog_present_cache.lock() {
-            if let Some(&present) = guard.get(&key) {
-                return Ok(present);
-            }
+        if let Ok(guard) = self.catalog_present_cache.lock()
+            && let Some(&present) = guard.get(&key)
+        {
+            return Ok(present);
         }
         // Slow path: run the probe and cache its result.
         let present = prober(self)?;

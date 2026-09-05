@@ -238,10 +238,10 @@ fn extract_sqlstate(message: &str) -> Option<&str> {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.message)?;
-        if let Some(ref detail) = self.detail {
-            if !self.message.contains(detail) {
-                write!(f, ": {detail}")?;
-            }
+        if let Some(ref detail) = self.detail
+            && !self.message.contains(detail)
+        {
+            write!(f, ": {detail}")?;
         }
         if let Some(ref cause) = self.cause {
             write!(f, ": {cause}")?;

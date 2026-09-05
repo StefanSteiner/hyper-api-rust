@@ -248,33 +248,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "SELECT COUNT(*) as row_count FROM {}.{}",
                         table.schema, table.name
                     );
-                    if let Ok(result) = client.execute_query(&count_query).await {
-                        if let Ok(count_reader) =
+                    if let Ok(result) = client.execute_query(&count_query).await
+                        && let Ok(count_reader) =
                             StreamReader::try_new(Cursor::new(result.arrow_data()), None)
-                        {
-                            for count_batch in count_reader.flatten() {
-                                if let Some(count_arr) = count_batch
-                                    .column(0)
-                                    .as_any()
-                                    .downcast_ref::<arrow::array::Int64Array>()
-                                {
-                                    let row_count = count_arr.value(0);
-                                    let display = if let Some(ref dn) = table.display_name {
-                                        if dn == &table.name {
-                                            format!("{}.{}", table.schema, table.name)
-                                        } else {
-                                            format!("{} ({}.{})", dn, table.schema, table.name)
-                                        }
-                                    } else {
+                    {
+                        for count_batch in count_reader.flatten() {
+                            if let Some(count_arr) = count_batch
+                                .column(0)
+                                .as_any()
+                                .downcast_ref::<arrow::array::Int64Array>()
+                            {
+                                let row_count = count_arr.value(0);
+                                let display = if let Some(ref dn) = table.display_name {
+                                    if dn == &table.name {
                                         format!("{}.{}", table.schema, table.name)
-                                    };
-                                    println!("  {display}: {row_count} rows");
-                                    table_sizes.push((
-                                        table.schema.clone(),
-                                        table.name.clone(),
-                                        row_count,
-                                    ));
-                                }
+                                    } else {
+                                        format!("{} ({}.{})", dn, table.schema, table.name)
+                                    }
+                                } else {
+                                    format!("{}.{}", table.schema, table.name)
+                                };
+                                println!("  {display}: {row_count} rows");
+                                table_sizes.push((
+                                    table.schema.clone(),
+                                    table.name.clone(),
+                                    row_count,
+                                ));
                             }
                         }
                     }

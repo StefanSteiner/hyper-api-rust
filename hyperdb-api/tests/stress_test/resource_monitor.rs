@@ -270,10 +270,10 @@ fn extract_metric_value(v: &Value, section: &str, metric: &str) -> Option<f64> {
     if let Some(n) = metric_val.as_f64() {
         return Some(n);
     }
-    if let Some(obj) = metric_val.as_object() {
-        if let Some(val) = obj.get("value").and_then(serde_json::Value::as_f64) {
-            return Some(val);
-        }
+    if let Some(obj) = metric_val.as_object()
+        && let Some(val) = obj.get("value").and_then(serde_json::Value::as_f64)
+    {
+        return Some(val);
     }
     None
 }

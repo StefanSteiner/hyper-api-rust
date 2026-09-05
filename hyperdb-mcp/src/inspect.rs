@@ -322,11 +322,11 @@ fn inspect_csv(path: &str, file_size: u64, sample_rows: usize) -> Result<Inspect
                     s.min_i128 = Some(s.min_i128.map_or(n, |m| m.min(n)));
                     s.max_i128 = Some(s.max_i128.map_or(n, |m| m.max(n)));
                 }
-            } else if col.hyper_type == "DOUBLE PRECISION" {
-                if let Ok(n) = trimmed.parse::<f64>() {
-                    s.min_f64 = Some(s.min_f64.map_or(n, |m| m.min(n)));
-                    s.max_f64 = Some(s.max_f64.map_or(n, |m| m.max(n)));
-                }
+            } else if col.hyper_type == "DOUBLE PRECISION"
+                && let Ok(n) = trimmed.parse::<f64>()
+            {
+                s.min_f64 = Some(s.min_f64.map_or(n, |m| m.min(n)));
+                s.max_f64 = Some(s.max_f64.map_or(n, |m| m.max(n)));
             }
         }
     }

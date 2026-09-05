@@ -315,12 +315,11 @@ impl Connection {
                 if let Err(e) = self.execute_command(&format!(
                     "CREATE DATABASE IF NOT EXISTS {}",
                     escape_sql_path(database_path)
-                )) {
-                    if !is_already_exists_error(&e) {
-                        return Err(Error::internal(format!(
-                            "Failed to create database '{database_path}': {e}"
-                        )));
-                    }
+                )) && !is_already_exists_error(&e)
+                {
+                    return Err(Error::internal(format!(
+                        "Failed to create database '{database_path}': {e}"
+                    )));
                 }
             }
             CreateMode::CreateAndReplace => {
@@ -2109,10 +2108,10 @@ impl Connection {
 
     /// Internal: store the pending token+sql for lazy resolution.
     fn stats_store_pending(&self, token: Option<Box<dyn Any + Send>>, sql: &str) {
-        if let Some(token) = token {
-            if let Ok(mut guard) = self.pending_stats.lock() {
-                *guard = Some((token, sql.to_string()));
-            }
+        if let Some(token) = token
+            && let Ok(mut guard) = self.pending_stats.lock()
+        {
+            *guard = Some((token, sql.to_string()));
         }
     }
 }

@@ -368,18 +368,18 @@ pub fn write_chart_to_disk(
         ));
     }
 
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                McpError::new(
-                    ErrorCode::InternalError,
-                    format!(
-                        "Failed to create parent directory for chart '{}': {e}",
-                        path.display()
-                    ),
-                )
-            })?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            McpError::new(
+                ErrorCode::InternalError,
+                format!(
+                    "Failed to create parent directory for chart '{}': {e}",
+                    path.display()
+                ),
+            )
+        })?;
     }
 
     std::fs::write(path, bytes).map_err(|e| {
@@ -1124,10 +1124,10 @@ fn detect_line_x_mode(rows: &[Value], x_col: &str) -> XMode {
     if as_number(x_raw).is_some() {
         return XMode::Numeric;
     }
-    if let Some(s) = x_raw.as_str() {
-        if let Some((kind, _)) = parse_temporal(s) {
-            return XMode::Temporal(kind);
-        }
+    if let Some(s) = x_raw.as_str()
+        && let Some((kind, _)) = parse_temporal(s)
+    {
+        return XMode::Temporal(kind);
     }
     XMode::Categorical
 }

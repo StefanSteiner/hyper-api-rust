@@ -509,10 +509,10 @@ fn run_slow_health_mutex_child() {
     let first_report =
         receive_and_release_report(&report_seen_rx, &report_release_tx, 1, &mut failures);
     let loss_worker_result = loss_worker.join();
-    if let Some(observation) = first_report {
-        if !observation.engine_mutex_available {
-            failures.push("engine mutex was unavailable at the first slow loss report".to_string());
-        }
+    if let Some(observation) = first_report
+        && !observation.engine_mutex_available
+    {
+        failures.push("engine mutex was unavailable at the first slow loss report".to_string());
     }
     match loss_worker_result {
         Ok(Ok(ErrorCode::ConnectionLost)) => {}
@@ -551,13 +551,13 @@ fn run_slow_health_mutex_child() {
     let second_report =
         receive_and_release_report(&report_seen_rx, &report_release_tx, 2, &mut failures);
     let reinit_worker_result = reinit_worker.join();
-    if let Some(observation) = second_report {
-        if !observation.engine_mutex_available {
-            failures.push(
+    if let Some(observation) = second_report
+        && !observation.engine_mutex_available
+    {
+        failures.push(
                 "engine mutex was held while post-loss Engine initialization waited on REPORT_HYPERD_ERROR"
                     .to_string(),
             );
-        }
     }
     match reinit_worker_result {
         Ok(Ok(ErrorCode::InternalError)) => {}

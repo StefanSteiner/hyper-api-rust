@@ -1054,15 +1054,14 @@ async fn chart_mcp_presentation_options_contract() -> TestResult {
         }),
     )
     .await?;
-    if let Some((mime, bytes)) = inline_image_bytes(&mut failures, "horizontal PNG", &png_result) {
-        if mime != "image/png"
-            || !bytes.starts_with(&[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
-        {
-            failures.push(format!(
-                "horizontal PNG must carry PNG MIME/magic, got {mime} and {:?}",
-                bytes.get(..8)
-            ));
-        }
+    if let Some((mime, bytes)) = inline_image_bytes(&mut failures, "horizontal PNG", &png_result)
+        && (mime != "image/png"
+            || !bytes.starts_with(&[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+    {
+        failures.push(format!(
+            "horizontal PNG must carry PNG MIME/magic, got {mime} and {:?}",
+            bytes.get(..8)
+        ));
     }
 
     for (case, args) in [
@@ -1302,15 +1301,13 @@ async fn chart_mcp_log_scale_contract() -> TestResult {
     .await?;
     if let Some((mime, bytes)) =
         inline_image_bytes(&mut failures, "positive log PNG", &log_png_result)
+        && (mime != "image/png"
+            || !bytes.starts_with(&[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
     {
-        if mime != "image/png"
-            || !bytes.starts_with(&[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
-        {
-            failures.push(format!(
-                "log PNG must carry PNG MIME/magic, got {mime} and {:?}",
-                bytes.get(..8)
-            ));
-        }
+        failures.push(format!(
+            "log PNG must carry PNG MIME/magic, got {mime} and {:?}",
+            bytes.get(..8)
+        ));
     }
 
     for (case, args) in [
@@ -2373,13 +2370,12 @@ async fn resolved_database_query_success_shapes() -> TestResult {
                 &result,
                 "local",
                 &["resolved_database", "tables"],
-            ) {
-                if payload["tables"] != serde_json::json!([]) {
-                    failures.push(format!(
-                        "describe empty local listing: tables must remain an empty array, got {:?}",
-                        payload.get("tables")
-                    ));
-                }
+            ) && payload["tables"] != serde_json::json!([])
+            {
+                failures.push(format!(
+                    "describe empty local listing: tables must remain an empty array, got {:?}",
+                    payload.get("tables")
+                ));
             }
         }
         Err(error) => failures.push(format!(
@@ -2463,31 +2459,26 @@ async fn resolved_database_query_success_shapes() -> TestResult {
                 "INSERT INTO local_rows VALUES (2, 'second')"
             ]
         })
-    ) {
-        if let Some(payload) = record_object_response(
-            &mut failures,
-            "execute local transaction",
-            &result,
-            "local",
-            &[
-                "affected_rows",
-                "per_statement",
-                "resolved_database",
-                "statements",
-                "stats",
-            ],
-        ) {
-            if payload["statements"] != serde_json::json!(2)
-                || payload["affected_rows"] != serde_json::json!(2)
-                || payload["stats"]["operation"] != serde_json::json!("transaction")
-                || payload["per_statement"].as_array().map_or(0, Vec::len) != 2
-            {
-                failures.push(
-                    "execute local transaction: legacy transaction counters or operation changed"
-                        .into(),
-                );
-            }
-        }
+    ) && let Some(payload) = record_object_response(
+        &mut failures,
+        "execute local transaction",
+        &result,
+        "local",
+        &[
+            "affected_rows",
+            "per_statement",
+            "resolved_database",
+            "statements",
+            "stats",
+        ],
+    ) && (payload["statements"] != serde_json::json!(2)
+        || payload["affected_rows"] != serde_json::json!(2)
+        || payload["stats"]["operation"] != serde_json::json!("transaction")
+        || payload["per_statement"].as_array().map_or(0, Vec::len) != 2)
+    {
+        failures.push(
+            "execute local transaction: legacy transaction counters or operation changed".into(),
+        );
     }
     if let Some(result) = call_case!(
         "execute attached command",
@@ -2496,30 +2487,25 @@ async fn resolved_database_query_success_shapes() -> TestResult {
             "sql": ["INSERT INTO attached_rows VALUES (7)"],
             "database": "MiXeD_AtTaChEd"
         })
-    ) {
-        if let Some(payload) = record_object_response(
-            &mut failures,
-            "execute attached command",
-            &result,
-            "mixed_attached",
-            &[
-                "affected_rows",
-                "per_statement",
-                "resolved_database",
-                "statements",
-                "stats",
-            ],
-        ) {
-            if payload["statements"] != serde_json::json!(1)
-                || payload["affected_rows"] != serde_json::json!(1)
-                || payload["stats"]["operation"] != serde_json::json!("command")
-                || payload["per_statement"].as_array().map_or(0, Vec::len) != 1
-            {
-                failures.push(
-                    "execute attached command: legacy command counters or operation changed".into(),
-                );
-            }
-        }
+    ) && let Some(payload) = record_object_response(
+        &mut failures,
+        "execute attached command",
+        &result,
+        "mixed_attached",
+        &[
+            "affected_rows",
+            "per_statement",
+            "resolved_database",
+            "statements",
+            "stats",
+        ],
+    ) && (payload["statements"] != serde_json::json!(1)
+        || payload["affected_rows"] != serde_json::json!(1)
+        || payload["stats"]["operation"] != serde_json::json!("command")
+        || payload["per_statement"].as_array().map_or(0, Vec::len) != 1)
+    {
+        failures
+            .push("execute attached command: legacy command counters or operation changed".into());
     }
 
     // Query's JSON is deliberately the *second* text block. Exercise both a
@@ -2704,8 +2690,8 @@ async fn resolved_database_query_success_shapes() -> TestResult {
             1,
         ),
     ] {
-        if let Some(result) = call_case!(case, "sample", args) {
-            if let Some(payload) = record_object_response(
+        if let Some(result) = call_case!(case, "sample", args)
+            && let Some(payload) = record_object_response(
                 &mut failures,
                 case,
                 &result,
@@ -2719,18 +2705,16 @@ async fn resolved_database_query_success_shapes() -> TestResult {
                     "stats",
                     "table",
                 ],
-            ) {
-                if payload["table"] != serde_json::json!(table)
-                    || payload["row_count"] != serde_json::json!(row_count)
-                    || payload["sample_size"] != serde_json::json!(sample_size)
-                    || payload["rows"].as_array().map_or(usize::MAX, Vec::len)
-                        != usize::try_from(sample_size).expect("sample size is non-negative")
-                    || payload["schema"].as_array().map_or(0, Vec::len) == 0
-                    || payload["stats"]["operation"] != serde_json::json!("sample")
-                {
-                    failures.push(format!("{case}: legacy sample fields changed"));
-                }
-            }
+            )
+            && (payload["table"] != serde_json::json!(table)
+                || payload["row_count"] != serde_json::json!(row_count)
+                || payload["sample_size"] != serde_json::json!(sample_size)
+                || payload["rows"].as_array().map_or(usize::MAX, Vec::len)
+                    != usize::try_from(sample_size).expect("sample size is non-negative")
+                || payload["schema"].as_array().map_or(0, Vec::len) == 0
+                || payload["stats"]["operation"] != serde_json::json!("sample"))
+        {
+            failures.push(format!("{case}: legacy sample fields changed"));
         }
     }
 
@@ -2759,31 +2743,30 @@ async fn resolved_database_query_success_shapes() -> TestResult {
             Some(1),
         ),
     ] {
-        if let Some(result) = call_case!(case, "describe", args) {
-            if let Some(payload) = record_object_response(
+        if let Some(result) = call_case!(case, "describe", args)
+            && let Some(payload) = record_object_response(
                 &mut failures,
                 case,
                 &result,
                 database,
                 &["resolved_database", "tables"],
-            ) {
-                let tables = payload["tables"].as_array();
-                if tables.is_some_and(|tables| tables.len() != expected_count.unwrap_or(0)) {
-                    failures.push(format!(
-                        "{case}: describe table count changed: got {tables:?}"
-                    ));
-                }
-                if let Some(expected_table) = expected_table {
-                    if tables
-                        .and_then(|tables| tables.first())
-                        .and_then(|table| table.get("name"))
-                        != Some(&serde_json::json!(expected_table))
-                    {
-                        failures.push(format!(
-                            "{case}: describe must preserve table name {expected_table}"
-                        ));
-                    }
-                }
+            )
+        {
+            let tables = payload["tables"].as_array();
+            if tables.is_some_and(|tables| tables.len() != expected_count.unwrap_or(0)) {
+                failures.push(format!(
+                    "{case}: describe table count changed: got {tables:?}"
+                ));
+            }
+            if let Some(expected_table) = expected_table
+                && tables
+                    .and_then(|tables| tables.first())
+                    .and_then(|table| table.get("name"))
+                    != Some(&serde_json::json!(expected_table))
+            {
+                failures.push(format!(
+                    "{case}: describe must preserve table name {expected_table}"
+                ));
             }
         }
     }
@@ -2983,13 +2966,12 @@ async fn resolved_database_data_success_shapes() -> TestResult {
             "writable": true,
             "on_missing": "create"
         })
-    ) {
-        if is_error(&result) {
-            failures.push(format!(
-                "setup mixed-case data attachment: {:?}",
-                first_text(&result)
-            ));
-        }
+    ) && is_error(&result)
+    {
+        failures.push(format!(
+            "setup mixed-case data attachment: {:?}",
+            first_text(&result)
+        ));
     }
 
     if let Err(error) = h
@@ -3382,24 +3364,20 @@ async fn resolved_database_data_success_shapes() -> TestResult {
             "concurrency": 1,
             "database": "MiXeD_DaTa"
         })
-    ) {
-        if let Some(payload) = record_object_response(
-            &mut failures,
-            "load_files all entries failed remains top-level success",
-            &result,
-            "mixed_data",
-            &["resolved_database", "results", "summary"],
-        ) {
-            if payload["summary"]
-                != serde_json::json!({"total": 1, "succeeded": 0, "failed": 1, "concurrency": 1})
-                || payload["results"].as_array().map(Vec::len) != Some(1)
-                || payload["results"][0]["error"]["code"] != serde_json::json!("SchemaMismatch")
-            {
-                failures.push(format!(
+    ) && let Some(payload) = record_object_response(
+        &mut failures,
+        "load_files all entries failed remains top-level success",
+        &result,
+        "mixed_data",
+        &["resolved_database", "results", "summary"],
+    ) && (payload["summary"]
+        != serde_json::json!({"total": 1, "succeeded": 0, "failed": 1, "concurrency": 1})
+        || payload["results"].as_array().map(Vec::len) != Some(1)
+        || payload["results"][0]["error"]["code"] != serde_json::json!("SchemaMismatch"))
+    {
+        failures.push(format!(
                     "load_files all entries failed remains top-level success: legacy batch shape changed: {payload}"
                 ));
-            }
-        }
     }
 
     let canonical_watch_dir = match watch_dir.path().canonicalize() {
@@ -3418,44 +3396,42 @@ async fn resolved_database_data_success_shapes() -> TestResult {
             "database": "MiXeD_DaTa",
             "max_concurrent": 1
         })
+    ) && let Some(payload) = record_object_response(
+        &mut failures,
+        "watch_directory attached empty initial sweep",
+        &result,
+        "mixed_data",
+        &[
+            "directory",
+            "initial_sweep",
+            "max_concurrent",
+            "resolved_database",
+            "status",
+            "table",
+        ],
     ) {
-        if let Some(payload) = record_object_response(
+        record_fields(
             &mut failures,
-            "watch_directory attached empty initial sweep",
-            &result,
-            "mixed_data",
-            &[
-                "directory",
-                "initial_sweep",
-                "max_concurrent",
-                "resolved_database",
-                "status",
-                "table",
-            ],
-        ) {
-            record_fields(
-                &mut failures,
-                "watch_directory attached empty initial sweep stats",
-                &payload["initial_sweep"],
-                &["files_failed", "files_ingested"],
-            );
-            if payload["directory"]
-                != serde_json::json!(
-                    canonical_watch_dir
-                        .as_deref()
-                        .unwrap_or_else(|| watch_dir.path())
-                        .to_string_lossy()
-                )
-                || payload["table"] != serde_json::json!("file_attached")
-                || payload["status"] != serde_json::json!("watching")
-                || payload["max_concurrent"] != serde_json::json!(1)
-                || payload["initial_sweep"]
-                    != serde_json::json!({"files_ingested": 0, "files_failed": 0})
-            {
-                failures.push(format!(
-                    "watch_directory attached empty initial sweep: watcher handle changed: {payload}"
-                ));
-            }
+            "watch_directory attached empty initial sweep stats",
+            &payload["initial_sweep"],
+            &["files_failed", "files_ingested"],
+        );
+        if payload["directory"]
+            != serde_json::json!(
+                canonical_watch_dir
+                    .as_deref()
+                    .unwrap_or_else(|| watch_dir.path())
+                    .to_string_lossy()
+            )
+            || payload["table"] != serde_json::json!("file_attached")
+            || payload["status"] != serde_json::json!("watching")
+            || payload["max_concurrent"] != serde_json::json!(1)
+            || payload["initial_sweep"]
+                != serde_json::json!({"files_ingested": 0, "files_failed": 0})
+        {
+            failures.push(format!(
+                "watch_directory attached empty initial sweep: watcher handle changed: {payload}"
+            ));
         }
     }
 
@@ -3505,36 +3481,33 @@ async fn resolved_database_data_success_shapes() -> TestResult {
         }
     }
 
-    if let Some(path) = canonical_watch_dir.as_ref() {
-        if let Some(result) = call_case!(
+    if let Some(path) = canonical_watch_dir.as_ref()
+        && let Some(result) = call_case!(
             "watch_directory teardown",
             "unwatch_directory",
             serde_json::json!({"path": path.to_string_lossy()})
-        ) {
-            if let Some(payload) = record_legacy_object_response(
-                &mut failures,
-                "watch_directory teardown",
-                &result,
-                &[
-                    "directory",
-                    "files_failed",
-                    "files_ingested",
-                    "last_error",
-                    "status",
-                    "table",
-                ],
-            ) {
-                if payload["status"] != serde_json::json!("stopped")
-                    || payload["table"] != serde_json::json!("file_attached")
-                    || payload["files_ingested"] != serde_json::json!(0)
-                    || payload["files_failed"] != serde_json::json!(0)
-                {
-                    failures.push(format!(
-                        "watch_directory teardown: legacy stop summary changed: {payload}"
-                    ));
-                }
-            }
-        }
+        )
+        && let Some(payload) = record_legacy_object_response(
+            &mut failures,
+            "watch_directory teardown",
+            &result,
+            &[
+                "directory",
+                "files_failed",
+                "files_ingested",
+                "last_error",
+                "status",
+                "table",
+            ],
+        )
+        && (payload["status"] != serde_json::json!("stopped")
+            || payload["table"] != serde_json::json!("file_attached")
+            || payload["files_ingested"] != serde_json::json!(0)
+            || payload["files_failed"] != serde_json::json!(0))
+    {
+        failures.push(format!(
+            "watch_directory teardown: legacy stop summary changed: {payload}"
+        ));
     }
 
     if let Some(result) = call_case!(
@@ -3637,15 +3610,13 @@ async fn resolved_database_data_success_shapes() -> TestResult {
                 "rows",
                 "stats",
             ],
-        ) {
-            if payload["rows"] != serde_json::json!(0)
-                || payload["stats"]["format"] != serde_json::json!("hyper")
-                || payload["output_path"] != serde_json::json!(hyper_export_path.to_string_lossy())
-            {
-                failures.push(format!(
-                    "export bare local hyper snapshot: legacy snapshot payload changed: {payload}"
-                ));
-            }
+        ) && (payload["rows"] != serde_json::json!(0)
+            || payload["stats"]["format"] != serde_json::json!("hyper")
+            || payload["output_path"] != serde_json::json!(hyper_export_path.to_string_lossy()))
+        {
+            failures.push(format!(
+                "export bare local hyper snapshot: legacy snapshot payload changed: {payload}"
+            ));
         }
         if !hyper_export_path.is_file() {
             failures.push("export bare local hyper snapshot: output file was not created".into());
@@ -3662,44 +3633,40 @@ async fn resolved_database_data_success_shapes() -> TestResult {
             "license": "CC0",
             "notes": "legacy fields stay intact"
         })
-    ) {
-        if let Some(payload) = record_object_response(
-            &mut failures,
-            "set_table_metadata attached catalog entry",
-            &result,
-            "mixed_data",
-            &[
-                "created_by",
-                "data_url",
-                "last_modified_by",
-                "last_refreshed_at",
-                "license",
-                "load_params",
-                "load_tool",
-                "loaded_at",
-                "notes",
-                "purpose",
-                "resolved_database",
-                "row_count",
-                "source_description",
-                "source_url",
-                "table_name",
-            ],
-        ) {
-            if payload["table_name"] != serde_json::json!("file_attached")
-                || payload["purpose"] != serde_json::json!("resolved database regression")
-                || payload["license"] != serde_json::json!("CC0")
-                || payload["notes"] != serde_json::json!("legacy fields stay intact")
-                || payload["load_tool"] != serde_json::json!("load_file")
-                || payload["row_count"] != serde_json::json!(1)
-                || payload["loaded_at"].as_str().is_none()
-                || payload["last_refreshed_at"].as_str().is_none()
-            {
-                failures.push(format!(
-                    "set_table_metadata attached catalog entry: legacy catalog entry changed: {payload}"
-                ));
-            }
-        }
+    ) && let Some(payload) = record_object_response(
+        &mut failures,
+        "set_table_metadata attached catalog entry",
+        &result,
+        "mixed_data",
+        &[
+            "created_by",
+            "data_url",
+            "last_modified_by",
+            "last_refreshed_at",
+            "license",
+            "load_params",
+            "load_tool",
+            "loaded_at",
+            "notes",
+            "purpose",
+            "resolved_database",
+            "row_count",
+            "source_description",
+            "source_url",
+            "table_name",
+        ],
+    ) && (payload["table_name"] != serde_json::json!("file_attached")
+        || payload["purpose"] != serde_json::json!("resolved database regression")
+        || payload["license"] != serde_json::json!("CC0")
+        || payload["notes"] != serde_json::json!("legacy fields stay intact")
+        || payload["load_tool"] != serde_json::json!("load_file")
+        || payload["row_count"] != serde_json::json!(1)
+        || payload["loaded_at"].as_str().is_none()
+        || payload["last_refreshed_at"].as_str().is_none())
+    {
+        failures.push(format!(
+            "set_table_metadata attached catalog entry: legacy catalog entry changed: {payload}"
+        ));
     }
 
     if let Some(result) = call_case!(
@@ -3770,13 +3737,12 @@ async fn copy_query_preserves_target_and_resolved_database() -> TestResult {
             "writable": true,
             "on_missing": "create"
         })
-    ) {
-        if is_error(&result) {
-            failures.push(format!(
-                "setup mixed-case copy target: {:?}",
-                first_text(&result)
-            ));
-        }
+    ) && is_error(&result)
+    {
+        failures.push(format!(
+            "setup mixed-case copy target: {:?}",
+            first_text(&result)
+        ));
     }
     if let Err(error) = h
         .client

@@ -1237,10 +1237,10 @@ impl AsyncConnection {
     }
 
     fn stats_store_pending(&self, token: Option<Box<dyn Any + Send>>, sql: &str) {
-        if let Some(token) = token {
-            if let Ok(mut guard) = self.pending_stats.lock() {
-                *guard = Some((token, sql.to_string()));
-            }
+        if let Some(token) = token
+            && let Ok(mut guard) = self.pending_stats.lock()
+        {
+            *guard = Some((token, sql.to_string()));
         }
     }
 }

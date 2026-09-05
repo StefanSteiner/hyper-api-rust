@@ -1600,16 +1600,15 @@ impl HyperMcpServer {
                 "failed to reconcile persistent _table_catalog after execute"
             );
         }
-        if let Some(alias) = target_db {
-            if !alias.eq_ignore_ascii_case(Engine::PERSISTENT_ALIAS) {
-                if let Err(e) = crate::table_catalog::reconcile_in(engine, Some(alias)) {
-                    tracing::warn!(
-                        target_db = alias,
-                        err = %e.message,
-                        "failed to reconcile user-DB _table_catalog after execute"
-                    );
-                }
-            }
+        if let Some(alias) = target_db
+            && !alias.eq_ignore_ascii_case(Engine::PERSISTENT_ALIAS)
+            && let Err(e) = crate::table_catalog::reconcile_in(engine, Some(alias))
+        {
+            tracing::warn!(
+                target_db = alias,
+                err = %e.message,
+                "failed to reconcile user-DB _table_catalog after execute"
+            );
         }
     }
 
@@ -3860,10 +3859,8 @@ impl HyperMcpServer {
         Parameters(params): Parameters<AttachDatabaseParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let writable = params.writable.unwrap_or(false);
-        if writable {
-            if let Err(e) = self.check_writable("attach_database(writable)") {
-                return Self::err_content(e);
-            }
+        if writable && let Err(e) = self.check_writable("attach_database(writable)") {
+            return Self::err_content(e);
         }
         let on_missing = match attach::OnMissing::parse(params.on_missing.as_deref()) {
             Ok(v) => v,

@@ -868,12 +868,12 @@ impl Client {
 
         let mut affected = 0u64;
         for msg in messages {
-            if let crate::protocol::message::Message::CommandComplete(body) = msg {
-                if let Ok(tag) = body.tag() {
-                    // Parse affected row count from tag like "INSERT 0 1"
-                    if let Some(count) = parse_affected_rows(tag) {
-                        affected = count;
-                    }
+            if let crate::protocol::message::Message::CommandComplete(body) = msg
+                && let Ok(tag) = body.tag()
+            {
+                // Parse affected row count from tag like "INSERT 0 1"
+                if let Some(count) = parse_affected_rows(tag) {
+                    affected = count;
                 }
             }
         }

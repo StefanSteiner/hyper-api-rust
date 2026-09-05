@@ -212,10 +212,10 @@ impl DataCloudTokenProvider {
     /// [`DataCloudToken::lakehouse_name`] if the cached DC JWT's tenant
     /// URL cannot be parsed into a valid lakehouse identifier.
     pub fn lakehouse_name(&self) -> SalesforceAuthResult<Option<String>> {
-        if let Some(ref token) = self.cached_dc_jwt {
-            if token.is_valid() {
-                return Ok(Some(token.lakehouse_name(self.config.dataspace_value())?));
-            }
+        if let Some(ref token) = self.cached_dc_jwt
+            && token.is_valid()
+        {
+            return Ok(Some(token.lakehouse_name(self.config.dataspace_value())?));
         }
         Ok(None)
     }

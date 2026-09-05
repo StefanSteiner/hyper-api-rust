@@ -480,17 +480,17 @@ where
     }
     // Reject type mismatches on any shared non-key column.
     for tc in &tmp_cols {
-        if let Some(target_c) = target_cols.iter().find(|c| c.name == tc.name) {
-            if !types_compatible(&target_c.hyper_type, &tc.hyper_type) {
-                return Err(McpError::new(
-                    ErrorCode::InvalidArgument,
-                    format!(
-                        "Column '{}' type mismatch: target is {} but incoming is {}. \
+        if let Some(target_c) = target_cols.iter().find(|c| c.name == tc.name)
+            && !types_compatible(&target_c.hyper_type, &tc.hyper_type)
+        {
+            return Err(McpError::new(
+                ErrorCode::InvalidArgument,
+                format!(
+                    "Column '{}' type mismatch: target is {} but incoming is {}. \
                          Use mode=replace or apply a schema override.",
-                        tc.name, target_c.hyper_type, tc.hyper_type
-                    ),
-                ));
-            }
+                    tc.name, target_c.hyper_type, tc.hyper_type
+                ),
+            ));
         }
     }
 
@@ -1486,10 +1486,10 @@ pub fn extract_json_path(raw_json: &str, path: &str) -> Result<String, McpError>
 
     // Terminal auto-parse: if the final value is a string, try to parse it
     // as JSON so that e.g. a stringified array becomes the actual array.
-    if let Value::String(s) = &current {
-        if let Ok(parsed) = serde_json::from_str::<Value>(s) {
-            current = parsed;
-        }
+    if let Value::String(s) = &current
+        && let Ok(parsed) = serde_json::from_str::<Value>(s)
+    {
+        current = parsed;
     }
 
     serde_json::to_string(&current).map_err(|e| {

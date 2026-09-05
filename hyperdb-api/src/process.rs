@@ -531,10 +531,10 @@ impl HyperProcess {
             }
 
             // Set default log directory to current directory
-            if !user_has_param("log_dir") {
-                if let Ok(cwd) = std::env::current_dir() {
-                    cmd.arg(format!("--log-dir={}", cwd.display()));
-                }
+            if !user_has_param("log_dir")
+                && let Ok(cwd) = std::env::current_dir()
+            {
+                cmd.arg(format!("--log-dir={}", cwd.display()));
             }
 
             // Disable password requirement for local development
@@ -672,10 +672,10 @@ impl HyperProcess {
             }
             // TCP endpoint (host:port format)
             let parts: Vec<&str> = ep.split(':').collect();
-            if parts.len() == 2 {
-                if let Ok(port) = parts[1].parse::<u16>() {
-                    return ConnectionEndpoint::tcp(parts[0], port);
-                }
+            if parts.len() == 2
+                && let Ok(port) = parts[1].parse::<u16>()
+            {
+                return ConnectionEndpoint::tcp(parts[0], port);
             }
             ConnectionEndpoint::tcp("localhost", 7483) // fallback
         });

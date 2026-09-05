@@ -320,12 +320,10 @@ fn rustc_version_runtime() -> String {
     if let Ok(out) = std::process::Command::new("rustc")
         .arg("--version")
         .output()
+        && out.status.success()
+        && let Ok(s) = String::from_utf8(out.stdout)
     {
-        if out.status.success() {
-            if let Ok(s) = String::from_utf8(out.stdout) {
-                return s.trim().to_string();
-            }
-        }
+        return s.trim().to_string();
     }
     "rustc (unknown)".to_string()
 }

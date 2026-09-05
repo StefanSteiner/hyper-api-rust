@@ -979,10 +979,10 @@ where
                 Message::CommandComplete(body) => {
                     if let Ok(tag) = body.tag() {
                         // Parse row count from tag like "COPY 1234"
-                        if let Some(count_str) = tag.strip_prefix("COPY ") {
-                            if let Ok(count) = count_str.trim().parse() {
-                                row_count = count;
-                            }
+                        if let Some(count_str) = tag.strip_prefix("COPY ")
+                            && let Ok(count) = count_str.trim().parse()
+                        {
+                            row_count = count;
                         }
                     }
                 }

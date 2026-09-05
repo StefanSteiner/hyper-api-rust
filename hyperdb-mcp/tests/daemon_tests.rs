@@ -1011,11 +1011,11 @@ fn scan_skips_camped_returns_free() {
         let (camped_listener, base) = loop {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let port = listener.local_addr().unwrap().port();
-            if port < u16::MAX {
-                if let Ok(probe) = TcpListener::bind(("127.0.0.1", port + 1)) {
-                    drop(probe);
-                    break (listener, port);
-                }
+            if port < u16::MAX
+                && let Ok(probe) = TcpListener::bind(("127.0.0.1", port + 1))
+            {
+                drop(probe);
+                break (listener, port);
             }
             drop(listener);
         };
@@ -1821,18 +1821,13 @@ fn kill_pid(pid: u32) {
 fn wait_for_endpoint_change_or_recovery(health_port: u16, timeout_secs: u64) -> Option<String> {
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     while Instant::now() < deadline {
-        if let Ok(response) = health::send_command(health_port, "STATUS") {
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(response.trim()) {
-                if let Some(endpoint) = parsed["hyperd_endpoint"].as_str() {
-                    if let Ok(addr) = endpoint.parse::<std::net::SocketAddr>() {
-                        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500))
-                            .is_ok()
-                        {
-                            return Some(endpoint.to_string());
-                        }
-                    }
-                }
-            }
+        if let Ok(response) = health::send_command(health_port, "STATUS")
+            && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(response.trim())
+            && let Some(endpoint) = parsed["hyperd_endpoint"].as_str()
+            && let Ok(addr) = endpoint.parse::<std::net::SocketAddr>()
+            && std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok()
+        {
+            return Some(endpoint.to_string());
         }
         std::thread::sleep(Duration::from_millis(250));
     }
