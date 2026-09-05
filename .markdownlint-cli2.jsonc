@@ -30,12 +30,6 @@
     // nine per-crate changelogs are hand-maintained and stay in scope.
     "CHANGELOG.md",
 
-    // Point-in-time planning artifacts (see AGENTS.md "Documentation
-    // Conventions"): a spec and plan are written before a feature, reviewed
-    // alongside the change that implements it, and then not maintained.
-    // Reflowing prose in a settled record is churn no reader benefits from.
-    "docs/superpowers/**",
-
     // npm platform sub-packages: packaging boilerplate, largely generated
     "hyperdb-api-node/npm/**",
     "hyperdb-mcp/npm/**"
