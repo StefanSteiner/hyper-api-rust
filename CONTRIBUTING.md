@@ -2,13 +2,13 @@
 
 This page lists the operational governance model of this project, as well as the recommendations and requirements for how to best contribute to Tableau Hyper Rust API. We strive to obey these as best as possible. As always, thanks for contributing – we hope these guidelines make it easier and shed some light on our approach and processes.
 
-# Governance Model
+## Governance Model
 
-## Community Based
+### Community Based
 
 The intent and goal of open sourcing this project is to increase the contributor and user base. The governance model is one where new project leads (`admins`) will be added to the project based on their contributions and efforts, a so-called "do-acracy" or "meritocracy" similar to that used by all Apache Software Foundation projects.
 
-# Issues, requests & ideas
+## Issues, requests & ideas
 
 Use GitHub Issues page to submit issues, enhancement requests and discuss ideas.
 
@@ -40,7 +40,7 @@ Use GitHub Issues page to submit issues, enhancement requests and discuss ideas.
 If you're new to our project and looking for some way to make your first contribution, look for
 Issues labelled `good first contribution`.
 
-# Code Style & Guidelines
+## Code Style & Guidelines
 
 This project follows the **[Microsoft Pragmatic Rust Guidelines](https://microsoft.github.io/rust-guidelines/)**. The repo-specific adaptation — what is machine-enforced, what is reviewer-enforced, and the list of documented exceptions — is in [docs/RUST_GUIDELINES.md](docs/RUST_GUIDELINES.md).
 
@@ -71,7 +71,7 @@ path-filtered, so a docs-only PR does not run it.
 
 When a lint genuinely cannot be satisfied for a given site, suppress it with `#[expect(lint_name, reason = "<specific reason>")]` rather than bare `#[allow(...)]` — the `reason` is mandatory and `#[expect]` auto-removes itself when the lint would no longer fire. See the [Exceptions](docs/RUST_GUIDELINES.md#exceptions) section of the guidelines page for the current workspace-level waivers.
 
-# Contribution Checklist
+## Contribution Checklist
 
 - [ ] Clean, simple, well styled code — conforms to [docs/RUST_GUIDELINES.md](docs/RUST_GUIDELINES.md)
 - [ ] Commits should be atomic and messages must be descriptive. Related issues should be mentioned by Issue number.
@@ -92,7 +92,7 @@ When a lint genuinely cannot be satisfied for a given site, suppress it with `#[
 - [ ] Reviews
   - Changes must be approved via peer code review
 
-# Signed Commits
+## Signed Commits
 
 This repo requires signed commits on `main`. Any PR whose commits are unsigned will be blocked at merge time — the GitHub Actions CI runs fine on unsigned commits, but the merge button won't enable.
 
@@ -129,7 +129,7 @@ Two gotchas to avoid:
 
 GPG signing is also supported — see [GitHub's signing-commits guide](https://docs.github.com/en/authentication/managing-commit-signature-verification/signing-commits) for the GPG and S/MIME paths. SSH is the recommended default for this repo.
 
-# Creating a Pull Request
+## Creating a Pull Request
 
 1. **Ensure the bug/feature was not already reported** by searching on GitHub under Issues. If none exists, create a new issue so that other contributors can keep track of what you are trying to add/fix and offer suggestions (or let you know if there is already an effort in progress).
 2. **Fork** the repository on GitHub.
@@ -142,18 +142,18 @@ GPG signing is also supported — see [GitHub's signing-commits guide](https://d
 
 > **NOTE**: Be sure to [sync your fork](https://help.github.com/articles/syncing-a-fork/) before making a pull request.
 
-# Contributor License Agreement ("CLA")
+## Contributor License Agreement ("CLA")
 
 In order to accept your pull request, we need you to submit a CLA. You only need
 to do this once to work on any of Salesforce's open source projects.
 
 Complete your CLA here: <https://cla.salesforce.com/sign-cla>
 
-# Commit Message Format
+## Commit Message Format
 
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) to automate versioning and release management. Please format your commit messages accordingly.
 
-## Commit Message Structure
+### Commit Message Structure
 
 ```text
 <type>(<scope>): <subject>
@@ -169,7 +169,7 @@ This project uses [Conventional Commits](https://www.conventionalcommits.org/) t
 - **Body** (optional): Detailed explanation of the change
 - **Footer** (optional): Issue references
 
-## Commit Types and Version Impact
+### Commit Types and Version Impact
 
 | Commit Type | Version Bump | Example |
 |------------|--------------|---------|
@@ -182,7 +182,7 @@ This project uses [Conventional Commits](https://www.conventionalcommits.org/) t
 > `fix:` for changes that end-users of the crate or npm package would notice.
 > A `fix(ci):` commit will trigger an unintended patch release.
 
-## Examples
+### Examples
 
 ```text
 feat: add support for batch query execution
@@ -196,13 +196,13 @@ ci: fix chmod step in npm-build-publish workflow
 chore: update arrow dependency to 56
 ```
 
-# Release Process
+## Release Process
 
 This repo uses [release-please](https://github.com/googleapis/release-please)
 to fully automate version bumps, changelog generation, tagging, and the
 crates.io / npm publish dance.
 
-## What contributors do
+### What contributors do
 
 **Use [Conventional Commits](https://www.conventionalcommits.org/) for every
 PR title.** That's it. release-please reads the merged commits to figure out
@@ -219,7 +219,7 @@ The **per-crate** `CHANGELOG.md` files are different: each carries a
 expected to append to them for user-visible API changes. See
 [AGENTS.md](AGENTS.md) reminder 8 for the policy and the full file list.
 
-## What maintainers do
+### What maintainers do
 
 The end-to-end flow lives in
 [`docs/GITHUB_OPERATIONS.md` → Cutting a release](docs/GITHUB_OPERATIONS.md#cutting-a-release).
@@ -250,7 +250,7 @@ For pre-releases (`-rc.N`, `-alpha.N`, `-beta.N`), include a `Release-As:`
 footer in a commit on `main` — see
 [`docs/GITHUB_OPERATIONS.md`](docs/GITHUB_OPERATIONS.md#pre-releases).
 
-## Published Crates
+### Published Crates
 
 | Package | Registry | Notes |
 |---------|----------|-------|
@@ -264,10 +264,10 @@ footer in a commit on `main` — see
 | `hyperdb-compile-check` | crates.io | Compile-time SQL validation backend. Not a workspace member (it declares its own `[workspace]` to break the dependency cycle), but release-please manages its version and it must be published for `hyperdb-api-derive`'s off-by-default `compile-time` feature to resolve. |
 | `hyperdb-api-node` | npm | Node.js/TypeScript bindings. `publish = false` for crates.io — the only crate in the tree that is not a Cargo publish target. |
 
-# Code of Conduct
+## Code of Conduct
 
 Please follow our [Code of Conduct](CODE_OF_CONDUCT.md).
 
-# License
+## License
 
 By contributing your code, you agree to license your contribution under the terms of our project [MIT](LICENSE-MIT) and [Apache-2.0](LICENSE-APACHE) dual license, and to sign the [Salesforce CLA](https://cla.salesforce.com/sign-cla).
