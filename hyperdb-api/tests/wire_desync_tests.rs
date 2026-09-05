@@ -76,11 +76,11 @@ fn transaction_after_failed_statement_in_tx() -> Result<()> {
     tc.execute_command("CREATE TABLE acc (v INT NOT NULL)")?;
 
     // Start tx, insert once, then provoke an error.
-    tc.connection.begin_transaction()?;
+    tc.connection.begin_transaction_unguarded()?;
     tc.execute_command("INSERT INTO acc VALUES (1)")?;
     let err = tc.execute_command("INSERT INTO acc VALUES (NULL)"); // NOT NULL violation
     assert!(err.is_err());
-    tc.connection.rollback()?;
+    tc.connection.rollback_unguarded()?;
 
     // The table should still exist (DDL auto-commits in Hyper) but be empty
     // (INSERT rolled back). Critically, COUNT(*) must return an actual
@@ -253,9 +253,9 @@ fn begin_transaction_after_error_is_not_poisoned() -> Result<()> {
     assert!(err.is_err());
 
     // Step 2: BEGIN must succeed cleanly and not inherit the stale 42703.
-    tc.connection.begin_transaction()?;
+    tc.connection.begin_transaction_unguarded()?;
     tc.execute_command("INSERT INTO t VALUES (7)")?;
-    tc.connection.commit()?;
+    tc.connection.commit_unguarded()?;
 
     let v = tc.execute_scalar_i64("SELECT v FROM t")?;
     assert_eq!(v, 7);

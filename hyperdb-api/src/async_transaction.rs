@@ -41,7 +41,7 @@ impl<'conn> AsyncTransaction<'conn> {
         // methods on `AsyncConnection` are `#[deprecated]` for
         // downstream consumers; this guard is the recommended
         // replacement.
-        connection.begin_transaction_raw().await?;
+        connection.begin_transaction_unguarded().await?;
         Ok(Self {
             connection,
             completed: false,
@@ -56,7 +56,7 @@ impl<'conn> AsyncTransaction<'conn> {
     /// is marked completed regardless, so the drop guard will not warn.
     pub async fn commit(mut self) -> Result<()> {
         self.completed = true;
-        self.connection.commit_raw().await
+        self.connection.commit_unguarded().await
     }
 
     /// Rolls back the transaction explicitly.
@@ -67,7 +67,7 @@ impl<'conn> AsyncTransaction<'conn> {
     /// transaction is marked completed regardless.
     pub async fn rollback(mut self) -> Result<()> {
         self.completed = true;
-        self.connection.rollback_raw().await
+        self.connection.rollback_unguarded().await
     }
 
     /// Returns a reference to the underlying async connection.

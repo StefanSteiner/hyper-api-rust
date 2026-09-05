@@ -1260,80 +1260,61 @@ impl AsyncConnection {
     // genuinely needs `&self` (rather than the guard's `&mut self`)
     // delegate to these.
     //
-    // The matching `pub` methods (`begin_transaction`, `commit`,
-    // `rollback`) are thin `#[doc(hidden)] #[deprecated]` wrappers
-    // retained only so any pre-existing downstream caller sees a
-    // compiler warning rather than a hard break. They will be deleted
-    // in a future release; the `_raw` methods stay.
+    // They are public because a `&self` helper cannot use the guard at all.
+    // They replaced the `#[doc(hidden)] #[deprecated]`
+    // `begin_transaction`/`commit`/`rollback` wrappers, removed in 1.0.0.
 
-    /// Issues `BEGIN TRANSACTION`. Crate-internal use only.
-    pub(crate) async fn begin_transaction_raw(&self) -> Result<()> {
-        self.execute_command("BEGIN TRANSACTION").await?;
-        Ok(())
-    }
-
-    /// Issues `COMMIT`. Crate-internal use only.
-    pub(crate) async fn commit_raw(&self) -> Result<()> {
-        self.execute_command("COMMIT").await?;
-        Ok(())
-    }
-
-    /// Issues `ROLLBACK`. Crate-internal use only.
-    pub(crate) async fn rollback_raw(&self) -> Result<()> {
-        self.execute_command("ROLLBACK").await?;
-        Ok(())
-    }
-
-    /// Begins an explicit transaction (async).
+    /// Issues `BEGIN TRANSACTION` without returning a guard.
     ///
-    /// **Prefer [`transaction()`](Self::transaction)** — the RAII guard
-    /// auto-rolls back on drop and cannot leak a half-open transaction
-    /// across error paths. Hidden from generated rustdoc and
-    /// deprecated; slated for removal in a future release.
+    /// **Prefer [`transaction()`](Self::transaction).** The RAII guard cannot
+    /// leak a half-open transaction across an error path, and rolls back on
+    /// drop. Reach for this only when the guard's `&mut self` borrow is
+    /// impossible — for example inside a helper that holds `&self` and so
+    /// cannot borrow the connection mutably.
+    ///
+    /// Pairing is the caller's responsibility: every call must be matched by
+    /// [`commit_unguarded`](Self::commit_unguarded) or
+    /// [`rollback_unguarded`](Self::rollback_unguarded) on **every** path,
+    /// including panics and cancelled futures. Leaving one open wedges the
+    /// session — subsequent statements fail with "transaction already in
+    /// progress" on a connection that is otherwise healthy, so reconnect
+    /// logic will not recover it.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Server`] if the server rejects `BEGIN TRANSACTION`
     /// (e.g. a transaction is already open on this session).
-    #[doc(hidden)]
-    #[deprecated(
-        note = "Use `AsyncConnection::transaction()` for an RAII guard. This method will be \
-                removed in a future release."
-    )]
-    pub async fn begin_transaction(&self) -> Result<()> {
-        self.begin_transaction_raw().await
+    pub async fn begin_transaction_unguarded(&self) -> Result<()> {
+        self.execute_command("BEGIN TRANSACTION").await?;
+        Ok(())
     }
 
-    /// Commits the current transaction (async).
+    /// Issues `COMMIT` for a transaction opened with
+    /// [`begin_transaction_unguarded`](Self::begin_transaction_unguarded).
     ///
     /// **Prefer [`AsyncTransaction::commit`](crate::AsyncTransaction::commit)**
-    /// on the RAII guard returned by [`transaction()`](Self::transaction).
-    /// Hidden from generated rustdoc and deprecated; slated for removal.
+    /// on the guard returned by [`transaction()`](Self::transaction).
     ///
     /// # Errors
     ///
     /// Returns [`Error::Server`] if the server rejects `COMMIT`.
-    #[doc(hidden)]
-    #[deprecated(note = "Use `AsyncTransaction::commit()` on the RAII guard from \
-                `AsyncConnection::transaction()`. This method will be removed in a future release.")]
-    pub async fn commit(&self) -> Result<()> {
-        self.commit_raw().await
+    pub async fn commit_unguarded(&self) -> Result<()> {
+        self.execute_command("COMMIT").await?;
+        Ok(())
     }
 
-    /// Rolls back the current transaction (async).
+    /// Issues `ROLLBACK` for a transaction opened with
+    /// [`begin_transaction_unguarded`](Self::begin_transaction_unguarded).
     ///
     /// **Prefer [`AsyncTransaction::rollback`](crate::AsyncTransaction::rollback)**
-    /// on the RAII guard returned by [`transaction()`](Self::transaction).
-    /// Hidden from generated rustdoc and deprecated; slated for removal.
+    /// on the guard returned by [`transaction()`](Self::transaction).
     ///
     /// # Errors
     ///
     /// Returns [`Error::Server`] if the server rejects `ROLLBACK`.
-    #[doc(hidden)]
-    #[deprecated(note = "Use `AsyncTransaction::rollback()` on the RAII guard from \
-                `AsyncConnection::transaction()`. This method will be removed in a future release.")]
-    pub async fn rollback(&self) -> Result<()> {
-        self.rollback_raw().await
+    pub async fn rollback_unguarded(&self) -> Result<()> {
+        self.execute_command("ROLLBACK").await?;
+        Ok(())
     }
 
     /// Starts a transaction with an async RAII guard (async).

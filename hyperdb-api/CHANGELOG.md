@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Removed
+
+- **BREAKING:** `Connection::begin_transaction`, `commit` and `rollback`, and
+  the matching `AsyncConnection` methods, are gone. They were `#[deprecated]`
+  and `#[doc(hidden)]` since 0.3.0, and 1.0.0 is the boundary at which they can
+  actually be dropped. Prefer `Connection::transaction()`, whose RAII guard
+  rolls back on drop and cannot leak a half-open transaction across an error
+  path. If the guard's `&mut self` borrow is impossible — typically a helper
+  that holds `&self` — use the `*_unguarded` methods added below. Migration
+  recipe in [docs/TRANSACTIONS.md](../docs/TRANSACTIONS.md#unguarded-transaction-control).
+
+### Added
+
+- `Connection::begin_transaction_unguarded`, `commit_unguarded` and
+  `rollback_unguarded`, plus the `AsyncConnection` equivalents. These are the
+  supported replacement for the removed deprecated methods and were previously
+  `pub(crate)` as `*_raw`. They are not deprecated, but they are not the
+  default path either: the caller owns pairing a begin with a commit or
+  rollback on **every** path, including panics and cancelled futures, since an
+  unmatched begin wedges the session in a way reconnect logic cannot clear.
+  Reach for them only when the guard's `&mut self` borrow is impossible.
+
 ### Changed
 
 - **BREAKING:** the minimum supported Rust version is now **1.88**, up from

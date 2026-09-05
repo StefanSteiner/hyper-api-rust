@@ -196,7 +196,7 @@ AsyncConnection::commit(&self)              // -> #[doc(hidden)] #[deprecated]
 AsyncConnection::rollback(&self)            // -> #[doc(hidden)] #[deprecated]
 ```
 
-These methods still exist and still work — your build will see compiler warnings rather than errors. They will be deleted in a future release; new code must use the RAII guard.
+At 0.3 these methods still existed and still worked, so a build saw compiler warnings rather than errors. **They were removed in 1.0.0.** If the guard's `&mut conn` borrow is impossible in your code, the replacements are `begin_transaction_unguarded` / `commit_unguarded` / `rollback_unguarded` — see [docs/TRANSACTIONS.md](docs/TRANSACTIONS.md#unguarded-transaction-control).
 
 ### Migration recipe
 

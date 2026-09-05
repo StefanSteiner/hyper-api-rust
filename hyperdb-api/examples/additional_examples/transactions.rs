@@ -116,17 +116,17 @@ fn example_raw_transaction(connection: &Connection) -> Result<()> {
     create_accounts_table(connection, "raw_txn")?;
 
     // --- Commit path ---
-    connection.begin_transaction()?;
+    connection.begin_transaction_unguarded()?;
     connection.execute_command("INSERT INTO raw_txn VALUES (1, 'Alice', 1000.0)")?;
     connection.execute_command("INSERT INTO raw_txn VALUES (2, 'Bob',   500.0)")?;
-    connection.commit()?;
+    connection.commit_unguarded()?;
     println!("  After COMMIT: {} rows", row_count(connection, "raw_txn")?);
 
     // --- Rollback path ---
-    connection.begin_transaction()?;
+    connection.begin_transaction_unguarded()?;
     connection.execute_command("INSERT INTO raw_txn VALUES (3, 'Eve', 9999.0)")?;
     // Oops — roll it back
-    connection.rollback()?;
+    connection.rollback_unguarded()?;
     println!(
         "  After ROLLBACK: {} rows (Eve's insert was undone)",
         row_count(connection, "raw_txn")?
@@ -355,15 +355,15 @@ fn example_multi_table_reconnect(hyper: &HyperProcess, _db_path: &str) -> Result
     println!("  Created dur_accounts and dur_transfers tables");
 
     // --- Committed transaction: create accounts and a transfer ---
-    conn.begin_transaction()?;
+    conn.begin_transaction_unguarded()?;
     conn.execute_command("INSERT INTO dur_accounts VALUES (1, 'Alice', 800.0)")?;
     conn.execute_command("INSERT INTO dur_accounts VALUES (2, 'Bob',   700.0)")?;
     conn.execute_command("INSERT INTO dur_transfers VALUES (1, 1, 2, 200.0)")?;
-    conn.commit()?;
+    conn.commit_unguarded()?;
     println!("  Committed: 2 accounts + 1 transfer");
 
     // --- Uncommitted transaction: another transfer that we don't commit ---
-    conn.begin_transaction()?;
+    conn.begin_transaction_unguarded()?;
     conn.execute_command("UPDATE dur_accounts SET balance = balance - 500 WHERE id = 1")?;
     conn.execute_command("UPDATE dur_accounts SET balance = balance + 500 WHERE id = 2")?;
     conn.execute_command("INSERT INTO dur_transfers VALUES (2, 1, 2, 500.0)")?;
@@ -481,7 +481,7 @@ fn example_ddl_in_transactions(connection: &mut Connection) -> Result<()> {
     // --- Part B: DDL after DML in the same transaction fails ---
     println!();
     println!("  Part B: DDL after DML (restricted)");
-    connection.begin_transaction()?;
+    connection.begin_transaction_unguarded()?;
     connection.execute_command("INSERT INTO ddl_test VALUES (2, 'world')")?;
     println!("  Executed DML (INSERT) inside transaction");
 
@@ -499,7 +499,7 @@ fn example_ddl_in_transactions(connection: &mut Connection) -> Result<()> {
 
     // After an error inside a transaction, the transaction is aborted.
     // We must ROLLBACK before the connection can be used again.
-    connection.rollback()?;
+    connection.rollback_unguarded()?;
     println!("  Rolled back after error — connection is healthy again");
     println!();
     Ok(())

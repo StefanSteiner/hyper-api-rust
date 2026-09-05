@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- `Engine::execute_in_transaction` now calls `hyperdb-api`'s `*_unguarded`
+  transaction methods instead of the deprecated `begin_transaction` / `commit`
+  / `rollback`, which 1.0.0 removed. No behavior change: the helper still takes
+  `&self`, so the RAII guard remains unavailable to it, and it still rolls back
+  before resuming an unwind. The `#[allow(deprecated)]` it needed is gone.
+  Moving to the guard still waits on
+  [issue #72](https://github.com/tableau/hyper-api-rust/issues/72).
 - **BREAKING:** the minimum supported Rust version is now **1.88**, up from
   1.81, and the crate is compiled with **edition 2024**. 1.88 is the version
   Red Hat Enterprise Linux 9.7 ships as `rust-toolset`.

@@ -373,13 +373,13 @@ impl<'conn> AsyncKvStore<'conn> {
     ///
     /// See [`KvStore::pop`](crate::KvStore::pop).
     pub async fn pop(&self) -> Result<Option<(String, String)>> {
-        self.connection.begin_transaction_raw().await?;
+        self.connection.begin_transaction_unguarded().await?;
         let result = self.pop_inner().await;
         match &result {
-            Ok(_) => self.connection.commit_raw().await?,
+            Ok(_) => self.connection.commit_unguarded().await?,
             Err(_) => {
                 // Best-effort rollback; preserve the original error.
-                let _ = self.connection.rollback_raw().await;
+                let _ = self.connection.rollback_unguarded().await;
             }
         }
         result
@@ -433,7 +433,7 @@ impl<'conn> AsyncKvStore<'conn> {
         for (key, _) in entries {
             validate_kv_name(key, "key")?;
         }
-        self.connection.begin_transaction_raw().await?;
+        self.connection.begin_transaction_unguarded().await?;
         let result = async {
             let mut outcome = BatchSetOutcome {
                 created: 0,
@@ -450,9 +450,9 @@ impl<'conn> AsyncKvStore<'conn> {
         }
         .await;
         match &result {
-            Ok(_) => self.connection.commit_raw().await?,
+            Ok(_) => self.connection.commit_unguarded().await?,
             Err(_) => {
-                let _ = self.connection.rollback_raw().await;
+                let _ = self.connection.rollback_unguarded().await;
             }
         }
         result
@@ -470,7 +470,7 @@ impl<'conn> AsyncKvStore<'conn> {
         for (key, _) in entries {
             validate_kv_name(key, "key")?;
         }
-        self.connection.begin_transaction_raw().await?;
+        self.connection.begin_transaction_unguarded().await?;
         let mut inner: Result<BatchGuardOutcome> = Ok(BatchGuardOutcome {
             written: 0,
             skipped: 0,
@@ -494,9 +494,9 @@ impl<'conn> AsyncKvStore<'conn> {
             }
         }
         match &inner {
-            Ok(_) => self.connection.commit_raw().await?,
+            Ok(_) => self.connection.commit_unguarded().await?,
             Err(_) => {
-                let _ = self.connection.rollback_raw().await;
+                let _ = self.connection.rollback_unguarded().await;
             }
         }
         inner

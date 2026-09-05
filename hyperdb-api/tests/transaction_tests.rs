@@ -30,10 +30,10 @@ fn setup() -> Result<TestConnection> {
 #[test]
 fn test_raw_begin_commit_methods() -> Result<()> {
     let tc = setup()?;
-    tc.connection.begin_transaction()?;
+    tc.connection.begin_transaction_unguarded()?;
     tc.connection
         .execute_command("INSERT INTO test_txn VALUES (2, 'committed')")?;
-    tc.connection.commit()?;
+    tc.connection.commit_unguarded()?;
 
     let count = tc.count_tuples("test_txn")?;
     assert_eq!(count, 2);
@@ -43,10 +43,10 @@ fn test_raw_begin_commit_methods() -> Result<()> {
 #[test]
 fn test_raw_begin_rollback_methods() -> Result<()> {
     let tc = setup()?;
-    tc.connection.begin_transaction()?;
+    tc.connection.begin_transaction_unguarded()?;
     tc.connection
         .execute_command("INSERT INTO test_txn VALUES (2, 'rolled_back')")?;
-    tc.connection.rollback()?;
+    tc.connection.rollback_unguarded()?;
 
     let count = tc.count_tuples("test_txn")?;
     assert_eq!(count, 1);
@@ -180,7 +180,7 @@ fn test_query_within_transaction() -> Result<()> {
 #[test]
 fn test_rollback_after_error() -> Result<()> {
     let tc = setup()?;
-    tc.connection.begin_transaction()?;
+    tc.connection.begin_transaction_unguarded()?;
     tc.connection
         .execute_command("INSERT INTO test_txn VALUES (2, 'before_error')")?;
 
@@ -191,13 +191,13 @@ fn test_rollback_after_error() -> Result<()> {
     assert!(result.is_err());
 
     // Rollback the failed transaction — should succeed without error
-    tc.connection.rollback()?;
+    tc.connection.rollback_unguarded()?;
 
     // Connection is still usable: verify by running a new transaction
-    tc.connection.begin_transaction()?;
+    tc.connection.begin_transaction_unguarded()?;
     tc.connection
         .execute_command("INSERT INTO test_txn VALUES (3, 'after_recovery')")?;
-    tc.connection.commit()?;
+    tc.connection.commit_unguarded()?;
 
     // Verify the new insert worked (use execute_command to avoid protocol quirks)
     tc.connection.execute_command("SELECT 1")?;
@@ -208,10 +208,10 @@ fn test_rollback_after_error() -> Result<()> {
 fn test_nested_begin_warning() -> Result<()> {
     let tc = setup()?;
     // First BEGIN
-    tc.connection.begin_transaction()?;
+    tc.connection.begin_transaction_unguarded()?;
     // Second BEGIN should produce a warning notice, not an error
-    tc.connection.begin_transaction()?;
-    tc.connection.rollback()?;
+    tc.connection.begin_transaction_unguarded()?;
+    tc.connection.rollback_unguarded()?;
     Ok(())
 }
 
@@ -219,7 +219,7 @@ fn test_nested_begin_warning() -> Result<()> {
 fn test_rollback_outside_transaction() -> Result<()> {
     let tc = setup()?;
     // ROLLBACK with no active transaction should produce a warning, not an error
-    tc.connection.rollback()?;
+    tc.connection.rollback_unguarded()?;
     Ok(())
 }
 
