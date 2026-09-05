@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **BREAKING:** the minimum supported Rust version is now **1.88**, up from
+  1.81, and the crate is compiled with **edition 2024**. 1.88 is the version
+  Red Hat Enterprise Linux 9.7 ships as `rust-toolset`.
+- **BREAKING:** the TLS crypto provider is now **ring** rather than AWS-LC.
+  This crate declares its own `reqwest` dependency rather than inheriting the
+  workspace entry, and asked for the `rustls` feature — which forces the
+  `aws-lc-rs` provider and, through Cargo's feature unification, imposed it on
+  every crate in the workspace. It now uses `rustls-no-provider` so the
+  workspace's ring selection applies.
+
+  Download and verification over HTTPS were re-verified end to end against the
+  live Tableau download endpoints after the change.
+
 - **Bump the pinned `hyperd` release to `0.0.26359` (`r07abb490`).** This
   supersedes the never-shipped `0.0.26225` bump attempt (PR #219), which was
   held because `0.0.26225` deadlocked on Apple Silicon Macs running macOS

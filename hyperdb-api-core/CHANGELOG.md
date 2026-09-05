@@ -13,7 +13,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING:** the minimum supported Rust version is now **1.88**, up from
+  1.81, and the crate is compiled with **edition 2024**. 1.88 is the version
+  Red Hat Enterprise Linux 9.7 ships as `rust-toolset`. The previous 1.81 was
+  not achievable in practice — the lockfile already required 1.88 for several
+  direct dependencies.
+
 ### Fixed
+
+- `text_from_hyper_binary` and `bytea_from_hyper_binary` no longer risk a
+  `usize` overflow on 32-bit targets. Both read a `u32` length prefix, widened
+  it to `usize`, and bounds-checked with `buf.len() < 4 + len`; where `usize`
+  is 32 bits a declared length near `u32::MAX` wraps that sum to a small value,
+  so the check passed and the following slice index panicked. Both now use
+  `slice::split_first_chunk::<4>()` and `slice::get`, performing no arithmetic
+  on the declared length at all. 32-bit `i686` targets are Tier 1, so this was
+  reachable rather than theoretical.
 
 - `Numeric`'s `Display` implementation no longer drops the sign of negative
   values with magnitude less than 1 (the open interval `(-1, 0)`). Values such

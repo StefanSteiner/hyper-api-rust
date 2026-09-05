@@ -336,7 +336,50 @@ See [hyperdb-api-node/README.md](hyperdb-api-node/README.md) for full documentat
 | Windows | Supported | `.\build.ps1 build` |
 | WSL | Supported | `make build` |
 
-**MSRV:** Check `rust-version` in `Cargo.toml`.
+**MSRV:** Rust 1.88 (see `rust-version` in `Cargo.toml`), chosen to match the
+`rust-toolset` version Red Hat Enterprise Linux 9.7 ships. The workspace uses
+edition 2024.
+
+## Enterprise Compatibility
+
+This workspace builds with Red Hat's **system-native Rust toolchain and no
+`rustup`**, which is how enterprise environments typically consume it. RHEL
+provides `rust-toolset` in AppStream as a rolling Application Stream:
+
+    dnf install -y rust-toolset gcc gcc-c++ fontconfig-devel unzip
+    cargo build --release
+
+Notes for system-toolchain builds, all verified against `ubi9/ubi`:
+
+- **`protoc` is required and is *not* packaged for UBI.** `hyperdb-api-core`
+  generates its gRPC bindings at build time via `tonic-prost-build`.
+  `dnf search protobuf` offers only `protobuf-c` and `python3-protobuf`, and
+  `ubi-9-codeready-builder-rpms` is already enabled by default, so install
+  `protoc` from the [upstream release][protoc] and put it on `PATH`.
+- **`gcc`, `gcc-c++` and `fontconfig-devel` are needed for chart rendering
+  only.** They come from `hyperdb-mcp`'s `plotters` dependency, whose font
+  stack compiles C and C++. Nothing in this workspace's own code requires a
+  C or C++ compiler.
+- **`.cargo/config.toml` is a developer convenience, not a build
+  requirement.** It selects clang plus the mold linker on
+  `x86_64-unknown-linux-gnu` for faster local linking; mold is not packaged for
+  UBI. Either remove it or neutralize it with `RUSTFLAGS=` and
+  `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=cc`. Note that
+  `--config target.<triple>.rustflags=[]` does *not* work, because Cargo joins
+  `rustflags` across configuration sources rather than replacing them.
+- **`rust-toolchain.toml` can be ignored.** It is read only by `rustup`'s proxy
+  shims, so a distro-packaged `cargo` never consults it.
+- **RHEL's `rust-toolset` is a rolling stream** and is currently *ahead* of the
+  1.88.0 documented in the RHEL 9.7 release notes. The MSRV floor of 1.88 is
+  therefore conservative and safe.
+
+Compatibility is enforced on every pull request by
+`.github/workflows/rhel-compatibility.yml`, which runs
+`cargo check --workspace --locked --all-targets` in a `ubi9/ubi` container
+using nothing but the distro toolchain. Reproduce it locally with
+`make check-rhel`.
+
+[protoc]: https://github.com/protocolbuffers/protobuf/releases
 
 ## Documentation
 

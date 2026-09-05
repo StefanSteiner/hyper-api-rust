@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **BREAKING:** the minimum supported Rust version is now **1.88**, up from an
+  inherited 1.81, and the crate is compiled with **edition 2024**. This crate
+  previously declared no `rust-version` at all, despite its locked `napi` and
+  `napi-derive` both requiring 1.88. Consumers installing a prebuilt `.node`
+  binary from npm are unaffected; only building from source needs 1.88.
+
 - **`getInt32()` and `getInt32Column()` now throw instead of silently
   truncating an out-of-range `BIGINT`.** Previously an `Int64` value that did
   not fit an `Int32` was wrapped with a narrowing cast, returning a

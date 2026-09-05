@@ -67,7 +67,7 @@ static EPHEMERAL_SEQ: AtomicU64 = AtomicU64::new(0);
 /// Mirrored as [`Engine::PERSISTENT_ALIAS`] for the public API.
 const PERSISTENT_ALIAS: &str = "persistent";
 
-/// Outcome of [`attach_default_persistent`] — flags whether the file was
+/// Outcome of `attach_default_persistent` — flags whether the file was
 /// freshly created so the catalog-seed step can fire (or skip).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PersistentAttachOutcome {

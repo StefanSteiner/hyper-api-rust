@@ -53,11 +53,14 @@ jobs in [`.github/workflows/ci.yml`](.github/workflows/ci.yml):
 - `cargo publish --dry-run` and workspace version consistency —
   `publish-dry-run` and `version-consistency` jobs
 
+- RHEL `rust-toolset` compatibility — `rhel-compatibility` job; builds in a
+  `ubi9/ubi` container with the distro toolchain and no rustup
+
 Run locally before pushing:
 
-- `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` (published crates) — this
-  catches broken intra-doc links and missing docs. **Not currently a CI job**,
-  so it is on you to run it; `make doc` covers the same crates.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` (all seven publishable
+  crates) — catches broken intra-doc links and missing docs. **Not currently a
+  CI job**, so it is on you to run it; `make doc` runs exactly this.
 
 When a lint genuinely cannot be satisfied for a given site, suppress it with `#[expect(lint_name, reason = "<specific reason>")]` rather than bare `#[allow(...)]` — the `reason` is mandatory and `#[expect]` auto-removes itself when the lint would no longer fire. See the [Exceptions](docs/RUST_GUIDELINES.md#exceptions) section of the guidelines page for the current workspace-level waivers.
 
@@ -217,8 +220,13 @@ Summary:
 2. release-please opens (or updates) a single PR titled
    `chore(main): release X.Y.Z` containing the version bumps and CHANGELOG
    updates.
-3. Review and **merge** that PR when ready to ship. release-please tags the
-   merge commit and creates the GitHub Release.
+3. Review and **merge** that PR when ready to ship. Merging does *not* tag:
+   `release-please-config.json` sets `skip-github-release: true`, so the
+   maintainer creates the `vX.Y.Z` tag and GitHub Release by hand. This is a
+   deliberate human checkpoint — see
+   [`docs/GITHUB_OPERATIONS.md`](docs/GITHUB_OPERATIONS.md#cutting-a-release)
+   for the exact `gh release create` invocation, including the `--prerelease`
+   flag required for `-rc.N` tags.
 4. Wait for CI to pass, then **manually trigger** the publish workflows:
    ```bash
    gh workflow run release.yml -f tag=vX.Y.Z

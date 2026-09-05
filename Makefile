@@ -26,7 +26,7 @@ endif
 # here (help, clean*, download-hyperd itself, verify-hyperd-pin) stay
 # free of the dependency.
 ifdef NEED_AUTO_DOWNLOAD
-build build-api build-release build-api-release test test-api test-release test-api-release test-redirect examples doc: download-hyperd
+build build-api build-release build-api-release test test-api test-release test-api-release examples doc: download-hyperd
 endif
 
 # Show help
@@ -126,12 +126,6 @@ test-api-release:
 	@echo ""
 	cargo test --release -p hyperdb-api-core -p hyperdb-api
 
-# Run tests with redirect feature enabled
-test-redirect:
-	@echo "Running tests with redirect feature enabled..."
-	cargo test -p hyperdb-api-core --features redirect
-	cargo test -p hyperdb-api --features redirect
-
 # Run all examples
 examples:
 	./run_all_examples.sh
@@ -215,10 +209,15 @@ npm-pack: build-release
 # Generate documentation (only Hyper Rust API crates, no dependencies)
 # All features are now always-on (no feature flags needed).
 # salesforce-auth on hyperdb-api-core is the only remaining optional feature.
+# RUSTDOCFLAGS="-D warnings" matches what CONTRIBUTING.md lists as a gate.
+# Covers all seven publishable crates: hyperdb-api-derive and hyperdb-bootstrap
+# were previously omitted, so their rustdoc was never checked.
 doc: clean-doc
-	cargo doc --no-deps \
+	RUSTDOCFLAGS="-D warnings" cargo doc --no-deps \
 		-p hyperdb-api-core --features hyperdb-api-core/salesforce-auth \
 		-p hyperdb-api \
+		-p hyperdb-api-derive \
 		-p hyperdb-api-salesforce \
+		-p hyperdb-bootstrap \
 		-p hyperdb-mcp \
 		-p sea-query-hyperdb

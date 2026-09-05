@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **BREAKING:** the minimum supported Rust version is now **1.88**, up from
+  1.81, and the crate is compiled with **edition 2024**. 1.88 is the version
+  Red Hat Enterprise Linux 9.7 ships as `rust-toolset`, so the declared MSRV
+  now matches the enterprise consumption path. The previous 1.81 was not
+  achievable in practice — the lockfile already required 1.88 for several
+  direct dependencies.
+- **BREAKING:** `Connection::stream_as`, `Connection::stream_as_params`,
+  `AsyncConnection::stream_as` and `AsyncConnection::stream_as_params` now
+  carry an explicit `use<'a, T>` precise-capturing bound on their returned
+  `impl Iterator` / `impl Stream`. Edition 2024 makes return-position `impl
+  Trait` capture every in-scope lifetime and type parameter by default; the
+  explicit capture list pins the previous behaviour rather than widening it.
+  Callers are unaffected unless they relied on the opaque type capturing more
+  than `'a` and `T`.
+- The effective TLS crypto provider is now **ring** rather than AWS-LC. The
+  crate already asked for `rustls` with `features = ["ring"]`, but a transitive
+  `reqwest` dependency forced the `aws-lc-rs` provider and Cargo's feature
+  unification applied it workspace-wide. See the `hyperdb-bootstrap` and
+  `hyperdb-api-salesforce` entries for detail.
+
 - **BREAKING:** `KvStore::set`, `KvStore::set_as`, and `KvStore::set_batch` (plus their `AsyncKvStore` twins) now return `SetOutcome` or `BatchSetOutcome` instead of `Result<()>`, reporting whether each write created a new key or overwrote an existing one. The `created` signal eliminates silent data loss when an LLM accidentally clobbers existing KV data. Callers that ignored the `Result` (statement-position `set("k","v")?;`) — including `let _ = set(...)?;` — still compile unchanged. The genuinely breaking cases are callers that named the unit return (`let x: () = set(...)?;`) or that returned `set(...)` where a `Result<()>` was expected; these now see `SetOutcome`/`BatchSetOutcome` and must adapt. Under pre-1.0 semver the minor slot is the breaking slot, so this lands in the next minor release.
 
 ### Added

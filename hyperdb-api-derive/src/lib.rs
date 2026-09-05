@@ -97,6 +97,9 @@ pub fn table_derive(input: TokenStream) -> TokenStream {
 /// [`hyperdb_api::FromRow`] and must be registered via
 /// `#[derive(Table)] #[hyperdb(register)]`.
 ///
+/// [`hyperdb_api::QueryAs<Type>`]: https://docs.rs/hyperdb-api
+/// [`hyperdb_api::FromRow`]: https://docs.rs/hyperdb-api
+///
 /// With the `compile-time` cargo feature enabled, validates at build time that
 /// the SQL is syntactically valid, all referenced tables are registered, and
 /// all struct fields appear in the projected columns.
@@ -190,6 +193,9 @@ fn last_type_ident(ty: &Type) -> Option<&syn::Ident> {
 /// Returns a [`hyperdb_api::QueryScalar<Type>`] builder. `Type` must implement
 /// [`hyperdb_api::RowValue`]. No `derive(Table)` is required — scalars project
 /// a single column and don't map to a struct.
+///
+/// [`hyperdb_api::QueryScalar<Type>`]: https://docs.rs/hyperdb-api
+/// [`hyperdb_api::RowValue`]: https://docs.rs/hyperdb-api
 ///
 /// With the `compile-time` feature enabled, validates at build time that the
 /// SQL returns exactly one column.

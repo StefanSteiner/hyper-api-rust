@@ -18,15 +18,16 @@ binaries on the Releases page come from".
 
 ## Workflows
 
-Four GitHub Actions workflows live under [`.github/workflows/`](../.github/workflows/):
+Six GitHub Actions workflows live under [`.github/workflows/`](../.github/workflows/):
 
 | Workflow | File | Triggers | Purpose |
 |---|---|---|---|
 | `ci` | [ci.yml](../.github/workflows/ci.yml) | `push` to `main`, all PRs, manual | fmt, clippy, full test matrix, `cargo deny`, `cargo audit`, `cargo publish --dry-run` |
-| `release-please` | [release-please.yml](../.github/workflows/release-please.yml) | `push` to `main`, manual | open/update the release PR; on merge, create the `vX.Y.Z` tag + GitHub Release |
+| `release-please` | [release-please.yml](../.github/workflows/release-please.yml) | `push` to `main`, manual | open/update the release PR with version bumps + CHANGELOG. Does **not** tag: `skip-github-release: true` means the maintainer creates the tag and Release by hand — see [Cutting a release](#cutting-a-release) |
 | `release` | [release.yml](../.github/workflows/release.yml) | tag push matching `v*.*.*` / `v*.*.*-rc.*`, manual | re-run tests, publish the 6 Rust crates to crates.io (`hyperdb-api-node` is published separately to npm) |
 | `npm-build-publish` | [npm-build-publish.yml](../.github/workflows/npm-build-publish.yml) | GitHub Release published, manual | build npm platform packages with bundled hyperd, publish to npm registry |
 | `verify-hyperd-pin` | [verify-hyperd-pin.yml](../.github/workflows/verify-hyperd-pin.yml) | changes to `hyperdb-bootstrap/hyperd-version.toml` or its source, weekly cron, manual | `HEAD` every pinned hyperd release URL to catch Tableau yanks / typos |
+| `rhel-compatibility` | [rhel-compatibility.yml](../.github/workflows/rhel-compatibility.yml) | `push` to `main` and PRs touching Rust/manifests/toolchain config, manual | `cargo check --workspace --locked --all-targets` in a `ubi9/ubi` container using RHEL's `rust-toolset` and no rustup — the M-OOBE enforcement |
 
 ### CI (`ci.yml`)
 

@@ -221,7 +221,7 @@ const CATALOG_COLUMNS: &str = "(\
 /// code targets; all prose columns are nullable, so a plain `NULL`
 /// insert is always well-formed.
 ///
-/// Routing follows [`qualified_catalog_in`]: `None` resolves to the
+/// Routing follows `qualified_catalog_in`: `None` resolves to the
 /// persistent catalog (or no-op in `--ephemeral-only` mode);
 /// `Some("persistent")` is the same; `Some(alias)` targets the
 /// attached database directly.
@@ -283,7 +283,7 @@ pub fn ensure_exists_in_database(engine: &Engine, db_alias: &str) -> Result<(), 
 /// Fetch every catalog row from `target_db` in name-sorted order.
 /// Returns an empty `Vec` when no catalog exists in the target.
 ///
-/// Routing follows [`qualified_catalog_in`].
+/// Routing follows `qualified_catalog_in`.
 ///
 /// # Errors
 ///
@@ -364,7 +364,7 @@ pub fn get(engine: &Engine, table_name: &str) -> Result<Option<CatalogEntry>, Mc
 /// forward prose fields from any existing row and refreshing
 /// mechanical fields.
 ///
-/// Routing follows [`qualified_catalog_in`].
+/// Routing follows `qualified_catalog_in`.
 ///
 /// * `load_tool` / `load_params` — overwrite the existing values.
 /// * `row_count` — overwrite.
@@ -498,7 +498,7 @@ pub fn upsert_stub(
 /// with [`ErrorCode::TableNotFound`] if there is no catalog row for
 /// `table_name` in that DB.
 ///
-/// Routing follows [`qualified_catalog_in`]. The catalog is lazily
+/// Routing follows `qualified_catalog_in`. The catalog is lazily
 /// seeded in `target_db` if absent (matches today's behavior for
 /// the persistent target).
 ///
@@ -667,7 +667,7 @@ pub fn delete_for(engine: &Engine, table_name: &str) -> Result<bool, McpError> {
 /// whose stub still lives in the persistent catalog). So when reconciling
 /// the shared catalog (`target_db` is `None` or `"persistent"`), the live
 /// set is the UNION of persistent-attachment tables ∪ ephemeral-primary
-/// tables — see [`reconcile_live_tables`]. Enumerating only the persistent
+/// tables — see `reconcile_live_tables`. Enumerating only the persistent
 /// attachment would (a) never stub an `execute`-created primary table and
 /// (b) silently reap the catalog rows of primary tables registered by the
 /// ingest path. The rename heuristic's TARGET pool is restricted to new
@@ -689,7 +689,7 @@ pub fn delete_for(engine: &Engine, table_name: &str) -> Result<bool, McpError> {
 ///
 /// # Errors
 ///
-/// - Propagates any error from [`ensure_exists_in`], [`reconcile_live_tables`],
+/// - Propagates any error from [`ensure_exists_in`], `reconcile_live_tables`,
 ///   [`list_in`], [`delete_for_in`], `refresh_row_count_in`, or
 ///   [`upsert_stub_in`].
 /// - `row_count_qualified` failures are swallowed (the row count falls
@@ -980,7 +980,7 @@ fn refresh_row_count_in(
 }
 
 /// Resolve `target_db` to the canonical alias whose catalog this
-/// operation should target. Mirrors [`qualified_catalog_in`]'s
+/// operation should target. Mirrors `qualified_catalog_in`'s
 /// routing but returns just the alias (not the qualified table
 /// reference) for callers that need to build their own SQL.
 fn resolve_catalog_alias(engine: &Engine, target_db: Option<&str>) -> Option<String> {
