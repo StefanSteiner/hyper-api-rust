@@ -1245,7 +1245,7 @@ Replace `kv_set` (`server.rs:3123-3139`). Resolve the value from exactly one of 
 
 Update the `#[tool(description = ...)]` on `kv_set` (`server.rs:3120-3121`) to document the new behavior. Append to the existing description:
 
-```
+```text
  Returns {stored, created, value_bytes}; `created:false` means an existing value was overwritten. Pass overwrite=false to avoid clobbering (skips + returns stored:false, existed:true). Pass value_path=<absolute path> to store a file's contents server-side instead of `value` (exactly one of value/value_path; reads any server-readable path — no sandbox).
 ```
 
@@ -1346,7 +1346,7 @@ Replace the `kv_size` handler body in `hyperdb-mcp/src/server.rs:3189-3204` (the
 
 Update the `#[tool(description = ...)]` on `kv_size` (around `server.rs:3186-3187`) to document the `bytes` field. Extend the description to say:
 
-```
+```text
 Returns {store, size, bytes} where `size` is the key count and `bytes` is the total `OCTET_LENGTH` of all values (0 for empty stores).
 ```
 
@@ -1729,7 +1729,7 @@ Replace the `kv_list` handler (`server.rs:3169-3184`) to accept `KvListParams` a
 
 Locate the `#[tool(description = ...)]` attribute on `kv_list` (a few lines above `:3169`). Append to the existing description:
 
-```
+```text
  Pass values=true to return full (key, value) pairs as an `entries` array instead of just keys — useful for reading a whole store without N×kv_get.
 ```
 

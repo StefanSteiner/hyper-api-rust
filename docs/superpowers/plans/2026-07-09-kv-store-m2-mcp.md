@@ -782,7 +782,7 @@ Expected: FAIL — `README missing mention of kv_get` (README not yet updated).
 
 - [ ] **Step 3: Add the `### Key-value store` subsection** under `## Tool index` in `readme.rs`:
 
-```
+```markdown
 ### Key-value store (scratchpad)
 
 - `kv_set` — save a variable/state/summary/JSON under a store + key (upsert).
@@ -862,7 +862,7 @@ Expected: PASS, all cases. Real output.
 
 `hyperdb-mcp/CHANGELOG.md` under `## [Unreleased]` → `### Added`:
 
-```
+```markdown
 - `kv_get`, `kv_set`, `kv_delete`, `kv_list`, `kv_list_stores`, `kv_size`, `kv_pop`, `kv_clear` tools — a key-value scratchpad backed by the `hyperdb-api` KV store, routable to any database via the standard `database`/`persist` parameters.
 - `hyper://schema/kv` resource describing the KV table schema, durability rule, and LEFT JOIN enrichment pattern.
 ```
