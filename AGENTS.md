@@ -4,7 +4,24 @@ This file provides guidance to AI coding assistants working with code in this re
 
 **Subdirectory guidance:** The [`hyperdb-api-node/`](hyperdb-api-node/AGENTS.md) directory has its own `AGENTS.md` covering the Node.js/TypeScript bindings, napi-rs build system, and JS-specific patterns.
 
-**Bootstrapping `hyperd`:** Contributors obtain the `hyperd` executable by running `make download-hyperd` (or `.\build.ps1 download-hyperd`). The implementation lives in the [`hyperdb-bootstrap`](hyperdb-bootstrap/) crate; the pinned release is baked into [`hyperdb-bootstrap/hyperd-version.toml`](hyperdb-bootstrap/hyperd-version.toml). Bumping `hyperd` = edit that file (version + build_id + per-platform sha256s), then let the `fix(bootstrap):` commit drive the version via release-please (the crate uses `version.workspace = true` — don't hand-edit a crate version). The full repeatable procedure — verify the pin, run the suite, A/B benchmark against the previous pin, and log the result — is captured in the [`update-hyperd-release`](.claude/skills/update-hyperd-release/SKILL.md) skill; performance history is tracked in [`docs/hyperd-release-benchmarks.md`](docs/hyperd-release-benchmarks.md) — which takes a row on **either** a `hyperd` pin bump **or** a material API change (edition/MSRV migration, hot-path rewrite, codegen-affecting dependency bump), since each row is the baseline the next A/B measures against and conflating the two variables makes an engine delta unattributable.
+**Bootstrapping `hyperd`:** Contributors obtain the `hyperd` executable by
+running `make download-hyperd` (or `.\build.ps1 download-hyperd`). The
+implementation lives in the [`hyperdb-bootstrap`](hyperdb-bootstrap/) crate;
+the pinned release is baked into
+[`hyperdb-bootstrap/hyperd-version.toml`](hyperdb-bootstrap/hyperd-version.toml).
+Bumping `hyperd` = edit that file (version + build_id + per-platform sha256s),
+then let the `fix(bootstrap):` commit drive the version via release-please (the
+crate uses `version.workspace = true` — don't hand-edit a crate version). The
+full repeatable procedure — verify the pin, run the suite, A/B benchmark
+against the previous pin, and log the result — is captured in the
+[`update-hyperd-release`](.claude/skills/update-hyperd-release/SKILL.md) skill.
+
+Performance history is tracked in
+[`docs/hyperd-release-benchmarks.md`](docs/hyperd-release-benchmarks.md), which
+takes a row on **either** a `hyperd` pin bump **or** a material API change
+(edition/MSRV migration, hot-path rewrite, codegen-affecting dependency bump).
+Each row is the baseline the next A/B measures against, so conflating the two
+variables makes an engine delta unattributable.
 
 ## Project Overview
 
@@ -361,7 +378,14 @@ Arrow types are in `hyperdb-api/src/arrow_result.rs`, `arrow_reader.rs`, `arrow_
 
 ### Modifying the HyperDB MCP Tool Surface
 
-Whenever an MCP tool is added, renamed, removed, or its parameters/behavior change — and whenever a feature surfaces through the MCP (new file format, new export target, new SQL capability worth highlighting) — update [`hyperdb-mcp/src/readme.rs`](hyperdb-mcp/src/readme.rs) so the LLM-facing README returned by the `get_readme` tool stays accurate. The structural test in `hyperdb-mcp/tests/readme_tests.rs` enforces tool-name coverage; semantic content (parameter rules, examples, SQL quirks) is human-maintained and won't fail loudly when stale.
+Whenever an MCP tool is added, renamed, removed, or its parameters/behavior
+change — and whenever a feature surfaces through the MCP (new file format, new
+export target, new SQL capability worth highlighting) — update
+[`hyperdb-mcp/src/readme.rs`](hyperdb-mcp/src/readme.rs) so the LLM-facing
+README returned by the `get_readme` tool stays accurate. The structural test in
+`hyperdb-mcp/tests/readme_tests.rs` enforces tool-name coverage; semantic
+content (parameter rules, examples, SQL quirks) is human-maintained and won't
+fail loudly when stale.
 
 ## Performance Considerations
 
@@ -401,7 +425,19 @@ See [docs/RUST_DOCUMENTATION_STYLE.md](docs/RUST_DOCUMENTATION_STYLE.md) for the
 
 ## Commit and Contribution Conventions
 
-This project uses [Conventional Commits](https://www.conventionalcommits.org/) for commit messages. Versioning and changelog generation are **fully automated by release-please**: [`.github/workflows/release-please.yml`](.github/workflows/release-please.yml) runs on every push to `main` and opens (or updates) a `chore(main): release X.Y.Z` PR, driven by [`release-please-config.json`](release-please-config.json) and [`.release-please-manifest.json`](.release-please-manifest.json). Never hand-edit a crate version or the root `CHANGELOG.md`. See [CONTRIBUTING.md](CONTRIBUTING.md#release-process) for the full flow and [docs/GITHUB_OPERATIONS.md](docs/GITHUB_OPERATIONS.md#cutting-a-release) for the maintainer steps, including the `Release-As:` footer used for `-rc.N` pre-releases.
+This project uses [Conventional Commits](https://www.conventionalcommits.org/)
+for commit messages. Versioning and changelog generation are **fully automated
+by release-please**:
+[`.github/workflows/release-please.yml`](.github/workflows/release-please.yml)
+runs on every push to `main` and opens (or updates) a
+`chore(main): release X.Y.Z` PR, driven by
+[`release-please-config.json`](release-please-config.json) and
+[`.release-please-manifest.json`](.release-please-manifest.json). Never
+hand-edit a crate version or the root `CHANGELOG.md`. See
+[CONTRIBUTING.md](CONTRIBUTING.md#release-process) for the full flow and
+[docs/GITHUB_OPERATIONS.md](docs/GITHUB_OPERATIONS.md#cutting-a-release) for the
+maintainer steps, including the `Release-As:` footer used for `-rc.N`
+pre-releases.
 
 All commit messages **must** follow the format `<type>(<scope>): <subject>` — for the full specification including commit types, version impact, and examples, see [CONTRIBUTING.md](CONTRIBUTING.md#commit-message-format).
 
@@ -429,7 +465,16 @@ All commit messages **must** follow the format `<type>(<scope>): <subject>` — 
 
    When reviewing existing code or fixing bugs, flag and convert any narrowing `as` casts you encounter, even if they aren't the proximate cause of the bug — they're a latent-corruption vector and cheap to fix in the same change.
 
-8. **Update the *per-crate* `CHANGELOG.md` for user-visible crate-level changes.** When a PR adds, changes, or removes any public API surface in a publishable crate (`hyperdb-api`, `hyperdb-api-core`, `hyperdb-api-derive`, `hyperdb-api-node`, `hyperdb-api-salesforce`, `hyperdb-bootstrap`, `hyperdb-mcp`, `sea-query-hyperdb`), append a bullet to the `## [Unreleased]` section of that crate's `CHANGELOG.md` under the appropriate [Keep a Changelog](https://keepachangelog.com/) heading (`### Added`, `### Changed`, `### Deprecated`, `### Removed`, `### Fixed`, `### Security`). Internal refactors that don't change the public API surface do not require a changelog entry.
+8. **Update the *per-crate* `CHANGELOG.md` for user-visible crate-level
+ changes.** When a PR adds, changes, or removes any public API surface in a
+ publishable crate (`hyperdb-api`, `hyperdb-api-core`, `hyperdb-api-derive`,
+ `hyperdb-api-node`, `hyperdb-api-salesforce`, `hyperdb-bootstrap`,
+ `hyperdb-mcp`, `sea-query-hyperdb`), append a bullet to the
+ `## [Unreleased]` section of that crate's `CHANGELOG.md` under the
+ appropriate [Keep a Changelog](https://keepachangelog.com/) heading
+ (`### Added`, `### Changed`, `### Deprecated`, `### Removed`, `### Fixed`,
+ `### Security`). Internal refactors that don't change the public API surface
+ do not require a changelog entry.
 
  **Which changelog files you may edit** — this is the part that trips people up, because [CONTRIBUTING.md](CONTRIBUTING.md#what-contributors-do) says contributors do *not* hand-edit changelogs. Both rules are correct; they govern different files:
 
@@ -437,6 +482,14 @@ All commit messages **must** follow the format `<type>(<scope>): <subject>` — 
  - **The eight per-crate `CHANGELOG.md` files — hand-maintained.** Each carries exactly one `## [Unreleased]` section and none appear in release-please's `packages` or `extra-files`. This reminder applies to these.
  - **The npm sub-package changelogs** under `hyperdb-api-node/npm/*/` and `hyperdb-mcp/npm/*/` — leave alone; they have no `## [Unreleased]` section.
 
-9. **Never invent `hyperd` flags or engine parameters.** Obtain `hyperd` via `make download-hyperd` (it bootstraps the release pinned in `hyperdb-bootstrap/hyperd-version.toml`) and start servers through the documented path — `HyperProcess::new()` in tests, the Makefile targets, or `HYPERD_PATH` as described above. If you think a startup flag or parameter is needed, confirm it against `hyperd --help`, an existing script, or this file **before** relying on it. Fabricated `hyperd` parameters silently fail against the real binary — they have previously made tests hang while appearing to "run."
+9. **Never invent `hyperd` flags or engine parameters.** Obtain `hyperd` via
+ `make download-hyperd` (it bootstraps the release pinned in
+ `hyperdb-bootstrap/hyperd-version.toml`) and start servers through the
+ documented path — `HyperProcess::new()` in tests, the Makefile targets, or
+ `HYPERD_PATH` as described above. If you think a startup flag or parameter is
+ needed, confirm it against `hyperd --help`, an existing script, or this file
+ **before** relying on it. Fabricated `hyperd` parameters silently fail
+ against the real binary — they have previously made tests hang while
+ appearing to "run."
 
 10. **Never report a test/build as passing without seeing real output.** Check exit codes. If a command produces no output for ~30s, treat it as **hanging/failed**, not passing, and say so explicitly. A green claim backed by no captured output is a defect, not a result — tests here start a real `hyperd` subprocess (`HyperProcess::drop()` stops it), so a misconfigured server hangs rather than erroring cleanly.

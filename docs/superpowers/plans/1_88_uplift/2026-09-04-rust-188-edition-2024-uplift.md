@@ -188,6 +188,15 @@ Note that the clippy gate uses `--all-targets`, which is what makes the
 
 ## Phase 0 — De-risk the napi/edition-2024 interaction
 
+> **RESULT: GREEN — executed 2026-09-04.** `hyperdb-api-node` built at
+> `edition = "2024"` with the workspace still on 2021. Exit code **0**, zero
+> errors, zero warnings, on a forced recompile (`touch src/lib.rs`) that
+> re-expanded all 148 `#[napi]` attributes, producing a 51 MB
+> `libhyperdb_api_node.dylib`. `ctor 1.0.5`'s macro-generated bare
+> `#[no_mangle]` does survive expansion into an edition-2024 consumer, exactly
+> as D3 argued. No `[patch.crates-io]` and no per-crate edition pin needed —
+> the migration proceeds as planned. Spike reverted with zero diff.
+
 **This runs first. A red result changes the shape of the entire migration.**
 
 `hyperdb-api-node/src/` is clean: zero hand-written `#[no_mangle]`,
@@ -246,10 +255,27 @@ profile = "minimal"
 - [ ] `hyperdb-api-node/Cargo.toml` — add the missing
       `rust-version.workspace = true`. It is the only member without one, and
       its locked `napi` / `napi-derive` already declare 1.88.
-- [ ] Resolve B1: either downgrade `sysinfo` (workspace dep at `Cargo.toml:50`,
-      dev-dependency of `hyperdb-api`, used only by
-      `hyperdb-api/benches/common.rs`) to a release at or below 1.88, or
-      document that the Phase 3 gate covers lib/bin targets only.
+- [ ] **Resolve B1 by downgrading `sysinfo` to `"0.38"`** (decided
+      2026-09-04). `Cargo.toml:50` currently pins `"0.39"`. Per crates.io,
+      **0.38.4 is the newest release at `rust-version = 1.88`** — the whole
+      0.38.x and 0.37.x lines are 1.88, and 0.39.0 is where the floor jumped
+      to 1.95. This makes the 1.88 MSRV claim honest for *every* target, lets
+      the Phase 3 RHEL job graduate to `--all-targets`, and lets Task 4.0's
+      benchmark gate run at the floor rather than only on `stable`.
+
+      Note 0.38.4 sits *exactly* at our floor with no slack, so a future
+      `sysinfo` bump will need an MSRV decision alongside it.
+
+      **Expect a small API break, not a clean version swap.**
+      `hyperdb-api/benches/common.rs` uses `sysinfo::{ProcessesToUpdate,
+      System}` (line 38), `sysinfo::get_current_pid()` (line 142), and
+      `sysinfo::System::physical_core_count()` (line 258). That last one has
+      moved between associated function and instance method across sysinfo
+      releases, so verify it compiles rather than assuming. Fixing the bench
+      harness is in scope for this task.
+- [ ] Once the downgrade lands, promote the Phase 3 job from `cargo check
+      --workspace --locked` to `--all-targets`, and delete the comment that
+      explains why `--all-targets` was avoided.
 - [ ] Burn down B2 in this same task — the `clippy` CI job runs
       `-- -D warnings`, so splitting the bump from the burn-down leaves `main`
       red. **Measured baseline (clippy with `msrv = "1.88"`, 2026-09-04): 15
@@ -491,7 +517,7 @@ is not expressible on stable.** The hook types guarantee `Send` futures
 (`HookFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>`).
 Requiring an `AsyncFn`'s returned future to be `Send` fails to compile:
 
-```
+```text
 error[E0277]: `<F as AsyncFnMut<(&Conn,)>>::CallRefFuture<'_>`
               cannot be sent between threads safely
  = help: the trait `Send` is not implemented for
@@ -963,7 +989,7 @@ the MSRV floor. Worth stating in the tracker row's Notes.
       passed** with its A/B artifacts recorded.
 - [ ] Land a commit on `main` carrying the footer:
 
-```
+```text
 Release-As: 1.0.0-rc.1
 ```
 
@@ -1061,6 +1087,7 @@ gh release create v1.0.0 --target <merge-sha> --title "v1.0.0" --notes-from-tag
 gh workflow run release.yml -f tag=v1.0.0
 gh workflow run npm-build-publish.yml -f tag=v1.0.0
 ```
+
 - [ ] Confirm the npm `latest` dist-tag moves to `1.0.0`.
 - [ ] **Remove `bump-minor-pre-major` from
       [`release-please-config.json`](../../../../release-please-config.json)**
