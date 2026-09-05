@@ -183,6 +183,36 @@ fn slow_health_watchdog_reaps_hyperd_after_child_timeout() {
     );
 }
 
+/// The reaping guard must recognize a live, fully started `hyperd`.
+///
+/// Every `slow_health_*` test above reaps its engine through
+/// `stop_reported_hyperd`, which refuses to signal a PID whose identity it
+/// cannot confirm. That guard used to read `ps -o comm=`; on Linux that is the
+/// main *thread* name, which `hyperd` rewrites to `hyperdMain`, so the guard
+/// rejected the very process it existed to clean up. The rejection was only
+/// forgiven when the engine had already exited, which made it a load-dependent
+/// flake instead of a hard failure — the guard was passing by being skipped.
+///
+/// Asserting against a running engine exercises the identity path
+/// unconditionally, with no dependence on who wins a shutdown race.
+#[test]
+fn hyperd_identity_guard_accepts_a_live_engine() {
+    let temp = tempfile::TempDir::new().expect("create identity-probe directory");
+    let hyper_pid_path = temp.path().join("hyperd.pid");
+    let (hyper, _endpoint) = start_reported_hyper_process(temp.path(), &hyper_pid_path);
+    let pid = hyper.pid().expect("HyperProcess must own a child PID");
+
+    assert!(
+        process_is_alive(pid).expect("poll the live probe engine"),
+        "probe engine PID {pid} must be alive before its identity is validated"
+    );
+    validate_hyperd_process(pid).expect("identity guard must accept a live, fully started hyperd");
+
+    hyper
+        .shutdown_timeout(Duration::from_secs(5))
+        .expect("shut down the identity-probe engine");
+}
+
 fn child_mode() -> Option<String> {
     std::env::var_os(SLOW_HEALTH_CHILD_ENV)?;
     std::env::var(SLOW_HEALTH_CHILD_MODE_ENV).ok()
@@ -815,8 +845,26 @@ fn process_is_alive(_pid: u32) -> Result<bool, String> {
     Err("process liveness polling is unsupported on this platform".to_string())
 }
 
-#[cfg(unix)]
-fn validate_hyperd_process(pid: u32) -> Result<(), String> {
+/// Resolve the executable backing `pid` from `/proc`, which records the image
+/// the kernel actually mapped.
+///
+/// Deliberately *not* `ps -o comm=`: on Linux that reports
+/// `/proc/<pid>/comm`, which is the **main thread's name**, and `hyperd`
+/// renames its main thread to `hyperdMain` via `pthread_setname_np` during
+/// startup. A `comm`-based identity probe therefore rejects a genuine
+/// `hyperd`, and the reject is only forgiven when the engine has already
+/// exited — so the guard failed exactly when it had real work to do. The
+/// `exe` link cannot be renamed by the process it describes.
+#[cfg(target_os = "linux")]
+fn reported_executable(pid: u32) -> Result<PathBuf, String> {
+    std::fs::read_link(format!("/proc/{pid}/exe"))
+        .map_err(|error| format!("resolve executable of reported Hyper PID {pid}: {error}"))
+}
+
+/// macOS/BSD have no `/proc`, but there `ps -o comm=` prints the executable
+/// path rather than a thread name, so it is a sound identity source.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn reported_executable(pid: u32) -> Result<PathBuf, String> {
     let output = Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "comm="])
         .stdin(Stdio::null())
@@ -825,14 +873,22 @@ fn validate_hyperd_process(pid: u32) -> Result<(), String> {
     if !output.status.success() {
         return Err(format!("ps could not inspect reported Hyper PID {pid}"));
     }
-    let command = String::from_utf8_lossy(&output.stdout);
-    let executable = Path::new(command.trim())
+    Ok(PathBuf::from(
+        String::from_utf8_lossy(&output.stdout).trim(),
+    ))
+}
+
+#[cfg(unix)]
+fn validate_hyperd_process(pid: u32) -> Result<(), String> {
+    let executable = reported_executable(pid)?;
+    let file_name = executable
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or_default();
-    if executable != "hyperd" {
+    if file_name != "hyperd" {
         return Err(format!(
-            "refusing to terminate reported PID {pid}: process is {command:?}, not hyperd"
+            "refusing to terminate reported PID {pid}: executable is {}, not hyperd",
+            executable.display()
         ));
     }
     Ok(())
