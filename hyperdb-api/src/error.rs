@@ -330,6 +330,7 @@ impl Error {
     /// Constructs an [`Self::ColumnIndexOutOfBounds`] error. Prefer
     /// this over struct-expression syntax to remain source-compatible
     /// if new fields are added in a minor release.
+    #[must_use]
     pub fn column_index_out_of_bounds(idx: usize, column_count: usize) -> Self {
         Error::ColumnIndexOutOfBounds { idx, column_count }
     }

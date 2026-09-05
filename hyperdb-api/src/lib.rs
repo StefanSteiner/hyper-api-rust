@@ -144,6 +144,13 @@
 //! ```
 
 #![warn(missing_docs, rust_2018_idioms, clippy::all)]
+// `must_use_candidate` is `allow` workspace-wide because it measures
+// *public API* ergonomics, and 140 of its 141 workspace-wide sites are in
+// places where that does not apply: `hyperdb-api-core` (explicitly not a
+// public API), the `hyperdb-mcp` binary's internal daemon helpers, and
+// prost-generated protobuf code. This crate *is* the public API, so it opts
+// back in.
+#![warn(clippy::must_use_candidate)]
 
 mod arrow_inserter;
 /// Semantic version of this crate, resolved at compile time from

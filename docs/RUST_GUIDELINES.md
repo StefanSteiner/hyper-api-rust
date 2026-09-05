@@ -200,13 +200,16 @@ stays at `warn`, and this table enumerates the individual exceptions.
 | `clippy::module_name_repetitions` | `allow` | Existing crate/type naming is intentional (e.g. `hyperdb_api_core::types::Numeric` → `hyperdb_api_core::types::NumericError`) and churning it does not improve readability. |
 | `clippy::too_many_lines` | `allow` | Style preference, not worth the churn. Prefer reviewer judgment. |
 | `clippy::doc_markdown` | `allow` | Cosmetic: backticking every type name in rustdoc is churn with low reader benefit. |
-| `clippy::must_use_candidate` | `allow` | API-judgment call per method — promoting to `warn` post-1.0 with a focused API audit. |
 | `clippy::unreadable_literal` | `allow` | Cosmetic: digit separators on wire-format constants (`MAX_JULIAN_DAY = 5373484`) reduce grep-ability. |
 | `clippy::items_after_statements` | `allow` | Stylistic: benchmarks and tests use local helpers intermixed with setup logic. |
 | `clippy::match_same_arms` | `allow` | Consolidating identical arms can hide semantic grouping (e.g. SQL-type size tables). |
-| `clippy::missing_errors_doc` | `warn` (promote to `deny`) | **The old "large backlog" note was stale — this is measured clean.** A clippy run over `--workspace --all-targets` with the lint promoted produced **zero** warnings (2026-09-04). The crate-level `#![allow(missing_docs, ...)]` blocks in `hyperdb-api-core`, `hyperdb-mcp`, and `hyperdb-api-node` suppress the *rustc* `missing_docs` lint only and do not mask this one. Promoting to `deny` is a one-line change; tracked as Task 4.2 of the [1.88 uplift plan](superpowers/plans/1_88_uplift/README.md). |
-| `clippy::missing_panics_doc` | `warn` (promote to `deny`) | Same measurement, also **zero** warnings. |
-| `clippy::must_use_candidate` | `allow` | Measured at **141 sites** (134 methods, 7 functions) on 2026-09-04. Each is a genuine per-method API-judgment call, which is why this stays `allow` until the 1.0.0 API audit rather than being blanket-annotated. |
+| `clippy::must_use_candidate` | `allow` workspace-wide, `warn` in `hyperdb-api` | The lint measures **public API** ergonomics. Measured 2026-09-05: 141 sites, of which 122 are in `hyperdb-api-core` (whose `lib.rs` states it is not a public API), 10 are internal daemon helpers in the `hyperdb-mcp` binary, and 8 are prost-generated protobuf. Exactly **one** was in the flagship public API and is now `#[must_use]`. So `hyperdb-api/src/lib.rs` carries a crate-level `#![warn(clippy::must_use_candidate)]` and the workspace default stays `allow` — scoping the lint to where it means something rather than annotating 140 internal methods. |
+| `clippy::multiple_crate_versions` | `allow` | Version-line splits inside our dependencies, not choices this workspace makes. Measured 2026-09-05, 17 remaining: `base64`, `hashbrown`, `syn`, `getrandom`, `rand`, `rand_core`, `thiserror`, `thiserror-impl`, `r-efi`, `wit-bindgen`, and the RustCrypto 0.10/0.11 cluster. The `windows_*` triplet previously listed here is gone — dropped with the `quinn` stack when `aws-lc-rs` was replaced by `ring`. |
+
+**Promoted out of this table on 2026-09-05:** `clippy::missing_errors_doc` and
+`clippy::missing_panics_doc` are now `deny`. The prior note claimed a large
+backlog pending a post-1.0 docs pass; a real measurement found **zero** sites
+for either, so the backlog had already been closed and the note was stale.
 
 Any **source-level** waiver is expressed as
 `#[expect(lint_name, reason = "<specific reason>")]`. That attribute both
