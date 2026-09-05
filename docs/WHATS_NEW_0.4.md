@@ -6,8 +6,11 @@ Existing code keeps compiling unchanged. Two new capabilities land:
 1. Streaming typed row mapping (`stream_as`)
 2. Opt-in compile-time SQL validation (`query_as!` / `query_scalar!`)
 
-> Still pre-1.0: the public API may change in future `0.x` releases. See the
-> Project Status note in the [README](../README.md).
+> **Historical note.** This page describes the `0.4.0` release and its version
+> numbers are preserved as written. `0.4.0` was a pre-1.0 release, so the API
+> did continue to change through the rest of the `0.x` line; from `1.0.0`
+> onward the public API is stable under semantic versioning. See the Project
+> Status note in the [README](../README.md).
 
 ---
 

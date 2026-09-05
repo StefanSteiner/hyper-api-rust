@@ -310,19 +310,19 @@ bump implied. Mark a commit as a breaking change by either appending `!`
 after the type (e.g. `feat!:`) or by adding a `BREAKING CHANGE:` footer
 in the commit body.
 
-**Important pre-1.0 caveat:** while the workspace is on a `0.x.y`
-version, semver treats the entire `0.x` line as unstable, and
-release-please follows suit — a breaking change bumps the **minor**
-component, not the major. The major component stays at `0` until you
-explicitly opt into `1.0.0`.
+Now that the workspace is on `1.x`, standard semver applies: a breaking
+change bumps the **major** component. This differs from the `0.x` line,
+where release-please mapped a breaking change to a minor bump because
+semver treats all of `0.x` as unstable — so bump examples written before
+1.0.0 do not carry over.
 
-| Commit prefix on `main` | Bump from `0.1.0` to |
+| Commit prefix on `main` | Bump from `1.0.0` to |
 |---|---|
-| `fix:`, `fix(scope):` | `0.1.1` (patch) |
-| `feat:`, `feat(scope):` | `0.2.0` (minor) |
-| `feat!:` / `fix!:` / `BREAKING CHANGE:` footer | `0.2.0` (still minor — no major bump while pre-1.0) |
+| `fix:`, `fix(scope):` | `1.0.1` (patch) |
+| `feat:`, `feat(scope):` | `1.1.0` (minor) |
+| `feat!:` / `fix!:` / `BREAKING CHANGE:` footer | `2.0.0` (major) |
 | `chore:`, `docs:`, `refactor:`, `test:`, `style:`, `ci:`, `perf:`, `build:` | no release |
-| Manual `Release-As: 1.0.0` footer | `1.0.0` (forces the major bump) |
+| Manual `Release-As: X.Y.Z` footer | exactly `X.Y.Z` (overrides the computed bump) |
 
 After the workspace is on `1.x.y`, the same prefixes follow normal
 semver: `feat!:` will bump `1.2.3` → `2.0.0` as expected. To stabilize

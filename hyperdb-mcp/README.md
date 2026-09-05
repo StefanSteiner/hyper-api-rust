@@ -1,6 +1,6 @@
 # hyperdb-mcp
 
-> **Note:** This crate is AI-assisted but human-directed — much of the code was written by AI coding assistants under close review, with the design and engineering trade-offs decided by an experienced developer. The pre-1.0 (0.x) line may still undergo large breaking changes; the public API won't settle until the 1.0.0 release.
+> **Note:** This crate is AI-assisted but human-directed — much of the code was written by AI coding assistants under close review, with the design and engineering trade-offs decided by an experienced developer. As of 1.0.0 the public API is stable and follows [semantic versioning](https://semver.org/), so breaking changes require a major release.
 
 An MCP (Model Context Protocol) server that turns the Hyper columnar database into an instant SQL analytics engine. Data flows in from other MCP plugins or files, lands in Hyper automatically, and becomes queryable with SQL — no setup, no schema files, no database management.
 

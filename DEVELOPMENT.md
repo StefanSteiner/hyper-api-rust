@@ -251,7 +251,7 @@ classDiagram
 ## Dependencies
 
 The Rust Hyper API is built entirely with pure-Rust dependencies:
-- **No C compiler required** for builds (except `aws-lc-sys` compiled from source)
+- **No C compiler required** for builds
 - **No system library dependencies** (OpenSSL, etc.)
 - **Cross-compilation friendly** (WebAssembly, embedded, etc.)
 
@@ -272,7 +272,7 @@ The Rust Hyper API is built entirely with pure-Rust dependencies:
 |-------|--------|-------|
 | `rustls` | Pure Rust | TLS implementation (always-on); PEM parsing via re-exported `pki_types::pem` |
 | `webpki-roots` | Pure Rust | Mozilla CA root certificates (bundled) |
-| `aws-lc-sys` | C/ASM | Crypto provider for `rustls` (compiled from source) |
+| `ring` | Pure Rust + ASM | Crypto provider for `rustls` |
 
 ### Native Transitive Dependencies
 
@@ -281,7 +281,6 @@ transitive dependencies:
 
 | Crate | Source | Why |
 |-------|--------|-----|
-| `aws-lc-sys` | `rustls` -> `aws-lc-rs` | AWS-LC cryptographic library. Default crypto provider for `rustls`. Compiles from source. |
 | `core-foundation-sys` | `tonic` -> `rustls-native-certs` | macOS only. FFI bindings to Apple's Core Foundation. |
 | `security-framework-sys` | `tonic` -> `rustls-native-certs` | macOS only. FFI bindings to Apple's Security framework. |
 | `rustls-native-certs` | `tonic` (gRPC) | Loads OS-trusted root CA certificates. |

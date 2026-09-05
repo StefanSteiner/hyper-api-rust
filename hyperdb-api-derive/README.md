@@ -9,7 +9,7 @@ Procedural macros for [`hyperdb-api`](../hyperdb-api/README.md):
 Add `hyperdb-api-derive` directly to your `[dependencies]`:
 
 ```toml
-hyperdb-api-derive = { version = "0.3", features = ["compile-time"] }
+hyperdb-api-derive = { version = "1.0", features = ["compile-time"] }
 ```
 
 > **Without `features = ["compile-time"]`** the macros are pure pass-throughs —

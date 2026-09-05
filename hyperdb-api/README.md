@@ -15,7 +15,7 @@ Hyper database files (`.hyper`) without any C library dependencies.
 
 ```toml
 [dependencies]
-hyperdb-api = "0.4"
+hyperdb-api = "1.0"
 ```
 
 ## Runtime Requirements
@@ -512,7 +512,7 @@ window functions, CTEs, complex JOINs, and type-safe query composition.
 ```toml
 [dependencies]
 sea-query = "0.32"
-sea-query-hyperdb = "0.1"
+sea-query-hyperdb = "1.0"
 ```
 
 ```rust
@@ -535,7 +535,7 @@ and Refresh Token flows.
 
 ```toml
 [dependencies]
-hyperdb-api-salesforce = "0.1"
+hyperdb-api-salesforce = "1.0"
 ```
 
 See [hyperdb-api-salesforce/README.md](../hyperdb-api-salesforce/README.md) for setup instructions.
