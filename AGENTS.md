@@ -496,3 +496,41 @@ All commit messages **must** follow the format `<type>(<scope>): <subject>` — 
  appearing to "run."
 
 2. **Never report a test/build as passing without seeing real output.** Check exit codes. If a command produces no output for ~30s, treat it as **hanging/failed**, not passing, and say so explicitly. A green claim backed by no captured output is a defect, not a result — tests here start a real `hyperd` subprocess (`HyperProcess::drop()` stops it), so a misconfigured server hangs rather than erroring cleanly.
+
+3. **Run markdownlint on any Markdown you touch, before committing.** It is
+ **not** a CI gate, so nothing catches these for you — the only feedback is the
+ editor extension, and an agent working headless gets none at all.
+
+ ```bash
+ npx markdownlint-cli2
+ ```
+
+ No arguments: `.markdownlint-cli2.jsonc` supplies the globs and the path
+ exclusions. Rules live in `.markdownlint.json` (shared with the editor
+ extension); `.markdownlintignore` exists only because the extension reads it
+ and `markdownlint-cli2` does not.
+
+ **There is a pre-existing backlog**, so a nonzero count is not automatically
+ yours. Judge new findings against the file's prior state — `git show
+ upstream/main:<path>` and re-lint — rather than assuming, or you will "fix"
+ things that were never broken and miss the ones you introduced.
+
+ Three traps that have actually bitten:
+
+- **Duplicate `### Fixed` / `### Added` siblings under one `## [Unreleased]`**
+ (MD024). Changelogs here often already have the section further down. Merge
+ your bullet into the existing one instead of adding a second heading — that
+ also keeps [Keep a Changelog](https://keepachangelog.com/) ordering.
+- **Bare ``` fences** (MD040) need a language. Use `text` for command output,
+ ASCII diagrams, error messages, and templates.
+- **Never bulk-auto-fix fences with a naive script.** A language-tagged
+ opening fence does not match a bare-fence test, so the *closing* fence gets
+ mistaken for an opening one and tagged — silently turning a terminator into a
+ new block. This corrupted 176 fences across 22 files once. Any such pass must
+ track fence state; prefer `markdownlint-cli2 --fix`, which is safe, and note
+ that it cannot fix MD040 because choosing a language needs judgement.
+
+ Beware format-on-save: a Markdown formatter reformatting tables to satisfy
+ MD060 once stripped the README's badge links (`[![CI](img)](target)` became
+ `![CI](img)`) and split an inline link across a newline into two links. MD060
+ is disabled in `.markdownlint.json` for exactly this reason.

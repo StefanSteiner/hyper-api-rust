@@ -13,6 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING:** the optional `arrow` dependency moved from **58** to **59**,
+  matching `hyperdb-api`. Only relevant with the `salesforce-auth` feature.
+
+- **BREAKING:** the minimum supported Rust version is now **1.88**, up from
+  1.81, and the crate is compiled with **edition 2024**. 1.88 is the version
+  Red Hat Enterprise Linux 9.7 ships as `rust-toolset`. The previous 1.81 was
+  not achievable in practice — the lockfile already required 1.88 for several
+  direct dependencies.
+
 ### Fixed
 
 - **`AuthenticatedGrpcClient::get_table_labels` and `get_column_labels` now
@@ -32,19 +43,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `.unwrap_or_default()`. The parsing itself is unchanged — JSON
   `displayName` extraction, verbatim passthrough for plain descriptions, and
   skipping NULL rows all behave as before, now covered by unit tests.
-
-### Changed
-
-- **BREAKING:** the optional `arrow` dependency moved from **58** to **59**,
-  matching `hyperdb-api`. Only relevant with the `salesforce-auth` feature.
-
-- **BREAKING:** the minimum supported Rust version is now **1.88**, up from
-  1.81, and the crate is compiled with **edition 2024**. 1.88 is the version
-  Red Hat Enterprise Linux 9.7 ships as `rust-toolset`. The previous 1.81 was
-  not achievable in practice — the lockfile already required 1.88 for several
-  direct dependencies.
-
-### Fixed
 
 - `text_from_hyper_binary` and `bytea_from_hyper_binary` no longer risk a
   `usize` overflow on 32-bit targets. Both read a `u32` length prefix, widened
