@@ -22,7 +22,7 @@ AGENTS.md reminder 10 — no green is recorded without real output.
 | 1 | 1.3 `cargo fix --edition` + edition flip + resolver v3 | **Done** |
 | 2 | 2.1 let chains | **Done — via clippy, 127 sites** |
 | 2 | 2.3 `use<..>` precise capturing | **Done — applied by `cargo fix`** |
-| 1 | 1.4 drop-order triage, napi verify | Next |
+| 1 | 1.4 drop-order triage, napi verify | **Done — no code changes** |
 | 1 | 1.5 doc/config sweep | Deferred (see below) |
 | 2 | 2.2 async-closure spike, 2.5, 2.6 | Not started |
 | 3 | RHEL CI (3.0–3.4) | Not started |
@@ -126,6 +126,84 @@ that the body is a let chain and `.flatten()` is not suggestible.
 This is **M-LINT-OVERRIDE-EXPECT working exactly as advertised**: `#[expect]`
 self-cleans by failing when its lint goes quiet, which is why the guideline
 prefers it over `#[allow]`.
+
+## 2026-09-04 — Task 1.4 drop-order triage: done, no code changes needed
+
+### A process failure worth recording first
+
+**Task 2.1 landing before Task 1.4 permanently closed the measurement window.**
+`if_let_rescope` and `tail_expr_drop_order` are *migration* lints — they only
+fire on editions before 2024, describing what will change. Once on 2024 they go
+silent, confirmed: `cargo rustc -p hyperdb-api-core --lib -- -W if_let_rescope
+-W tail_expr_drop_order` now reports **zero**.
+
+Normally that would be recoverable by temporarily flipping the manifest back to
+2021. It is not, because the let chains from Task 2.1 are edition-2024-only
+syntax — the tree can no longer compile on 2021 at all. The inventory therefore
+had to be recovered from the saved `cargo fix --edition` output captured while
+still on 2021.
+
+**Lesson for the plan:** the drop-order triage has a hard ordering dependency on
+happening *before* any 2024-only syntax lands. The plan sequenced 1.4 before
+2.1 correctly; clippy's `-D warnings` gate forced 2.1 early and nothing flagged
+the conflict. A future edition migration should generate and commit the
+inventory as its very first step.
+
+### Inventory: 152 distinct (site, moved-Drop-type) pairs
+
+Recovered from the edition-2021 run and triaged by what the moved `Drop`
+actually does, rather than by count:
+
+| Moved type | Sites | Verdict |
+|---|---:|---|
+| `bytes::Bytes` | 78 | Benign — refcount decrement, no side effect |
+| *(type not captured in log)* | 37 | Benign by association; all in `Bytes`-heavy paths |
+| `TempDir` | 13 | Benign — tests only; compiler still guarantees drop-after-last-use |
+| `OwnedFd` (+ tokio `Parker`/`Thread`) | 4 | Benign — fd close, no ordering dependency |
+| tokio internals (`Runtime`, `ScheduledIo`, `Parker`) | ~14 | Not our code; reached through connection objects |
+| `proc_macro::TokenStream` | 2 | Benign — internal to `proc_macro` |
+| `WorkerGuard` | 1 | **Improved by 2024** — see below |
+| `InFlightGuard` | 1 | Benign on inspection — see below |
+| `AsyncPreparedStatement` | 1 | Observable but self-defending — see below |
+
+### The three sites that warranted real inspection
+
+**`hyperdb-mcp/src/main.rs:235` — `WorkerGuard`. Edition 2024 is strictly
+better here, and arguably fixes a latent bug.** `_file_guard` is a
+`tracing_appender` `WorkerGuard` whose `Drop` flushes buffered log output, and
+line 235 is the function's tail expression (`run_daemon(config).await`). In
+2021, tail-expression temporaries dropped *after* locals — so the guard flushed
+first and anything logged during a temporary's own `Drop` went to an
+already-flushed writer and could be lost. In 2024 the temporaries drop first
+and the guard flushes last, capturing them. No action.
+
+**`hyperdb-mcp/src/watcher.rs:617` — `InFlightGuard`. The reviewer's concern
+does not survive inspection.** The plan review singled this out as "precisely
+the class rustc warns about," because a `MutexGuard` reorders relative to a
+type with a custom `Drop`. But that `Drop` (`watcher.rs:359-363`) is a single
+`self.counter.fetch_sub(1, Ordering::Relaxed)` — a relaxed atomic decrement. It
+takes no lock and sends no message, so its position in the drop sequence is not
+observable. No action. Good illustration of the reviewer profile's own rule:
+verify against source before assigning severity.
+
+**`hyperdb-api/src/async_connection.rs:768` — `AsyncPreparedStatement`.** This
+one *is* observable: its `Drop` performs a best-effort server-side close. But
+it already defends itself — it early-returns when `self.closed`, and when
+dropped outside a tokio runtime it warns and flags the connection
+desynchronized rather than misbehaving. The related `pool.rs:947` site has a
+`Runtime` in its moved set, which is the scenario that would push it onto that
+fallback path, and that path is deliberate. No action.
+
+### Empirical backstop
+
+`make test` passes **1515/1515** on edition 2024 — identical to the
+edition-2021 baseline. Drop-order bugs are the class integration tests can
+miss, so this is corroboration rather than proof; the per-site reasoning above
+is the actual basis for closing this task.
+
+The napi half of Task 1.4 is also satisfied: Phase 0 proved the 148 `#[napi]`
+attributes expand under 2024, and the full-workspace build at 2024 includes
+`hyperdb-api-node` and exits 0.
 
 ## Deferred: all existing-doc updates
 
