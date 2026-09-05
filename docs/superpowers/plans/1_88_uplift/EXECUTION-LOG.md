@@ -26,8 +26,9 @@ AGENTS.md reminder 10 — no green is recorded without real output.
 | 1 | 1.5 doc/config sweep | Deferred (see below) |
 | 2 | 2.2 async-closure spike | **Done — NO-GO, documented** |
 | 2 | 2.5 API modernization | **Done — 1 bug fixed, 3 rejected** |
-| 2 | 2.6 node cast conversions | Next |
-| 3 | RHEL CI (3.0–3.4) | Not started |
+| 2 | 2.6 node cast conversions | **Done — 5 fixed, ~20 exempt** |
+| 3 | RHEL CI (3.0-3.4) | Next |
+
 | 4 | Benchmark gate, RC, API audit, 1.0.0 | Not started |
 
 **Commits so far:** `f3736b0`, `8a42b8c`, `9f75ff0`, `caeda1b`, `091327c`,
@@ -320,6 +321,72 @@ arithmetic did not overflow and produced the same error. The fix rests on
 construction, not on a failing test.
 
 `make test` now passes **1519/1519** (1515 plus the four new).
+
+## 2026-09-04 — Task 2.6 node casts: 5 fixed, ~20 correctly left alone (`82db12d`)
+
+### The plan's premise was wrong in two ways
+
+**First, these were not undocumented debt.** Every cast site already carried
+`#[expect(clippy::cast_possible_truncation, reason = "...")]` with a considered
+rationale, and `get_int32`'s rustdoc stated the contract explicitly — "I64/F32/F64
+cells are truncated to i32... use `getBigInt()` or `getFloat64()`". So this was
+a deliberate API decision to revisit, not sloppiness to clean up.
+
+**Second, the plan conflated two different cast classes.** AGENTS.md rule 7
+targets *integer-to-integer* narrowing, which truncates and wraps. But
+**float-to-integer `as` saturates** in Rust: an out-of-range `f64` clamps to
+`i32::MIN`/`MAX` and `NaN` becomes 0. One of the pre-existing `#[expect]`
+reasons already said so correctly. Those are lossy but bounded, not a
+corruption vector.
+
+Of roughly 25 casts in the crate, only **five** are integer-to-integer:
+
+| Site | Cast | Path |
+|---|---|---|
+| `result.rs` `get_int32` | `I64` cell → `i32` | read |
+| `columnar.rs` `get_int32_column` | `Int64` column → `i32` | read |
+| `inserter.rs` `add_value_typed` | `I32` → `i16` (SMALLINT) | **write** |
+| `inserter.rs` `add_value_typed` | `I64` → `i32` (INT) | **write** |
+| `inserter.rs` `add_value_typed` | `I64` → `i16` (SMALLINT) | **write** |
+
+### A false safety claim in the write path
+
+`add_value_typed` carried this justification:
+
+> If a caller supplies a value that does not fit the declared column type,
+> Hyper will reject the insert at `execute()` time — that is the documented
+> contract of this path.
+
+**That is false for exactly the narrowing paths.** `chunk.add_i16(x)` writes two
+bytes; a wrapped value is a *perfectly valid* encoding of a different number, so
+Hyper accepts it and the `.hyper` file silently holds corrupt data. Passing
+`2^33` into a `SMALLINT` column stored `0` with no error. Comment corrected and
+the three paths now go through checked `narrow_i16` / `narrow_i32` helpers.
+
+### Decision: throw rather than return null
+
+Chosen over `Option`-style `None` because **`null` is indistinguishable from a
+SQL NULL** — a caller could not tell a real null apart from an overflow. The
+read getters gained a `napi::Result` return; the write path already returned
+`Result`, and `columnar.rs` already returned `Result`, so only `get_int32`
+changed signature (still `number | null` in TypeScript, but now throwing).
+
+### Follow-through, done unconditionally
+
+The plan made this conditional on "if any change is JS-visible"; it is
+JS-visible by construction, so all of it was done: rustdoc on both getters,
+`index.d.ts` `@throws` declarations, four new smoke-test assertions covering
+both throw paths *and* the recommended alternatives, and a
+`hyperdb-api-node/CHANGELOG.md` entry.
+
+One accuracy fix caught while writing the error messages: the first draft told
+callers to use `getInt64Column()` "for lossless access", but that returns
+`number` and its own docs warn it loses precision above 2^53. Reworded to say it
+*widens* rather than claiming lossless. `getBigInt()` on the row path genuinely
+is lossless and is described as such.
+
+Gates: workspace `fmt` and `clippy -D warnings` exit 0; `npm test` exits 0 with
+the new narrowing block passing.
 
 ## Deferred: all existing-doc updates
 
