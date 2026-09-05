@@ -147,25 +147,21 @@ HYPERD_PATH=~/dev/bin/hyperd cargo test -p hyperdb-mcp --test attach_tests
 
 ### Editor Setup (VS Code / Windsurf / Cursor)
 
-A few of our transitive deps (`rmcp`, `rmcp-macros`, `base64ct`, `clap_lex`) use `edition = "2024"`. Older copies of the rust-analyzer binary bundled with the VS Code extension reject that with:
+**The entire workspace is `edition = "2024"`** as of 1.0.0 — not just a few transitive deps. Older copies of the rust-analyzer binary bundled with the VS Code extension reject that outright:
 
-```
+```text
 failed to interpret `cargo metadata`'s json: unknown variant `2024`
 ```
 
-If you hit this, install rust-analyzer via rustup and point the extension at it from your **user** settings (not workspace settings — we intentionally don't commit this so contributors on newer extensions aren't forced to change anything):
-
-```bash
-rustup component add rust-analyzer
-```
-
-Then in your user `settings.json`:
+`rust-toolchain.toml` lists `rust-analyzer` in its `components`, so rustup installs a matching binary for you when the toolchain is provisioned — no manual `rustup component add` step. What you may still need is to point the extension at that binary rather than its bundled one, from your **user** settings (not workspace settings — we intentionally don't commit this, so contributors on newer extensions aren't forced to change anything):
 
 ```json
 "rust-analyzer.server.path": "rust-analyzer"
 ```
 
-The rustup-shipped binary tracks the active toolchain (1.85+ supports edition 2024) so it stays in lockstep with `cargo`. `"rust-analyzer"` with no path resolves via `$PATH` — the rustup shim under `~/.cargo/bin` on Unix or `%USERPROFILE%\.cargo\bin` on Windows.
+The rustup-shipped binary tracks the active toolchain, so it stays in lockstep with `cargo`. `"rust-analyzer"` with no path resolves via `$PATH` — the rustup shim under `~/.cargo/bin` on Unix or `%USERPROFILE%\.cargo\bin` on Windows.
+
+One rust-analyzer quirk worth knowing, unrelated to the edition: with the `compile-time` feature enabled, `query_as!` validation depends on `derive(Table)` having registered the type in the same proc-macro process. rust-analyzer expands macros lazily and from cache, so it can expand a `query_as!` in a process where no derive ran. Validation detects that and skips rather than reporting a false "not registered" error, so the editor should stay quiet on code that `cargo check` accepts.
 
 ### Common Commands
 
