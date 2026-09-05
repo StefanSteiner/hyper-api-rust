@@ -3,6 +3,7 @@
 This file contains the Rust-specific style guide for developer-targeted documentation.
 
 We distinguish 4 types of documentation:
+
 * **Source code documentation**: Document structs, enums, traits, functions, and modules using rustdoc comments (`///` and `//!`). This is the primary reference for API consumers and renders on [docs.rs](https://docs.rs).
 * **Module/crate README**: Document the goals, motivations, architecture, and usage of a crate in its `README.md`. Reference the most relevant types, traits, and functions as entry points into the source code.
 * **Process and architecture documentation**: Document general processes (building, testing, releasing, reviewing) and cross-cutting architecture in the top-level `docs/` folder, one Markdown file per topic.
@@ -10,7 +11,6 @@ We distinguish 4 types of documentation:
 
 All crate READMEs and all files in `docs/` should be referenced by `docs/README.md` so that humans and agents alike have a single entry point and know when to read what.
 The `docs/README.md` should contain one or two sentences per topic to help determine relevance.
-
 
 ## General Writing Rules
 
@@ -26,7 +26,6 @@ Not everybody on the team is a native English speaker — if you change spelling
 When writing documentation, be inclusive of both AI agents and humans.
 It is fine to delineate between the two where roles differ, but most guidance should apply to both.
 
-
 ### Cross-Referencing vs. Duplication
 
 If content applies to multiple crates or describes a workflow/process (debugging, profiling, benchmarking, releasing), it belongs in `docs/` as a standalone document.
@@ -37,7 +36,6 @@ Information specific to a single crate stays in that crate's README, even if ref
 When multiple crates in the workspace share related functionality, consider consolidating into a single document rather than separate per-crate docs that may be hard to discover.
 Update all cross-references atomically when moving or consolidating documentation.
 
-
 ## Process and Architecture Documentation
 
 Processes should be documented in the top-level `docs/` folder in a separate Markdown file, one per topic.
@@ -45,7 +43,6 @@ Each document should open with a one-liner description, followed by goals, motiv
 
 Architecture documentation in `docs/` should provide a *high-level* overview of how the crates fit together.
 For details, it should reference the crate-specific documentation.
-
 
 ## Crate-Level Documentation (README.md)
 
@@ -67,14 +64,17 @@ Keep the overview list in sync with the sub-sections below it.
 
 Example overview:
 > The crate provides:
+>
 > * `Frontend` / `Backend` — Message types for the client and server sides of the protocol.
 > * COPY path — Streaming bulk data via `CopyInWriter` and `CopyOutReader`.
 > * Authentication — SCRAM-SHA-256 and MD5 authentication flows.
 >
 > ### Frontend and Backend Messages
+>
 > *(detailed explanation, usage examples...)*
 >
 > ### COPY Path
+>
 > *(detailed explanation...)*
 
 When documenting a crate, **systematically scan all `pub` items**, not just the most prominent ones.
@@ -90,6 +90,7 @@ Point out known tech debt and planned improvements.
 ### Mermaid Diagrams
 
 GitHub renders mermaid diagrams natively. Use them freely in:
+
 * `DEVELOPMENT.md` files (root and per-crate)
 * `docs/*.md` design documents
 * Internal-module contributor docs (`hyperdb-api-core/docs/DEVELOPMENT-*.md`)
@@ -108,10 +109,10 @@ graph LR
 ### crates.io Rendering Constraints
 
 Published crate READMEs render on crates.io, which differs from GitHub:
+
 * **No mermaid** — see above.
 * **Relative links** — Links to other files in the repo work on GitHub but not on crates.io. Use absolute URLs for cross-crate references when the README is published.
 * **Badges** — Place CI/version/docs.rs badges at the top of published crate READMEs.
-
 
 ## Source Code Documentation (Rustdoc)
 
@@ -178,7 +179,7 @@ Use these conventional heading sections in doc comments where applicable:
 pub fn open(process: &HyperProcess, path: &str) -> Result<Self, Error> {
 ```
 
-* **`# Examples`** — Provide for all non-trivial public APIs. Doc examples are compiled and run by `cargo test`, so they also serve as integration tests. Use `no_run` for examples that need a running `hyperd` server. Use `# ` prefix to hide boilerplate lines.
+* **`# Examples`** — Provide for all non-trivial public APIs. Doc examples are compiled and run by `cargo test`, so they also serve as integration tests. Use `no_run` for examples that need a running `hyperd` server. Use `#` prefix to hide boilerplate lines.
 * **`# Errors`** — Document all error variants that can be returned.
 * **`# Panics`** — Document conditions that cause a panic.
 * **`# Safety`** — Required on all `unsafe fn` declarations. Document the invariants the caller must uphold.
@@ -210,12 +211,12 @@ let result = read_auth_result(&mut stream)?;
 Doc examples in `///` comments are compiled and executed by `cargo test`. This is one of Rust's most powerful documentation features — use it.
 
 Guidelines:
+
 * Wrap examples in ```` ```rust ```` (or ```` ```no_run ```` / ```` ```ignore ```` when appropriate).
-* Use `# ` to hide setup lines that distract from the point of the example.
+* Use `#` to hide setup lines that distract from the point of the example.
 * Use `?` with a hidden `Ok::<(), Error>(())` return for ergonomic error handling.
 * Ensure examples compile against the crate's public API, not internal details.
 * If an example requires external state (a running server, files on disk), use `no_run`.
-
 
 ## Workspace-Level Documentation
 
@@ -234,6 +235,7 @@ This enables both humans and agents to quickly find relevant documentation.
 ### DEVELOPMENT.md
 
 Each crate should have a `DEVELOPMENT.md` for contributor-facing content that does not belong in the user-facing README:
+
 * Internal architecture and design decisions
 * Implementation details (wire formats, algorithms, encoding schemes)
 * Build and test instructions specific to that crate
@@ -250,6 +252,7 @@ Do not duplicate this per crate.
 ### Cargo.toml Metadata
 
 Published crates should have complete metadata in `Cargo.toml`:
+
 * `description` — One-line summary (renders on crates.io search results)
 * `readme = "README.md"` — Points to the crate's README
 * `repository`, `homepage` — Link to the GitHub repo
@@ -258,17 +261,16 @@ Published crates should have complete metadata in `Cargo.toml`:
 * `categories` — crates.io categories
 * `rust-version` — MSRV (Minimum Supported Rust Version)
 
-
 ## Documentation Review Checklist
 
 When reviewing documentation changes, verify:
 
-- [ ] Public items have `///` doc comments with at least a one-liner
-- [ ] `unsafe` functions have a `# Safety` section
-- [ ] Fallible functions document their error conditions
-- [ ] Code examples compile (run `cargo test --doc`)
-- [ ] Intra-doc links resolve (run `RUSTDOCFLAGS="-D warnings" cargo doc`)
-- [ ] Crate README does not contain implementation internals — those belong in DEVELOPMENT.md or source comments
-- [ ] Cross-references use links rather than duplicating content
-- [ ] New docs/ files are listed in docs/README.md
-- [ ] No stale references to renamed or removed items
+* [ ] Public items have `///` doc comments with at least a one-liner
+* [ ] `unsafe` functions have a `# Safety` section
+* [ ] Fallible functions document their error conditions
+* [ ] Code examples compile (run `cargo test --doc`)
+* [ ] Intra-doc links resolve (run `RUSTDOCFLAGS="-D warnings" cargo doc`)
+* [ ] Crate README does not contain implementation internals — those belong in DEVELOPMENT.md or source comments
+* [ ] Cross-references use links rather than duplicating content
+* [ ] New docs/ files are listed in docs/README.md
+* [ ] No stale references to renamed or removed items

@@ -13,26 +13,29 @@ The intent and goal of open sourcing this project is to increase the contributor
 Use GitHub Issues page to submit issues, enhancement requests and discuss ideas.
 
 ### Bug Reports and Fixes
--  If you find a bug, please search for it in the [Issues](https://github.com/tableau/hyper-api-rust/issues), and if it isn't already tracked,
+
+- If you find a bug, please search for it in the [Issues](https://github.com/tableau/hyper-api-rust/issues), and if it isn't already tracked,
    [create a new issue](https://github.com/tableau/hyper-api-rust/issues/new). Fill out the "Bug Report" section of the issue template. Even if an Issue is closed, feel free to comment and add details, it will still
    be reviewed.
--  Issues that have already been identified as a bug (note: able to reproduce) will be labelled `bug`.
--  If you'd like to submit a fix for a bug, [send a Pull Request](#creating_a_pull_request) and mention the Issue number.
-  -  Include tests that isolate the bug and verifies that it was fixed.
+- Issues that have already been identified as a bug (note: able to reproduce) will be labelled `bug`.
+- If you'd like to submit a fix for a bug, [send a Pull Request](#creating-a-pull-request) and mention the Issue number.
+- Include tests that isolate the bug and verifies that it was fixed.
 
 ### New Features
--  If you'd like to add new functionality to this project, describe the problem you want to solve in a [new Issue](https://github.com/tableau/hyper-api-rust/issues/new).
--  Issues that have been identified as a feature request will be labelled `enhancement`.
--  If you'd like to implement the new feature, please wait for feedback from the project
+
+- If you'd like to add new functionality to this project, describe the problem you want to solve in a [new Issue](https://github.com/tableau/hyper-api-rust/issues/new).
+- Issues that have been identified as a feature request will be labelled `enhancement`.
+- If you'd like to implement the new feature, please wait for feedback from the project
    maintainers before spending too much time writing the code. In some cases, `enhancement`s may
    not align well with the project objectives at the time.
 
 ### Tests, Documentation, Miscellaneous
--  If you'd like to improve the tests, you want to make the documentation clearer, you have an
+
+- If you'd like to improve the tests, you want to make the documentation clearer, you have an
    alternative implementation of something that may have advantages over the way its currently
    done, or you have any other change, we would be happy to hear about it!
-  -  If its a trivial change, go ahead and [send a Pull Request](#creating_a_pull_request) with the changes you have in mind.
-  -  If not, [open an Issue](https://github.com/tableau/hyper-api-rust/issues/new) to discuss the idea first.
+- If its a trivial change, go ahead and [send a Pull Request](#creating-a-pull-request) with the changes you have in mind.
+- If not, [open an Issue](https://github.com/tableau/hyper-api-rust/issues/new) to discuss the idea first.
 
 If you're new to our project and looking for some way to make your first contribution, look for
 Issues labelled `good first contribution`.
@@ -127,6 +130,7 @@ Two gotchas to avoid:
 GPG signing is also supported — see [GitHub's signing-commits guide](https://docs.github.com/en/authentication/managing-commit-signature-verification/signing-commits) for the GPG and S/MIME paths. SSH is the recommended default for this repo.
 
 # Creating a Pull Request
+
 1. **Ensure the bug/feature was not already reported** by searching on GitHub under Issues. If none exists, create a new issue so that other contributors can keep track of what you are trying to add/fix and offer suggestions (or let you know if there is already an effort in progress).
 2. **Fork** the repository on GitHub.
 3. **Clone** the forked repo to your machine.
@@ -139,6 +143,7 @@ GPG signing is also supported — see [GitHub's signing-commits guide](https://d
 > **NOTE**: Be sure to [sync your fork](https://help.github.com/articles/syncing-a-fork/) before making a pull request.
 
 # Contributor License Agreement ("CLA")
+
 In order to accept your pull request, we need you to submit a CLA. You only need
 to do this once to work on any of Salesforce's open source projects.
 
@@ -232,10 +237,12 @@ Summary:
    for the exact `gh release create` invocation, including the `--prerelease`
    flag required for `-rc.N` tags.
 4. Wait for CI to pass, then **manually trigger** the publish workflows:
+
    ```bash
    gh workflow run release.yml -f tag=vX.Y.Z
    gh workflow run npm-build-publish.yml -f tag=vX.Y.Z
    ```
+
    See [`docs/GITHUB_OPERATIONS.md`](docs/GITHUB_OPERATIONS.md#cutting-a-release)
    for why this step is manual (GitHub Actions `GITHUB_TOKEN` limitation).
 
@@ -258,7 +265,9 @@ footer in a commit on `main` — see
 | `hyperdb-api-node` | npm | Node.js/TypeScript bindings. `publish = false` for crates.io — the only crate in the tree that is not a Cargo publish target. |
 
 # Code of Conduct
+
 Please follow our [Code of Conduct](CODE_OF_CONDUCT.md).
 
 # License
+
 By contributing your code, you agree to license your contribution under the terms of our project [MIT](LICENSE-MIT) and [Apache-2.0](LICENSE-APACHE) dual license, and to sign the [Salesforce CLA](https://cla.salesforce.com/sign-cla).

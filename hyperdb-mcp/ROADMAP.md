@@ -67,12 +67,14 @@ keep these workarounds in mind:
 
 1. **`.hyper` → `.hyper` export then load.** Single-table transfer.
    Fastest because `.hyper` is Hyper's native format.
+
    ```
    # in HyperDB (sandbox)
    export(table="scratch_data", path="/tmp/scratch.hyper", format="hyper")
    # then in HyperDB-persistent
    load_file(table="scratch_data", path="/tmp/scratch.hyper")
    ```
+
 2. **CSV / Parquet / Arrow IPC roundtrip.** Universal fallback —
    works between any two workspaces and between HyperDB and
    non-Hyper consumers. Pays the serialization cost both ways.

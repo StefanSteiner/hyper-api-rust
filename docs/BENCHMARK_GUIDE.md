@@ -247,7 +247,7 @@ unchanged — opt into `ArrowInserter` and `executeQueryColumnar` /
 
 ### Platform: Linux (x86_64)
 
-**Hardware / software** _(placeholder — replace with `host` block from your suite run)_
+**Hardware / software** *(placeholder — replace with `host` block from your suite run)*
 
 - **OS:** (e.g. Ubuntu 24.04)
 - **CPU:**
@@ -260,15 +260,15 @@ unchanged — opt into `ArrowInserter` and `executeQueryColumnar` /
 
 #### Rust suite — 100M rows per workload, 4 parallel workers
 
-_Paste the contents of `test_results/benchmark_suite.md` here after running the suite on Linux. Keep the same column order so the section renders identically across platforms._
+*Paste the contents of `test_results/benchmark_suite.md` here after running the suite on Linux. Keep the same column order so the section renders identically across platforms.*
 
 #### Node.js bench — 10M rows
 
-_Paste the `SUMMARY` block from `node __test__/benchmark.mjs 10000000`. See the macOS subsection for the target table shape._
+*Paste the `SUMMARY` block from `node __test__/benchmark.mjs 10000000`. See the macOS subsection for the target table shape.*
 
 #### Rust vs Node.js — 10M apples-to-apples
 
-_Fill in once both Rust (at 10M) and Node (at 10M) numbers are captured._
+*Fill in once both Rust (at 10M) and Node (at 10M) numbers are captured.*
 
 ### Platform: Windows (x86_64, native)
 
@@ -278,7 +278,7 @@ _Fill in once both Rust (at 10M) and Node (at 10M) numbers are captured._
 - **CPU:** Intel(R) Core(TM) i9-10980XE @ 3.00 GHz (18 physical / 36 logical cores)
 - **Memory:** 127.8 GB
 - **Rust:** rustc 1.92.0 (ded5c06cf 2025-12-08)
-- **Node.js:** _not yet captured_
+- **Node.js:** *not yet captured*
 - **hyperdb-api version:** 0.1.0-rc.1
 - **hyperd:** Release build pinned via `hyperdb-bootstrap`
 - **Date:** 2026-05-02
@@ -342,15 +342,15 @@ same process.
 
 #### Node.js bench — 10M rows
 
-_Not yet captured on native Windows. Run via `npm install && npm run build && node __test__/benchmark.mjs 10000000` from `hyperdb-api-node/` and paste the `SUMMARY` block here._
+*Not yet captured on native Windows. Run via `npm install && npm run build && node __test__/benchmark.mjs 10000000` from `hyperdb-api-node/` and paste the `SUMMARY` block here.*
 
 #### Rust vs Node.js — 10M apples-to-apples
 
-_Fill in once both Rust (at 10M) and Node (at 10M) numbers are captured._
+*Fill in once both Rust (at 10M) and Node (at 10M) numbers are captured.*
 
 ### Platform: Windows (x86_64 / WSL2)
 
-**Hardware / software** _(placeholder)_
+**Hardware / software** *(placeholder)*
 
 - **OS:** (e.g. Ubuntu 22.04 under WSL2)
 - **CPU:**
@@ -363,15 +363,15 @@ _Fill in once both Rust (at 10M) and Node (at 10M) numbers are captured._
 
 #### Rust suite — 100M rows per workload, 4 parallel workers
 
-_Paste the contents of `test_results/benchmark_suite.md` here after running the suite under WSL2. WSL2 numbers should land near native Linux — see the [Windows notes](#windows-notes) below for context._
+*Paste the contents of `test_results/benchmark_suite.md` here after running the suite under WSL2. WSL2 numbers should land near native Linux — see the [Windows notes](#windows-notes) below for context.*
 
 #### Node.js bench — 10M rows
 
-_Paste the `SUMMARY` block from `node __test__/benchmark.mjs 10000000`._
+*Paste the `SUMMARY` block from `node __test__/benchmark.mjs 10000000`.*
 
 #### Rust vs Node.js — 10M apples-to-apples
 
-_Fill in once both Rust and Node numbers are captured._
+*Fill in once both Rust and Node numbers are captured.*
 
 ---
 
@@ -444,10 +444,12 @@ out differently — worth measuring.
 
 1. Build in release mode: `cargo build --release -p hyperdb-api --example benchmark_suite`
 2. Run the suite:
+
    ```sh
    HYPERD_PATH=/path/to/hyperd \
      ./target/release/examples/benchmark_suite 100000000 4
    ```
+
 3. Copy-paste:
    - The `Host:` block from stdout into the platform section as the hardware/software block.
    - The `| Workload | … |` markdown table at the end of stdout into the results block.

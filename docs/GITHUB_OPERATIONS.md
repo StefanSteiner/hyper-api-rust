@@ -10,7 +10,7 @@ binaries on the Releases page come from".
 
 ## Repository
 
-- **Canonical URL:** https://github.com/tableau/hyper-api-rust
+- **Canonical URL:** <https://github.com/tableau/hyper-api-rust>
 - **Default branch:** `main`
 - **License:** dual MIT / Apache-2.0 (see [LICENSE-MIT.txt](../LICENSE-MIT.txt), [LICENSE-APACHE.txt](../LICENSE-APACHE.txt))
 - **Governance:** see [CONTRIBUTING.md](../CONTRIBUTING.md) for the
@@ -227,10 +227,12 @@ The tag and GitHub Release **are** created by hand; see step 5.
    The npm workflow waits for CI to pass before building.
 
    If a publish workflow fails and needs a re-run:
+
    ```bash
    gh workflow run release.yml -f tag=vX.Y.Z
    gh workflow run npm-build-publish.yml -f tag=vX.Y.Z
    ```
+
    Already-published crates are skipped gracefully on re-run.
 
 ### Manual tag step (after release-please PR merge)
@@ -301,9 +303,11 @@ shipped yet — you have options:
   different version number).
 - **Force a `Release-As` bump** to skip the bad version with an empty
   commit on `main`:
+
   ```bash
   git commit --allow-empty -m "chore: release X.Y.(Z+1)" -m "Release-As: X.Y.(Z+1)"
   ```
+
   release-please then opens a fresh PR for that version.
 - **Revert the release PR's commit on `main`** if the bump itself is
   wrong, fix the manifest by hand if needed, and let release-please
@@ -371,10 +375,10 @@ without manual edits.
 
 Once both `release.yml` and `npm-build-publish.yml` go green:
 
-- https://github.com/tableau/hyper-api-rust/releases should list the
+- <https://github.com/tableau/hyper-api-rust/releases> should list the
   new tag with auto-generated release notes.
 - Each crate appears on crates.io under the new version: e.g.
-  https://crates.io/crates/hyperdb-api/X.Y.Z.
+  <https://crates.io/crates/hyperdb-api/X.Y.Z>.
 - `npm view hyperdb-mcp version` and
   `npm view hyperdb-api-node version` report the new version.
 
@@ -448,9 +452,11 @@ typically already granted), so that's what's actually deployed.
    dropdown next to it, authorize it for the `tableau` org — without
    this the secret update succeeds but the token can't touch the repo.
 5. Add it as a repo secret:
+
    ```bash
    gh secret set RELEASE_PLEASE_TOKEN --repo tableau/hyper-api-rust
    ```
+
 6. The [release-please workflow](../.github/workflows/release-please.yml)
    references this secret via `token: ${{ secrets.RELEASE_PLEASE_TOKEN }}`.
 
@@ -483,11 +489,14 @@ when multiple maintainers need the pipeline to work independently.
 2. **Install the App** on `tableau/hyper-api-rust` (or all repos in the
    org if you want it shared).
 3. **Store credentials** as repo secrets:
+
    ```bash
    gh secret set APP_ID --repo tableau/hyper-api-rust        # numeric App ID
    gh secret set APP_PRIVATE_KEY --repo tableau/hyper-api-rust  # PEM file contents
    ```
+
 4. **Update the workflow** to mint a short-lived token each run:
+
    ```yaml
    jobs:
      release-please:

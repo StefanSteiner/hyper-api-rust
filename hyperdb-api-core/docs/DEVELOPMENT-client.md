@@ -86,7 +86,7 @@ format codes, memory behavior) are documented in `client.rs` module-level rustdo
 
 COPY IN uses the PostgreSQL COPY subprotocol:
 
-1. Client sends `Query("COPY ... FROM STDIN WITH (FORMAT ...)")` 
+1. Client sends `Query("COPY ... FROM STDIN WITH (FORMAT ...)")`
 2. Server responds with `CopyInResponse`
 3. Client sends `CopyData` messages (buffered in `CopyInWriter`)
 4. Client sends `CopyDone` (success) or `CopyFail` (abort)
@@ -103,6 +103,7 @@ exceeded its budget before seeing `ReadyForQuery`), all operations fast-fail.
 Recovery requires dropping the connection and opening a new one.
 
 Key methods:
+
 - `ensure_healthy()` -- checked before every new request
 - `is_healthy()` -- used by pool layers during recycle
 - `drain_until_ready_bounded(cap)` -- used by `QueryStream::drop` and error recovery
@@ -149,6 +150,7 @@ directory) into Rust types via `tonic-build`. The generated code lives in
 `grpc/proto.rs` (included via `include!`).
 
 To regenerate after proto changes:
+
 ```bash
 cargo build -p hyper-client
 ```

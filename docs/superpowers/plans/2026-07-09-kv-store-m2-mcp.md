@@ -57,12 +57,14 @@
 ## Task 1: Public, safe-by-construction KV targeting constructors in `hyperdb-api` (sync + async)
 
 **Files:**
+
 - Modify: `hyperdb-api/src/kv_store.rs` — add `kv_store_in` + `kv_list_stores_in` to the `impl Connection` block (~419-466); add `kv_target_prefix` + `kv_list_stores_impl` helpers; edit `with_target` doc + remove its `#[allow(dead_code)]` (~130-140)
 - Modify: `hyperdb-api/src/async_kv_store.rs` — add async `kv_store_in` + `kv_list_stores_in` to the `impl AsyncConnection` block (~363-395); remove the async `with_target`'s `#[allow(dead_code)]` (~62-72)
 - Modify: `hyperdb-api/CHANGELOG.md` (`### Added` bullet — **no Cargo.toml / version / lock changes**; release-please owns those, see Global Constraints)
 - Test: `hyperdb-api/tests/kv_store_in_tests.rs` (new)
 
 **Interfaces:**
+
 - Produces:
   - `pub fn Connection::kv_store_in(&self, database: &str, name: &str) -> Result<KvStore<'_>>` + `pub async fn AsyncConnection::kv_store_in(&self, database: &str, name: &str) -> Result<AsyncKvStore<'_>>`.
   - `pub fn Connection::kv_list_stores_in(&self, database: &str) -> Result<Vec<String>>` + async twin.
@@ -357,9 +359,11 @@ git commit -m "feat(api): kv_store_in/kv_list_stores_in to target a KV store by 
 ## Task 2: KV open helper on the MCP server
 
 **Files:**
+
 - Modify: `hyperdb-mcp/src/server.rs` (add one private helper near `resolve_db`)
 
 **Interfaces:**
+
 - Produces:
   - `fn kv_open<'e>(&self, engine: &'e Engine, database: Option<&str>, store: &str) -> Result<KvStore<'e>, McpError>` — opens the store at the resolved database (`kv_store` when `None` = primary, `kv_store_in(alias, store)` otherwise). Used by every store-scoped kv_* handler.
 
@@ -408,9 +412,11 @@ Expected: compiles, with a `dead_code` warning for the unused helper (acceptable
 ## Task 3: The eight `kv_*` tool handlers
 
 **Files:**
+
 - Modify: `hyperdb-mcp/src/server.rs` (param structs in the `// --- Parameter structs ---` region ~`server.rs:70-781`; handlers inside the `#[tool_router] impl` block near the saved-query neighborhood ~`server.rs:2842-2971`)
 
 **Interfaces:**
+
 - Produces MCP tools: `kv_get`, `kv_set`, `kv_delete`, `kv_list`, `kv_list_stores`, `kv_size`, `kv_pop`, `kv_clear`.
 
 ### Tool → KV method mapping
@@ -420,13 +426,13 @@ Every tool takes optional `database` + `persist` (routing). `db` below is `resol
 | Tool | Params | Resolve/open | Mutating? (calls `check_writable`) |
 |---|---|---|---|
 | `kv_get` | `{store, key, database?, persist?}` | `kv_open(engine, db.as_deref(), &store)` → `kv.get(&key)` | no |
-| `kv_set` | `{store, key, value, database?, persist?}` | ` → kv.set(&key, &value)` | **yes** |
-| `kv_delete` | `{store, key, database?, persist?}` | ` → kv.delete(&key)` | **yes** |
-| `kv_list` | `{store, database?, persist?}` | ` → kv.keys()` | no |
+| `kv_set` | `{store, key, value, database?, persist?}` | `→ kv.set(&key, &value)` | **yes** |
+| `kv_delete` | `{store, key, database?, persist?}` | `→ kv.delete(&key)` | **yes** |
+| `kv_list` | `{store, database?, persist?}` | `→ kv.keys()` | no |
 | `kv_list_stores` | `{database?, persist?}` | `match db { Some(a) => kv_list_stores_in(a), None => kv_list_stores() }` | no |
-| `kv_size` | `{store, database?, persist?}` | ` → kv.size()` | no |
-| `kv_pop` | `{store, database?, persist?}` | ` → kv.pop()` | **yes** |
-| `kv_clear` | `{store, database?, persist?}` | ` → kv.clear()` | **yes** |
+| `kv_size` | `{store, database?, persist?}` | `→ kv.size()` | no |
+| `kv_pop` | `{store, database?, persist?}` | `→ kv.pop()` | **yes** |
+| `kv_clear` | `{store, database?, persist?}` | `→ kv.clear()` | **yes** |
 
 - [ ] **Step 1: Add param structs**
 
@@ -664,9 +670,11 @@ git commit -m "feat(mcp): add kv_* scratchpad tools backed by hyperdb-api KV sto
 ## Task 4: `hyper://schema/kv` MCP resource
 
 **Files:**
+
 - Modify: `hyperdb-mcp/src/server.rs` (`list_resources` static vec ~`4115`; `resource_body_for_uri` ~`3596`; `list_resource_uris` ~`3727`)
 
 **Interfaces:**
+
 - Produces: a static `text/plain` resource at `hyper://schema/kv` describing the KV backing-table schema, the ephemeral-vs-persistent durability rule, per-database isolation, and the LEFT JOIN enrichment pattern.
 
 - [ ] **Step 1: Add the resource descriptor** to the static `vec![...]` in `list_resources` (`server.rs:4115`):
@@ -755,6 +763,7 @@ git commit -m "feat(mcp): register hyper://schema/kv resource describing the KV 
 ## Task 5: README + coverage test + LEFT JOIN doc + supersede stale spec
 
 **Files:**
+
 - Modify: `hyperdb-mcp/src/readme.rs` (`## Tool index` ~`readme.rs:95-168`)
 - Modify: `hyperdb-mcp/tests/readme_tests.rs` (tools array ~`readme_tests.rs:32-57`)
 - Modify: `docs/superpowers/specs/2026-07-08-kv-store-design.md` (supersede stale wording)
@@ -822,12 +831,14 @@ git commit -m "docs: mark KV design spec's PK and fix:-title notes superseded"
 ## Task 6: End-to-end MCP integration test + CHANGELOG
 
 **Files:**
+
 - Test: `hyperdb-mcp/tests/kv_tools_tests.rs` (new) — mirror an existing MCP integration test's server construction (e.g. `attach_tests.rs` or a saved-query test).
 - Modify: `hyperdb-mcp/CHANGELOG.md`
 
 - [ ] **Step 1: Write the integration test**
 
 Mirror an existing `hyperdb-mcp/tests/*` server-construction harness (find how they instantiate `HyperMcpServer` with a persistent workspace and how read-only / ephemeral-only servers are built). Call the tool handlers directly, as sibling tests do. Unless noted, use the default (ephemeral) database. Cover:
+
 - `kv_set` then `kv_get` → `{found: true, value: "..."}`; `kv_get` on absent key → `{found: false, value: null}`.
 - `kv_set` overwrite → `kv_get` returns the new value.
 - `kv_list` sorted; `kv_size` count; `kv_list_stores` includes the store.
@@ -850,6 +861,7 @@ Expected: PASS, all cases. Real output.
 - [ ] **Step 3: CHANGELOG**
 
 `hyperdb-mcp/CHANGELOG.md` under `## [Unreleased]` → `### Added`:
+
 ```
 - `kv_get`, `kv_set`, `kv_delete`, `kv_list`, `kv_list_stores`, `kv_size`, `kv_pop`, `kv_clear` tools — a key-value scratchpad backed by the `hyperdb-api` KV store, routable to any database via the standard `database`/`persist` parameters.
 - `hyper://schema/kv` resource describing the KV table schema, durability rule, and LEFT JOIN enrichment pattern.

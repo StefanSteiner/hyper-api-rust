@@ -101,8 +101,8 @@ once it learns the name from the readme / MCP resource.
 
 **Why single-table (not table-per-store):**
 
-| Concern | Single table | Table-per-store |
-|---|---|---|
+| Concern | Single table | Table-per-store | Verdict |
+|---|---|---|---|
 | Point lookup / COUNT | radix-prefix on `store_name`, then key | scan smaller table | ≈ equal |
 | `list_stores` | `SELECT DISTINCT store_name` (one query) | query system catalog | single-table simpler |
 | Create/drop a store | no DDL / `DELETE WHERE store_name=` | runtime `CREATE`/`DROP TABLE` | single-table simpler + safer |

@@ -114,6 +114,7 @@ If you have callers that previously parsed SQLSTATE out of the message string fo
 ### Migration recipes
 
 **Match on error kind** — before:
+
 ```rust
 match err.kind() {
     Some(ErrorKind::Connection) => retry(),
@@ -123,6 +124,7 @@ match err.kind() {
 ```
 
 after:
+
 ```rust
 match err {
     Error::Connection { .. } => retry(),
@@ -132,11 +134,13 @@ match err {
 ```
 
 **Wrap an `io::Error`** — before:
+
 ```rust
 return Err(Error::with_cause("read failed", io_err));
 ```
 
 after:
+
 ```rust
 return Err(Error::connection_with_io("read failed", io_err));
 // or, if the failure is a generic file-system I/O outside the connection
@@ -144,17 +148,20 @@ return Err(Error::connection_with_io("read failed", io_err));
 ```
 
 **Generic state assertion** — before:
+
 ```rust
 return Err(Error::new("connection already closed"));
 ```
 
 after:
+
 ```rust
 return Err(Error::internal("connection already closed"));
 // Or, if recoverable (closed mid-operation), Error::Closed("...".into()).
 ```
 
 **Pattern-match on `Error::Other`** — before:
+
 ```rust
 if let Error::Other { message, .. } = &err { /* … */ }
 ```
@@ -162,11 +169,13 @@ if let Error::Other { message, .. } = &err { /* … */ }
 after — the variant is gone. Match on the specific new variant the call site produces. Most former `Other` constructions are now `Error::Conversion`, `Error::Internal`, `Error::Config`, `Error::FeatureNotSupported`, or `Error::InvalidName`/`InvalidTableDefinition` based on the original message.
 
 **Inspect the SQLSTATE of a server error** — `Error::sqlstate()` is preserved for backward-compatible inspection:
+
 ```rust
 if err.sqlstate() == Some("23505") { /* duplicate-key path */ }
 ```
 
 **Read SQLSTATE / detail / hint structurally** — new in v0.3.0:
+
 ```rust
 if let Error::Server { sqlstate: Some(code), detail, hint, .. } = &err {
     log::warn!("server error {code}: detail={detail:?} hint={hint:?}");

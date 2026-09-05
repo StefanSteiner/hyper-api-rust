@@ -89,7 +89,7 @@ npm run build && npm run benchmark
 The native binding loader (`index.js`) is **not just a loader** — it adds significant functionality on top of the napi-rs exports:
 
 - **Parameterized queries** (`executeQueryParams`, `executeCommandParams`) — `$1`/`$2` placeholder substitution via `escapeParam()`
-- **Tagged template literals** (`conn.sql\`...\``, `conn.command\`...\``) — safe SQL interpolation
+- **Tagged template literals** (`conn.sql\`...\``,`conn.command\`...\``) — safe SQL interpolation
 - **Query event hooks** (`conn.on('query', ...)`) — wraps `executeQuery`/`executeCommand` with timing
 - **`Symbol.asyncDispose` / `Symbol.dispose`** — resource management for `await using`
 - **`RowData.toJSON()`** — serialization with optional column names
@@ -101,6 +101,7 @@ When modifying connection behavior, check both `src/connection.rs` (Rust) and `i
 ### TypeScript Declarations
 
 `index.d.ts` is **hand-written**, not auto-generated. It must be updated manually when:
+
 - A new class or method is added in the Rust source
 - A new JS extension is added in `index.js`
 - Method signatures change
@@ -164,6 +165,7 @@ This package splits its documentation across two files:
 - **[DEVELOPMENT.md](DEVELOPMENT.md)** — contributor internals: architecture, module map, building from source, testing, publishing, adding new methods/extensions, design decisions, future enhancements.
 
 When making changes:
+
 - **New user-facing API?** Update the API Reference section in `README.md`.
 - **New build step, design decision, or contributor workflow?** Update `DEVELOPMENT.md`.
 - **Implementation details for a single file?** Prefer JSDoc comments in the source code over prose in `DEVELOPMENT.md`.

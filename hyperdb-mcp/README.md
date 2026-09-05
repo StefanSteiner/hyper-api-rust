@@ -17,6 +17,7 @@ LLMs are powerful at reasoning but cannot natively crunch millions of rows. This
 Unlike flat-text memory systems that store blobs and retrieve by similarity search, HyperDB gives LLMs **structured, queryable long-term memory**. The persistent database survives across sessions — anything the LLM stores there can be JOINed, filtered, aggregated, and reasoned over with full SQL in any future conversation.
 
 This means an LLM can:
+
 - **Accumulate knowledge over time** — store reference tables, project decisions, user preferences, learned facts
 - **Cross-reference across sessions** — JOIN today's analysis against historical data from last week
 - **Answer complex recall questions** — "Which projects had budget overruns in Q1?" is a SQL query, not a fuzzy text search
@@ -76,6 +77,7 @@ The npm package bundles both the `hyperdb-mcp` binary and the `hyperd` database 
 `nvm` (Node Version Manager) makes it easy to install and switch between Node.js versions.
 
 **macOS / Linux** ([nvm-sh/nvm](https://github.com/nvm-sh/nvm)):
+
 ```bash
 # install nvm if you don't have it
 curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
@@ -87,6 +89,7 @@ node --version    # should report v22.x.x or newer
 ```
 
 **Windows** ([coreybutler/nvm-windows](https://github.com/coreybutler/nvm-windows)): download the installer, then in a new shell:
+
 ```powershell
 nvm install lts
 nvm use lts
@@ -127,6 +130,7 @@ current directory for `.hyperd/current/hyperd`; it does not perform a general
 ### MCP Client Configuration
 
 Each AI tool reads MCP server config from a different file but uses the same JSON shape. The base config block using npx (recommended):
+
 ```json
 {
   "mcpServers": {
@@ -140,6 +144,7 @@ Each AI tool reads MCP server config from a different file but uses the same JSO
 ```
 
 Or if you built from source:
+
 ```json
 {
   "mcpServers": {
@@ -155,6 +160,7 @@ Or if you built from source:
 ```
 
 By default, persistent storage lives at the platform data dir (`~/Library/Application Support/hyperdb/workspace.hyper` on macOS, `~/.local/share/hyperdb/workspace.hyper` on Linux, `%APPDATA%\hyperdb\workspace.hyper` on Windows). To use a custom path:
+
 ```json
 "args": ["--persistent-db", "/path/to/my-project.hyper"]
 ```
@@ -171,6 +177,7 @@ process trying to attach the same file can instead receive contextual
 Create or edit `~/.claude/.mcp.json` (global) or `.mcp.json` in the project root (project-scoped). Use the base config block above.
 
 After adding the config:
+
 1. Start a new Claude Code session. You'll be prompted to approve the server on first use.
 2. **Auto-approve tools (optional):** Add `"mcp__HyperDB__*"` to the `permissions.allow` array in `~/.claude/settings.json`.
 
@@ -386,7 +393,7 @@ load_file(table: 'orders', path: '/tmp/orders.csv')
 | `schema` | object | no | Partial column-name → type map (see [Schema Overrides](#schema-overrides)) |
 
 When you're unsure of the right types — or recovering from a previous
-`SCHEMA_MISMATCH` — call [`inspect_file`](#inspect-file) first. It reports the
+`SCHEMA_MISMATCH` — call [`inspect_file`](#inspect_file) first. It reports the
 exact schema `load_file` would use plus per-column `min` / `max` / `null_count`
 so you can build a minimal, correct override in one shot.
 
@@ -437,6 +444,7 @@ execute(sql: [
 ```
 
 Validation rules enforced before any SQL hits the server:
+
 - Array must be non-empty; no element may be empty / whitespace-only / comment-only.
 - No element may be read-only — use `query` for SELECT/WITH/EXPLAIN.
 - DDL and DML cannot be mixed in one batch (Hyper aborts mixed transactions with SQLSTATE 0A000).
@@ -582,6 +590,7 @@ kv_get(store: 'session', key: 'last_report')
 ```
 
 Key properties:
+
 - **Read-only mode** — the five mutators (`kv_set`, `kv_set_many`, `kv_delete`, `kv_pop`, `kv_clear`) are disabled and return `READ_ONLY_VIOLATION`; the global guard leaves the four readers (`kv_get`, `kv_list`, `kv_size`, `kv_list_stores`) available.
 - **Attached-database access** — every attached target must have been attached
   with `writable=true`, even for readers, because a KV call may need to
@@ -689,6 +698,7 @@ unwatch_directory(path: '/tmp/inbox')
 On success, both files are deleted. On failure, both are moved to `failed/` with a `.error` JSON file.
 
 Key properties:
+
 - **One directory, one table, append mode** — files must match the target schema.
 - **Initial sweep** — pre-existing `.ready` files are processed immediately.
 - **Read-only mode** — `watch_directory` is blocked; `unwatch_directory` is always allowed.
@@ -906,6 +916,7 @@ Both statements run inside a single Hyper transaction — they commit together o
 The Hyper Rust API supports `BEGIN` / `COMMIT` / `ROLLBACK` plus an RAII `Transaction` guard (see [`docs/TRANSACTIONS.md`](../docs/TRANSACTIONS.md)). The MCP `execute` tool surfaces this as the `sql` array shape: pass multiple statements and they run atomically.
 
 Hyper-specific limits worth remembering when batching:
+
 - **DDL after DML in the same transaction is rejected** with SQLSTATE 0A000. The `execute` tool catches this up front — mixing CREATE/DROP/ALTER with INSERT/UPDATE/DELETE in one batch is rejected with an actionable error.
 - **DDL is auto-committed** even inside a transaction. `execute` rejects multi-element all-DDL batches because the "atomic" promise can't be honored — issue each DDL call as its own one-element array.
 - **After any error inside a transaction**, the connection enters aborted state and only ROLLBACK is accepted next. The `execute` tool handles this for you — on any per-statement failure the wrapper issues ROLLBACK before surfacing the error.

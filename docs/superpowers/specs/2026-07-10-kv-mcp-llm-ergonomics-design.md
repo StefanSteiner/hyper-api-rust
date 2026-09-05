@@ -187,6 +187,7 @@ single statement decides. Returns whether a row was inserted.
   `created`.
 - `overwrite:false` → calls `set_if_absent`. If the key already existed, the
   write is **skipped** and the response is:
+
   ```json
   { "stored": false, "created": false, "existed": true, "store": "s", "key": "k" }
   ```
@@ -237,16 +238,20 @@ pub fn byte_size(&self) -> Result<i64>
 #### MCP layer
 
 - `kv_size` response gains `bytes` (key `size` = count, unchanged):
+
   ```json
   { "store": "s", "size": 12, "bytes": 8451 }
   ```
+
 - **Soft warning (never blocks a write):** `kv_set` and `kv_set_many` include a
   non-fatal `warning` field when a single value's byte length exceeds
   **1 MiB (1_048_576 bytes)**:
+
   ```json
   "warning": "value is 2.1 MiB; the KV store is intended for small scraps —
               consider load_data or a real table for large payloads"
   ```
+
   The write still succeeds; `warning` is purely advisory. `value_bytes` is
   computed as `value.len()` (UTF-8 byte length) at the MCP layer.
 
@@ -271,9 +276,11 @@ struct KvSetManyParams {
 - `overwrite:false` → uses a batch variant built on `set_if_absent` per entry
   within the one transaction; existing keys are skipped, not errors.
 - Response:
+
   ```json
   { "stored": 5, "created": 3, "overwritten": 2, "total_bytes": 1234 }
   ```
+
   (Under `overwrite:false`, `overwritten` is replaced by `skipped`.)
 - `total_bytes` = sum of `value_bytes` over **all submitted entries** (the UTF-8
   byte length of every `value` in the request), computed at the MCP layer before
@@ -348,6 +355,7 @@ prefer a general, non-misleading suggestion over a specific wrong one.
 All tests run under `HYPERD_PATH=~/dev/bin/hyperd` (real `hyperd` subprocess).
 
 **API layer (`hyperdb-api`, sync + async):**
+
 - `set` returns `created:true` on first write, `created:false` on overwrite.
 - `set_batch` returns correct `{created, overwritten}` for a mixed batch.
 - `set_if_absent` returns `true` then `false`; second call does not change the
@@ -356,6 +364,7 @@ All tests run under `HYPERD_PATH=~/dev/bin/hyperd` (real `hyperd` subprocess).
   by key count vs. value length.
 
 **MCP layer (`hyperdb-mcp/tests/kv_tools_tests.rs`, via the local `TestHarness`):**
+
 - `kv_set` response carries `created` correctly across insert then overwrite.
 - `kv_set` with `overwrite:false` on an existing key → `{stored:false, existed:true}`,
   value unchanged.
@@ -372,6 +381,7 @@ All tests run under `HYPERD_PATH=~/dev/bin/hyperd` (real `hyperd` subprocess).
 - restart-durability test still passes for the new fields on a persistent store.
 
 **Structural / hygiene:**
+
 - `hyperdb-mcp/tests/readme_tests.rs` — add `kv_set_many` to the asserted
   tool-name list (`readme_tests.rs:56-63`) so README coverage is enforced.
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings` and
@@ -379,6 +389,7 @@ All tests run under `HYPERD_PATH=~/dev/bin/hyperd` (real `hyperd` subprocess).
 
 **Changelog (per-crate `## [Unreleased]` bullets ONLY — release-please owns the
 root changelog + all version numbers; see Version Impact):**
+
 - Append to `hyperdb-api/CHANGELOG.md` under `## [Unreleased]`: `### Changed`
   (BREAKING: `set`/`set_as`/`set_batch` now return `SetOutcome`/`BatchSetOutcome`)
   and `### Added` (`set_if_absent`, `byte_size`, `SetOutcome`/`BatchSetOutcome`).

@@ -6,7 +6,6 @@ Kept separate from the plan so the plan stays a stable brief while this grows.
 
 **Branch:** `feat/upgrade-to-188-RHEL97` (base `28c8813`)
 
-
 Updated as work lands. Every claim here is backed by a captured exit code, per
 AGENTS.md reminder 10 — no green is recorded without real output.
 

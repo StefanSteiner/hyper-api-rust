@@ -34,7 +34,6 @@ Progress, captured exit codes, and discovered-but-out-of-scope findings live in
 [`EXECUTION-LOG.md`](EXECUTION-LOG.md), kept separate so this plan stays a
 stable brief rather than growing with every task.
 
-
 ---
 
 **Prerequisite, already done:**
@@ -418,6 +417,7 @@ done
       temporaries in `while let Some(chunk) = ...next_chunk()` streaming
       loops (`engine.rs:915`, `:948`), a tokio `JoinSet` (`server.rs:2490`),
       and a `semver::Identifier` (`diagnostics.rs:1628`).
+
 - [ ] **Triage each generated site by whether the reordered type's `Drop` has
       observable side effects** — locks released, channel sends, process
       handles, file descriptors. Prioritize guard-interaction sites:
@@ -1059,6 +1059,7 @@ cargo clippy --workspace --all-targets -- \
       **1** `missing_errors_doc` suppression and **0** `missing_panics_doc`
       suppressions exist across the tree, against 585 `# Errors` sections. If
       that holds, promote both to `deny` — a one-line change, not a docs pass.
+
 - [ ]       **`clippy::must_use_candidate` is the genuine unknown — and it is
       large.** Measured 2026-09-04: **141 sites** (134 methods, 7 functions).
       Every one is an API-judgment call. Decide per site; do not

@@ -28,6 +28,7 @@ variables makes an engine delta unattributable.
 This is a **pure-Rust implementation** of the Hyper database API, using the PostgreSQL wire protocol with Hyper-specific extensions. It allows Rust applications to create, read, and manipulate Hyper database files (.hyper) without any C library dependencies.
 
 **Key characteristics:**
+
 - 100% pure Rust (no FFI, no C dependencies)
 - High performance (25M rows/sec inserts, 31M rows/sec queries single-connection; 48M / 73M across 4 connections)
 - Independent library (can be extracted from this repository)
@@ -83,6 +84,7 @@ Companion crates (optional, add when needed):
 **Important:** `hyperdb-api-core` is published to crates.io (Cargo requires it, because `hyperdb-api` depends on it) but it is **not a public API** — users should depend on `hyperdb-api` only. See [`hyperdb-api-core/README.md`](hyperdb-api-core/README.md) for the "forever internal" positioning.
 
 Each submodule has clear boundaries. Always work within the appropriate layer:
+
 - Type encoding issues → `hyperdb-api-core/src/types/`
 - Protocol message issues → `hyperdb-api-core/src/protocol/`
 - Connection/transport issues → `hyperdb-api-core/src/client/`
@@ -235,6 +237,7 @@ geography, transactions, chrono) are always enabled. This simplifies dependency
 management and matches the C++/Python/Java APIs.
 
 Domain-specific functionality lives in companion crates:
+
 - **`sea-query-hyperdb`** — HyperDB dialect backend for `sea-query`
 - **`hyperdb-api-salesforce`** — Salesforce Data Cloud OAuth authentication
 
@@ -257,6 +260,7 @@ hyperdb-api-core/src/types/     # Unit tests (inline with code)
 ```
 
 **Test utilities:**
+
 - `hyperdb-api/tests/common/mod.rs` - Shared test helpers
 - `hyperdb-api-core/src/client/test_util.rs` - Client test utilities
 - Both use `HyperProcess::new()` to start temporary `hyperd` servers
@@ -281,6 +285,7 @@ pub fn some_function() -> Result<()> {
 ```
 
 Error types are defined in:
+
 - `hyperdb-api/src/error.rs` - High-level errors with `ErrorKind` variants
 - `hyperdb-api-core/src/client/error.rs` - Client-level errors
 - `hyperdb-api-core/src/protocol/` - Protocol errors (minimal, mostly I/O)
@@ -307,6 +312,7 @@ while let Some(chunk) = result.next_chunk()? {
 Type conversions follow these patterns:
 
 - **Reading values:** Use `row.get::<T>(col_index)` with type inference
+
   ```rust
   let id: Option<i32> = row.get(0);
   let name: Option<String> = row.get(1);
@@ -409,6 +415,7 @@ IPC detection is in `hyperdb-api/src/process.rs`. Most code is platform-agnostic
 ## Documentation Conventions
 
 Documentation is split by audience:
+
 - **READMEs** (`README.md`) — user-facing: what the crate does, quick start, usage examples
 - **DEVELOPMENT.md** — contributor-facing: internal architecture, design decisions, how to extend, testing
 - **Source code** (`///` and `//!`) — implementation details co-located with code
@@ -478,11 +485,11 @@ All commit messages **must** follow the format `<type>(<scope>): <subject>` — 
 
  **Which changelog files you may edit** — this is the part that trips people up, because [CONTRIBUTING.md](CONTRIBUTING.md#what-contributors-do) says contributors do *not* hand-edit changelogs. Both rules are correct; they govern different files:
 
- - **Root [`CHANGELOG.md`](CHANGELOG.md) — never hand-edit.** It is release-please-generated, has no `## [Unreleased]` section, and is the only `changelog-path` in `release-please-config.json`.
- - **The eight per-crate `CHANGELOG.md` files — hand-maintained.** Each carries exactly one `## [Unreleased]` section and none appear in release-please's `packages` or `extra-files`. This reminder applies to these.
- - **The npm sub-package changelogs** under `hyperdb-api-node/npm/*/` and `hyperdb-mcp/npm/*/` — leave alone; they have no `## [Unreleased]` section.
+- **Root [`CHANGELOG.md`](CHANGELOG.md) — never hand-edit.** It is release-please-generated, has no `## [Unreleased]` section, and is the only `changelog-path` in `release-please-config.json`.
+- **The eight per-crate `CHANGELOG.md` files — hand-maintained.** Each carries exactly one `## [Unreleased]` section and none appear in release-please's `packages` or `extra-files`. This reminder applies to these.
+- **The npm sub-package changelogs** under `hyperdb-api-node/npm/*/` and `hyperdb-mcp/npm/*/` — leave alone; they have no `## [Unreleased]` section.
 
-9. **Never invent `hyperd` flags or engine parameters.** Obtain `hyperd` via
+1. **Never invent `hyperd` flags or engine parameters.** Obtain `hyperd` via
  `make download-hyperd` (it bootstraps the release pinned in
  `hyperdb-bootstrap/hyperd-version.toml`) and start servers through the
  documented path — `HyperProcess::new()` in tests, the Makefile targets, or
@@ -492,4 +499,4 @@ All commit messages **must** follow the format `<type>(<scope>): <subject>` — 
  against the real binary — they have previously made tests hang while
  appearing to "run."
 
-10. **Never report a test/build as passing without seeing real output.** Check exit codes. If a command produces no output for ~30s, treat it as **hanging/failed**, not passing, and say so explicitly. A green claim backed by no captured output is a defect, not a result — tests here start a real `hyperd` subprocess (`HyperProcess::drop()` stops it), so a misconfigured server hangs rather than erroring cleanly.
+2. **Never report a test/build as passing without seeing real output.** Check exit codes. If a command produces no output for ~30s, treat it as **hanging/failed**, not passing, and say so explicitly. A green claim backed by no captured output is a defect, not a result — tests here start a real `hyperd` subprocess (`HyperProcess::drop()` stops it), so a misconfigured server hangs rather than erroring cleanly.
