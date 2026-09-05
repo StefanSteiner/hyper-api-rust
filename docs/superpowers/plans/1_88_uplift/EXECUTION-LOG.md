@@ -599,6 +599,70 @@ all exit 0; `make test` 1519/1519.
 **Phase 4 now needs only the benchmark gate (4.0) and the release steps
 (4.1, 4.3).**
 
+### Task 4.0 — benchmark gate
+
+Same-session A/B on one box, one `hyperd`. Base is the merge-base with
+`origin/main` (`28c8813`, edition 2021) in a separate worktree; branch is
+this HEAD. Both sides built `--release` and driven by
+`bench_ab/ab_driver.sh`, which **interleaves** base and branch runs
+(base→branch→base→…) so thermal drift and background load land on both sides
+instead of penalizing whichever ran last. Artifacts are archived per run,
+since the suite overwrites `test_results/benchmark_suite.{md,json}` in place.
+
+- Host: Darwin 26.6.2, Apple M3 Max (14 cores), 96 GB, rustc 1.98.0
+- `hyperd` `0.0.26359.r07abb490` — the pin in `hyperd-version.toml`, arm64
+  native, the same binary on both sides
+- Rust suite: 100M rows per workload, 4 workers, **5 runs per side**
+- Node bench: 10M rows, **15 runs per side**
+
+**Verdict: no regression on any single-connection path.** Medians, branch vs
+base, with each workload's own run-to-run spread for scale:
+
+| Path | Δ | noise |
+|---|---:|---:|
+| `insert.bulk` sync `Inserter (HyperBinary)` | −0.4% | ±2.1% |
+| `insert.bulk` async `AsyncArrowInserter` | −0.2% | ±10.1% |
+| `query.full_scan` sync | −0.2% | ±2.3% |
+| `query.full_scan` async | +0.6% | ±2.4% |
+| `query.filtered` sync | −0.3% | ±2.4% |
+| `query.filtered` async | +1.3% | ±5.0% |
+
+The `× 4` parallel workloads are **not usable as an A/B signal on this box**:
+their run-to-run spread is ±20–61% and the deltas run in both directions
+(`query.full_scan × 4` +12.0%, `spawn_blocking+ChunkSender × 4` −11.3%), which
+is contention jitter from 4 workers on a 14-core laptop. This is why the
+methodology records single-connection figures only.
+
+**One real regression, in the Node bindings.** `executeQueryColumnar` on a
+1M-row scan went 0.072 s → 0.076 s (median +5.6%, mean +2.5%, ≈4 ms). At 15
+runs per side the distributions are visibly shifted, not overlapping noise:
+base clusters at 0.072, branch at 0.076. The cause is the Task 2.6 conversion
+in `get_int32_column` — threading a `Result` through every element defeats the
+auto-vectorization the previous `map(|&x| x as i32)` got, costing ~4 ns per
+value. That is the deliberate price of not silently truncating `i64` → `i32`
+on the JS boundary (reminder 7), and it is bounded and documented rather than
+accidental. `Columnar Filtered` (100K rows) shows no measurable change,
+and the write path that uses `narrow_i16`/`narrow_i32`
+(`RowInserter`, −0.3%) is flat because 4.6 s of COPY dominates it.
+
+A two-pass restructure — validate the slice in one vectorizable pass, then
+narrow in another — would likely recover the 4 ms while keeping the rejection
+behavior. Deliberately **not** done here: it is surgery on a data path at the
+release gate, for 4 ms per million rows, and perf is not API so it can land
+any time after 1.0.0.
+
+**IPC could not be measured.** `BENCH_TRANSPORT=ipc` fails identically on
+*both* sides — `hyperd` never creates the Unix socket the client dials
+(`failed to connect to unix socket …/hyper-<pid>/domain/hyper: No such file or
+directory`). Because it reproduces at the pre-migration baseline, the
+migration cannot be responsible. macOS IPC has never been captured in
+`BENCHMARK_GUIDE.md` (only the Windows Named Pipe section exists), so there is
+no recorded state to have regressed from. Logged as pre-existing, separate
+work — **no IPC numbers are claimed.**
+
+Not logged to `docs/hyperd-release-benchmarks.md`: that table is keyed by
+`hyperd` release, and the pin is unchanged here.
+
 ## Previously deferred (now complete)
 
 By decision on 2026-09-04, every change to *existing* docs is batched into one
