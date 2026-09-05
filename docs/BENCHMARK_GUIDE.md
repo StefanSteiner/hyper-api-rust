@@ -17,7 +17,7 @@ specific questions.
 
 All benchmarks share the same schema so numbers compare directly:
 
-```
+```sql
 measurements(id INT NOT NULL, sensor_id INT, value DOUBLE, timestamp BIGINT)
 -- 24 bytes / row
 ```

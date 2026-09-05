@@ -39,7 +39,7 @@ This is a **pure-Rust implementation** of the Hyper database API, using the Post
 
 The codebase uses a **layered architecture**. The flagship user-facing crate is `hyperdb-api`; its implementation details live in `hyperdb-api-core`, which preserves three internal submodules (`types`, `protocol`, `client`) that contributors navigate independently. Two optional companion crates extend the public surface.
 
-```
+```text
 ┌─────────────────────────────────────────────────────┐
 │  hyperdb-api (High-level API, public)               │
 │  - Connection, AsyncConnection, HyperProcess        │
@@ -247,7 +247,7 @@ Three *other* crates do define features. `hyperdb-api` is flag-free; the workspa
 
 Tests are organized by crate:
 
-```
+```text
 hyperdb-api/tests/              # Integration tests (high-level API)
 hyperdb-api/tests/common/       # Shared test utilities
 hyperdb-api-core/tests/         # Client-level integration tests

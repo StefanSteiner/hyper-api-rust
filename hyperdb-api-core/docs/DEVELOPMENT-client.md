@@ -18,7 +18,7 @@ For user-facing documentation, see [README.md](README.md).
 
 ### Module Map
 
-```
+```text
 src/
   lib.rs                  # Crate root, re-exports
   config.rs               # Config builder for TCP connections
@@ -129,7 +129,7 @@ in-flight streaming queries.
 machine that handles all three transfer modes. The state transitions and per-mode
 paths are documented in that module's rustdoc. Key states:
 
-```
+```text
 ReadInitialResults -> RequestStatus -> ReadStatus -> RequestResults -> ReadResults -> Finished
 ```
 

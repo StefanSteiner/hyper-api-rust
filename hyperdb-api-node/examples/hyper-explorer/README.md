@@ -264,7 +264,7 @@ sequenceDiagram
 
 ## Project structure
 
-```
+```text
 hyper-explorer/
 ├── server/                      # Express backend (TypeScript, tsx)
 │   ├── index.ts                 # Express, CORS, JSON, HyperProcess, pool, PORT, shutdown

@@ -151,12 +151,12 @@ With `features = ["compile-time"]` and `HYPERD_PATH` set, `query_as!` validates 
 
 Bad SQL produces a `compile_error!` pointing at the SQL string literal:
 
-```
+```text
 error: column "emai1" does not exist on any table in the query;
        check for a typo or a renamed/dropped column
 ```
 
-```
+```text
 error: `User` requires column "email" but the query does not project it;
        add it to the SELECT list or remove the field from `User`
 ```

@@ -103,7 +103,7 @@ The API uses **lifetime annotations** to provide compile-time guarantees that re
 are used correctly. All dependent types (`Inserter`, `Catalog`, `Rowset`) carry a `'conn`
 lifetime tying them to their parent `Connection`:
 
-```
+```text
 Connection (owns data)
 ├── Inserter<'conn>
 │   └── CopyInWriter<'conn>
@@ -567,7 +567,7 @@ cargo test -p hyperdb-api --test integration_test
 
 ### Test Structure
 
-```
+```text
 hyperdb-api/tests/           # Integration tests (high-level API)
 hyperdb-api/tests/common/    # Shared test utilities
 hyperdb-api-core/tests/       # Client-level integration tests

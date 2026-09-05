@@ -23,7 +23,7 @@ For user-facing documentation (type mapping, serialization traits, API surface),
 
 ### Data Flow
 
-```
+```text
 User Rust value
   │
   ▼

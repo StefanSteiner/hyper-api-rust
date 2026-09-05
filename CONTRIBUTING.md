@@ -155,7 +155,7 @@ This project uses [Conventional Commits](https://www.conventionalcommits.org/) t
 
 ## Commit Message Structure
 
-```
+```text
 <type>(<scope>): <subject>
 
 <body>
@@ -184,7 +184,7 @@ This project uses [Conventional Commits](https://www.conventionalcommits.org/) t
 
 ## Examples
 
-```
+```text
 feat: add support for batch query execution
 
 fix(hyperdb-api-core): resolve type mismatch

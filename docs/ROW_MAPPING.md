@@ -8,7 +8,7 @@ struct mapping. Start with the simplest that fits your situation.
 
 All six forms are demonstrated end-to-end in one runnable example:
 
-```
+```bash
 cargo run -p hyperdb-api --example row_mapping_forms
 ```
 

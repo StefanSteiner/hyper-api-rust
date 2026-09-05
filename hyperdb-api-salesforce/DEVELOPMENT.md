@@ -8,7 +8,7 @@ Internal architecture and contributor notes for the `hyperdb-api-salesforce` cra
 
 Authentication with Salesforce Data Cloud uses a two-stage token exchange:
 
-```
+```text
 Stage 1: App --> POST {login_url}/services/oauth2/token --> OAuth Access Token
 Stage 2: App --> POST {instance_url}/services/a360/token --> DC JWT
 ```

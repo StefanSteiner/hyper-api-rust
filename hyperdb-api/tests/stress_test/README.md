@@ -178,7 +178,7 @@ Results from actual runs on a Mac Studio (M2 Ultra, 192 GB RAM):
 
 ### Moderate Load (30s, 12 threads, seed=7777)
 
-```
+```text
 Duration:    30.5s
 Operations:  25,185 (0 failures)
 Throughput:  827 ops/sec, 297,808 insert-rows/sec
@@ -190,7 +190,7 @@ Disk used:   856 MB
 
 ### High Load (2 min, 18 threads, seed=9999)
 
-```
+```text
 Config:      5 DBs, 8 inserters, 6 query, 4 mixed
              think_time=0–5ms, batch=1k–50k rows
 Duration:    121.0s
@@ -204,7 +204,7 @@ Disk used:   2,012 MB
 
 ### Replay of High Load Run
 
-```
+```text
 Duration:    120.8s
 Operations:  13,720 (0 failures)
 Throughput:  113.5 ops/sec, 191,867 insert-rows/sec
@@ -229,7 +229,7 @@ Disk used:   1,979 MB
 
 ## File Structure
 
-```
+```text
 hyperdb-api/tests/
 ├── stress_test_main.rs          # Test entry points (#[ignore])
 └── stress_test/
