@@ -1,10 +1,10 @@
 # Hyper API for Rust
 
-![CI](https://github.com/tableau/hyper-api-rust/actions/workflows/ci.yml/badge.svg?branch=main)
-![crates.io](https://img.shields.io/crates/v/hyperdb-api.svg)
-![docs.rs](https://img.shields.io/docsrs/hyperdb-api)
-![Downloads](https://img.shields.io/crates/d/hyperdb-api.svg)
-![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)
+[![CI](https://github.com/tableau/hyper-api-rust/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/tableau/hyper-api-rust/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/hyperdb-api.svg)](https://crates.io/crates/hyperdb-api)
+[![docs.rs](https://img.shields.io/docsrs/hyperdb-api)](https://docs.rs/hyperdb-api)
+[![Downloads](https://img.shields.io/crates/d/hyperdb-api.svg)](https://crates.io/crates/hyperdb-api)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
 A **pure-Rust** implementation of the Hyper database API, using the PostgreSQL
 wire protocol with Hyper-specific extensions. Create, read, and manipulate Hyper
@@ -16,31 +16,31 @@ database files (`.hyper`) without any C library dependencies.
 > by AI coding assistants under close review, with the design, architecture, and
 > engineering trade-offs decided by an experienced developer.
 >
-> As of **1.0.0** the public API is stable and follows [semantic](https://semver.org/)
-> [versioning](https://semver.org/): breaking changes require a major release,
-> so the frequent churn of the `0.x` line is behind us.
+> As of **1.0.0** the public API is stable and follows [semantic versioning](https://semver.org/):
+> breaking changes require a major release, so the frequent churn of the `0.x`
+> line is behind us.
 >
 > Contributors and reviewers should, at a minimum, run an **AI code reviewer**
 > over any changes, following the conventions, layering rules, and patterns
 > captured in [AGENTS.md](AGENTS.md) (and the subdirectory
-> `[hyperdb-api-node/AGENTS.md](hyperdb-api-node/AGENTS.md)`). Those files are
+> [`hyperdb-api-node/AGENTS.md`](hyperdb-api-node/AGENTS.md)). Those files are
 > the authoritative guidance for AI assistants working in this repository.
 
 ## Requirements
 
 - **Rust 1.88 or newer.** 1.88 is the MSRV (minimum supported Rust version) and
-a floor, not a pin — newer toolchains are fine, and the workspace itself is
-built on **edition 2024**.
+  a floor, not a pin — newer toolchains are fine, and the workspace itself is
+  built on **edition 2024**.
 - **RHEL 9.7** and binary-compatible distributions are supported using Red Hat's
-system-native `rust-toolset`, with **no `rustup` required**. This is why the
-MSRV is 1.88: it is the version RHEL 9.7 documents. The AppStream module is a
-rolling stream and is currently ahead of that floor, and CI verifies the
-workspace against it on every code change — see [Enterprise
-Compatibility](#enterprise-compatibility) for the package list and caveats.
+  system-native `rust-toolset`, with **no `rustup` required**. This is why the
+  MSRV is 1.88: it is the version RHEL 9.7 documents. The AppStream module is a
+  rolling stream and is currently ahead of that floor, and CI verifies the
+  workspace against it — see [Enterprise Compatibility](#enterprise-compatibility)
+  for the package list and caveats.
 
 Also required at build time: `protoc` (for the gRPC bindings) and the `hyperd`
-executable, obtained with `make download-hyperd`. See [Platform
-Support](#platform-support) for the full OS and architecture matrix.
+executable, obtained with `make download-hyperd`. See
+[Platform Support](#platform-support) for the full OS and architecture matrix.
 
 ## Key Features
 
@@ -68,14 +68,12 @@ platform, download the `hyperd` executable with `make download-hyperd`
 (bundled helper — see [hyperdb-bootstrap](hyperdb-bootstrap/README.md)), then
 build:
 
-
-| Platform                  | Install `protoc`                                                                                                                                                                        | Build               |
-| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- |
-| **macOS**                 | `brew install protobuf`                                                                                                                                                                 | `make build`        |
-| **Linux** (Debian/Ubuntu) | `sudo apt-get install -y protobuf-compiler build-essential`                                                                                                                             | `make build`        |
-| **Linux** (Fedora/RHEL)   | `sudo dnf install protobuf-compiler`                                                                                                                                                    | `make build`        |
-| **Windows**               | `choco install protoc` (also install [VS Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with the "Desktop development with C++" workload for the MSVC linker) | `.\build.ps1 build` |
-
+| Platform | Install `protoc` | Build |
+|----------|------------------|-------|
+| **macOS** | `brew install protobuf` | `make build` |
+| **Linux** (Debian/Ubuntu) | `sudo apt-get install -y protobuf-compiler build-essential` | `make build` |
+| **Linux** (Fedora/RHEL) | `sudo dnf install protobuf-compiler` | `make build` |
+| **Windows** | `choco install protoc` (also install [VS Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with the "Desktop development with C++" workload for the MSVC linker) | `.\build.ps1 build` |
 
 ```bash
 # Linux / macOS
@@ -126,7 +124,7 @@ npm install -g hyperdb-mcp
 
 Supported platforms: macOS ARM64 (Apple Silicon), Linux x64 (glibc),
 Windows x64. Intel macOS is built-from-source only at the moment — see
-the platform table in `[hyperdb-mcp/README.md](hyperdb-mcp/README.md#installation)`.
+the platform table in [`hyperdb-mcp/README.md`](hyperdb-mcp/README.md#installation).
 
 **Via crates.io** (compiles from source; no bundled `hyperd`):
 
@@ -222,17 +220,15 @@ async fn main() -> Result<()> {
 
 ## Crate Overview
 
-
-| Crate                                                          | Purpose                                                                                                        | Published |
-| -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | --------- |
-| **[hyperdb-api](hyperdb-api/README.md)**                       | High-level API — connections, inserters, catalog, Arrow, pooling                                               | crates.io |
-| **[hyperdb-api-core](hyperdb-api-core/README.md)**             | Internal implementation details (types, protocol, client). Not a public API — depend on `hyperdb-api` instead. | crates.io |
-| **[hyperdb-api-salesforce](hyperdb-api-salesforce/README.md)** | Salesforce Data Cloud OAuth authentication                                                                     | crates.io |
-| **[hyperdb-mcp](hyperdb-mcp/README.md)**                       | MCP server for LLM-driven SQL analytics on `.hyper` files                                                      | crates.io |
-| **[sea-query-hyperdb](sea-query-hyperdb/README.md)**           | HyperDB dialect backend for sea-query                                                                          | crates.io |
-| **[hyperdb-api-node](hyperdb-api-node/README.md)**             | Node.js/TypeScript bindings via napi-rs                                                                        | npm       |
-| **[hyperdb-bootstrap](hyperdb-bootstrap/README.md)**           | Download the `hyperd` executable from Tableau's release packages                                               | crates.io |
-
+| Crate | Purpose | Published |
+|-------|---------|-----------|
+| **[hyperdb-api](hyperdb-api/README.md)** | High-level API — connections, inserters, catalog, Arrow, pooling | crates.io |
+| **[hyperdb-api-core](hyperdb-api-core/README.md)** | Internal implementation details (types, protocol, client). Not a public API — depend on `hyperdb-api` instead. | crates.io |
+| **[hyperdb-api-salesforce](hyperdb-api-salesforce/README.md)** | Salesforce Data Cloud OAuth authentication | crates.io |
+| **[hyperdb-mcp](hyperdb-mcp/README.md)** | MCP server for LLM-driven SQL analytics on `.hyper` files | crates.io |
+| **[sea-query-hyperdb](sea-query-hyperdb/README.md)** | HyperDB dialect backend for sea-query | crates.io |
+| **[hyperdb-api-node](hyperdb-api-node/README.md)** | Node.js/TypeScript bindings via napi-rs | npm |
+| **[hyperdb-bootstrap](hyperdb-bootstrap/README.md)** | Download the `hyperd` executable from Tableau's release packages | crates.io |
 
 ## Examples
 
@@ -240,31 +236,27 @@ The API ships 14 examples in `hyperdb-api/examples/` plus 2 companion crate exam
 
 ### Core Examples
 
-
-| Example                                        | Description                                     |
-| ---------------------------------------------- | ----------------------------------------------- |
-| `insert_data_into_single_table`                | Create a table and insert data using `Inserter` |
-| `insert_data_into_multiple_tables`             | Multiple related tables                         |
-| `create_hyper_file_from_csv`                   | Load CSV data into a Hyper table                |
-| `delete_data_in_existing_hyper_file`           | Delete data with SQL `DELETE`                   |
-| `update_data_in_existing_hyper_file`           | Update data with SQL `UPDATE`                   |
-| `read_and_print_data_from_existing_hyper_file` | Read table definitions and query data           |
-| `insert_data_with_expressions`                 | Column mappings with `MappedInserter`           |
-| `insert_geospatial_data_to_a_hyper_file`       | Insert geospatial data                          |
-
+| Example | Description |
+|---------|-------------|
+| `insert_data_into_single_table` | Create a table and insert data using `Inserter` |
+| `insert_data_into_multiple_tables` | Multiple related tables |
+| `create_hyper_file_from_csv` | Load CSV data into a Hyper table |
+| `delete_data_in_existing_hyper_file` | Delete data with SQL `DELETE` |
+| `update_data_in_existing_hyper_file` | Update data with SQL `UPDATE` |
+| `read_and_print_data_from_existing_hyper_file` | Read table definitions and query data |
+| `insert_data_with_expressions` | Column mappings with `MappedInserter` |
+| `insert_geospatial_data_to_a_hyper_file` | Insert geospatial data |
 
 ### Rust-Specific Examples
 
-
-| Example             | Description                                                    |
-| ------------------- | -------------------------------------------------------------- |
-| `arrow`             | Read/write Arrow `RecordBatch` data                            |
-| `async_usage`       | `AsyncConnection` and Tokio patterns                           |
+| Example | Description |
+|---------|-------------|
+| `arrow` | Read/write Arrow `RecordBatch` data |
+| `async_usage` | `AsyncConnection` and Tokio patterns |
 | `threaded_inserter` | Multi-threaded bulk insertion with `InsertChunk`/`ChunkSender` |
-| `grpc_query`        | gRPC transport, Arrow IPC results                              |
-| `connection_pool`   | Async connection pooling with deadpool                         |
-| `transactions`      | RAII guards, multi-table rollback, DDL, reconnect semantics    |
-
+| `grpc_query` | gRPC transport, Arrow IPC results |
+| `connection_pool` | Async connection pooling with deadpool |
+| `transactions` | RAII guards, multi-table rollback, DDL, reconnect semantics |
 
 ### Running Examples
 
@@ -355,14 +347,12 @@ See [hyperdb-api-node/README.md](hyperdb-api-node/README.md) for full documentat
 
 ## Platform Support
 
-
-| Platform          | Status    | Build Tool          |
-| ----------------- | --------- | ------------------- |
-| Linux (x86_64)    | Supported | `make build`        |
-| macOS (ARM & x64) | Supported | `make build`        |
-| Windows           | Supported | `.\build.ps1 build` |
-| WSL               | Supported | `make build`        |
-
+| Platform | Status | Build Tool |
+|----------|--------|------------|
+| Linux (x86_64) | Supported | `make build` |
+| macOS (ARM & x64) | Supported | `make build` |
+| Windows | Supported | `.\build.ps1 build` |
+| WSL | Supported | `make build` |
 
 **MSRV:** Rust 1.88 (see `rust-version` in `Cargo.toml`), chosen to match the
 `rust-toolset` version Red Hat Enterprise Linux 9.7 ships. The workspace uses
@@ -371,37 +361,35 @@ edition 2024.
 ## Enterprise Compatibility
 
 This workspace builds with Red Hat's **system-native Rust toolchain and no
-`rustup**`, which is how enterprise environments typically consume it. RHEL
+`rustup`**, which is how enterprise environments typically consume it. RHEL
 provides `rust-toolset` in AppStream as a rolling Application Stream:
 
-```
-dnf install -y rust-toolset gcc gcc-c++ fontconfig-devel unzip
-cargo build --release
-```
+    dnf install -y rust-toolset gcc gcc-c++ fontconfig-devel unzip
+    cargo build --release
 
 Notes for system-toolchain builds, all verified against `ubi9/ubi`:
 
-- `**protoc` is required and is *not* packaged for UBI.** `hyperdb-api-core`
-generates its gRPC bindings at build time via `tonic-prost-build`.
-`dnf search protobuf` offers only `protobuf-c` and `python3-protobuf`, and
-`ubi-9-codeready-builder-rpms` is already enabled by default, so install
-`protoc` from the [upstream release](https://github.com/protocolbuffers/protobuf/releases) and put it on `PATH`.
-- `**gcc`, `gcc-c++` and `fontconfig-devel` are needed for chart rendering
-only.** They come from `hyperdb-mcp`'s `plotters` dependency, whose font
-stack compiles C and C++. Nothing in this workspace's own code requires a
-C or C++ compiler.
-- `**.cargo/config.toml` is a developer convenience, not a build
-requirement.** It selects clang plus the mold linker on
-`x86_64-unknown-linux-gnu` for faster local linking; mold is not packaged for
-UBI. Either remove it or neutralize it with `RUSTFLAGS=` and
-`CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=cc`. Note that
-`--config target.<triple>.rustflags=[]` does *not* work, because Cargo joins
-`rustflags` across configuration sources rather than replacing them.
-- `**rust-toolchain.toml` can be ignored.** It is read only by `rustup`'s proxy
-shims, so a distro-packaged `cargo` never consults it.
+- **`protoc` is required and is *not* packaged for UBI.** `hyperdb-api-core`
+  generates its gRPC bindings at build time via `tonic-prost-build`.
+  `dnf search protobuf` offers only `protobuf-c` and `python3-protobuf`, and
+  `ubi-9-codeready-builder-rpms` is already enabled by default, so install
+  `protoc` from the [upstream release][protoc] and put it on `PATH`.
+- **`gcc`, `gcc-c++` and `fontconfig-devel` are needed for chart rendering
+  only.** They come from `hyperdb-mcp`'s `plotters` dependency, whose font
+  stack compiles C and C++. Nothing in this workspace's own code requires a
+  C or C++ compiler.
+- **`.cargo/config.toml` is a developer convenience, not a build
+  requirement.** It selects clang plus the mold linker on
+  `x86_64-unknown-linux-gnu` for faster local linking; mold is not packaged for
+  UBI. Either remove it or neutralize it with `RUSTFLAGS=` and
+  `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=cc`. Note that
+  `--config target.<triple>.rustflags=[]` does *not* work, because Cargo joins
+  `rustflags` across configuration sources rather than replacing them.
+- **`rust-toolchain.toml` can be ignored.** It is read only by `rustup`'s proxy
+  shims, so a distro-packaged `cargo` never consults it.
 - **RHEL's `rust-toolset` is a rolling stream** and is currently *ahead* of the
-1.88.0 documented in the RHEL 9.7 release notes. The MSRV floor of 1.88 is
-therefore conservative and safe.
+  1.88.0 documented in the RHEL 9.7 release notes. The MSRV floor of 1.88 is
+  therefore conservative and safe.
 
 Compatibility is enforced by
 `.github/workflows/rhel-compatibility.yml`, which runs
@@ -409,21 +397,21 @@ Compatibility is enforced by
 using nothing but the distro toolchain. Reproduce it locally with
 `make check-rhel`.
 
+[protoc]: https://github.com/protocolbuffers/protobuf/releases
+
 ## Documentation
 
-
-| Resource                                                         | Description                                                               |
-| ---------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| **[hyperdb-api/README.md](hyperdb-api/README.md)**               | Full user guide for the `hyperdb-api` crate                               |
-| **[docs/WHATS_NEW_0.4.md](docs/WHATS_NEW_0.4.md)**               | Highlights of the 0.4.0 release                                           |
-| **[docs/ROW_MAPPING.md](docs/ROW_MAPPING.md)**                   | The five ways to map result rows into Rust values                         |
+| Resource | Description |
+|----------|-------------|
+| **[hyperdb-api/README.md](hyperdb-api/README.md)** | Full user guide for the `hyperdb-api` crate |
+| **[docs/WHATS_NEW_0.4.md](docs/WHATS_NEW_0.4.md)** | Highlights of the 0.4.0 release |
+| **[docs/ROW_MAPPING.md](docs/ROW_MAPPING.md)** | The five ways to map result rows into Rust values |
 | **[hyperdb-api-derive/README.md](hyperdb-api-derive/README.md)** | `#[derive(FromRow)]`, `#[derive(Table)]`, and compile-time SQL validation |
-| **[DEVELOPMENT.md](DEVELOPMENT.md)**                             | Architecture, building, testing, benchmarks — for contributors            |
-| **[CONTRIBUTING.md](CONTRIBUTING.md)**                           | How to contribute                                                         |
-| **[docs/GITHUB_OPERATIONS.md](docs/GITHUB_OPERATIONS.md)**       | CI/release workflows and how maintainers cut a release                    |
-| **[docs/TRANSACTIONS.md](docs/TRANSACTIONS.md)**                 | Transaction API design                                                    |
-| **[docs/BENCHMARK_GUIDE.md](docs/BENCHMARK_GUIDE.md)**           | How to run benchmarks                                                     |
-
+| **[DEVELOPMENT.md](DEVELOPMENT.md)** | Architecture, building, testing, benchmarks — for contributors |
+| **[CONTRIBUTING.md](CONTRIBUTING.md)** | How to contribute |
+| **[docs/GITHUB_OPERATIONS.md](docs/GITHUB_OPERATIONS.md)** | CI/release workflows and how maintainers cut a release |
+| **[docs/TRANSACTIONS.md](docs/TRANSACTIONS.md)** | Transaction API design |
+| **[docs/BENCHMARK_GUIDE.md](docs/BENCHMARK_GUIDE.md)** | How to run benchmarks |
 
 Per-crate documentation: each crate has its own `README.md` (see [Crate Overview](#crate-overview)).
 
@@ -443,7 +431,7 @@ commit message format, and pull request process.
 This project includes code adapted from
 [sfackler/rust-postgres](https://github.com/sfackler/rust-postgres) (the
 `postgres-protocol`, `tokio-postgres`, and `postgres-types` crates by Steven
-Fackler, MIT or Apache-2.0). See `[NOTICE](NOTICE)` for the full third-party
+Fackler, MIT or Apache-2.0). See [`NOTICE`](NOTICE) for the full third-party
 attribution list and the upstream license text.
 
 ## License
