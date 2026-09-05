@@ -15,7 +15,7 @@ This is a **pure-Rust implementation** of the Hyper database API, using the Post
 - High performance (22-24M rows/sec inserts, 18M rows/sec queries)
 - Independent library (can be extracted from this repository)
 - Zero build system dependencies (uses standard Cargo)
-- **Zero feature flags** — all capabilities are always available
+- **No feature flags on `hyperdb-api`** — every capability of the flagship crate (TLS, pooling, geography, transactions, chrono) is always available. A few companion crates do carry optional features; see [Feature Flags](#feature-flags) for the complete list.
 
 ## Architecture
 
@@ -221,6 +221,12 @@ Domain-specific functionality lives in companion crates:
 - **`sea-query-hyperdb`** — HyperDB dialect backend for `sea-query`
 - **`hyperdb-api-salesforce`** — Salesforce Data Cloud OAuth authentication
 
+Three *other* crates do define features. `hyperdb-api` is flag-free; the workspace as a whole is not:
+
+- **`hyperdb-api-core`** — `salesforce-auth` (off by default): pulls in `hyperdb-api-salesforce` and `arrow`. A plumbing detail; normally picked up transitively through `hyperdb-api`.
+- **`hyperdb-api-derive`** — `compile-time` (off by default): enables compile-time SQL validation via `query_as!` and `derive(Table)` `#[hyperdb(register)]`, pulling in `hyperdb-compile-check`.
+- **`hyperdb-bootstrap`** — `cli` (**on** by default): the `clap`/`anyhow`/`tracing-subscriber` command-line surface. Depend on it with `default-features = false` to use it as a library.
+
 ## Testing Structure
 
 Tests are organized by crate:
@@ -395,7 +401,7 @@ See [docs/RUST_DOCUMENTATION_STYLE.md](docs/RUST_DOCUMENTATION_STYLE.md) for the
 
 ## Commit and Contribution Conventions
 
-This project uses [Conventional Commits](https://www.conventionalcommits.org/) for commit messages. A [`release-please-config.json`](../release-please-config.json) is checked in for future use, but no GitHub Actions workflow currently invokes Release Please — versioning and changelog updates are maintained manually today (see [CONTRIBUTING.md](CONTRIBUTING.md#release-process)).
+This project uses [Conventional Commits](https://www.conventionalcommits.org/) for commit messages. Versioning and changelog generation are **fully automated by release-please**: [`.github/workflows/release-please.yml`](.github/workflows/release-please.yml) runs on every push to `main` and opens (or updates) a `chore(main): release X.Y.Z` PR, driven by [`release-please-config.json`](release-please-config.json) and [`.release-please-manifest.json`](.release-please-manifest.json). Never hand-edit a crate version or the root `CHANGELOG.md`. See [CONTRIBUTING.md](CONTRIBUTING.md#release-process) for the full flow and [docs/GITHUB_OPERATIONS.md](docs/GITHUB_OPERATIONS.md#cutting-a-release) for the maintainer steps, including the `Release-As:` footer used for `-rc.N` pre-releases.
 
 All commit messages **must** follow the format `<type>(<scope>): <subject>` — for the full specification including commit types, version impact, and examples, see [CONTRIBUTING.md](CONTRIBUTING.md#commit-message-format).
 
@@ -423,7 +429,13 @@ All commit messages **must** follow the format `<type>(<scope>): <subject>` — 
 
    When reviewing existing code or fixing bugs, flag and convert any narrowing `as` casts you encounter, even if they aren't the proximate cause of the bug — they're a latent-corruption vector and cheap to fix in the same change.
 
-8. **Update `CHANGELOG.md` for user-visible crate-level changes.** When a PR adds, changes, or removes any public API surface in a publishable crate (`hyperdb-api`, `hyperdb-api-core`, `hyperdb-api-node`, `hyperdb-api-salesforce`, `hyperdb-bootstrap`, `hyperdb-mcp`, `sea-query-hyperdb`), append a bullet to the `## [Unreleased]` section of that crate's `CHANGELOG.md` under the appropriate [Keep a Changelog](https://keepachangelog.com/) heading (`### Added`, `### Changed`, `### Deprecated`, `### Removed`, `### Fixed`, `### Security`). Internal refactors that don't change the public API surface do not require a changelog entry. The `## [Unreleased]` section is promoted to a dated `## [X.Y.Z] - YYYY-MM-DD` section by the maintainer at release time. See [CONTRIBUTING.md](CONTRIBUTING.md#authoring-changes-every-contributor) for the full policy.
+8. **Update the *per-crate* `CHANGELOG.md` for user-visible crate-level changes.** When a PR adds, changes, or removes any public API surface in a publishable crate (`hyperdb-api`, `hyperdb-api-core`, `hyperdb-api-derive`, `hyperdb-api-node`, `hyperdb-api-salesforce`, `hyperdb-bootstrap`, `hyperdb-mcp`, `sea-query-hyperdb`), append a bullet to the `## [Unreleased]` section of that crate's `CHANGELOG.md` under the appropriate [Keep a Changelog](https://keepachangelog.com/) heading (`### Added`, `### Changed`, `### Deprecated`, `### Removed`, `### Fixed`, `### Security`). Internal refactors that don't change the public API surface do not require a changelog entry.
+
+ **Which changelog files you may edit** — this is the part that trips people up, because [CONTRIBUTING.md](CONTRIBUTING.md#what-contributors-do) says contributors do *not* hand-edit changelogs. Both rules are correct; they govern different files:
+
+ - **Root [`CHANGELOG.md`](CHANGELOG.md) — never hand-edit.** It is release-please-generated, has no `## [Unreleased]` section, and is the only `changelog-path` in `release-please-config.json`.
+ - **The eight per-crate `CHANGELOG.md` files — hand-maintained.** Each carries exactly one `## [Unreleased]` section and none appear in release-please's `packages` or `extra-files`. This reminder applies to these.
+ - **The npm sub-package changelogs** under `hyperdb-api-node/npm/*/` and `hyperdb-mcp/npm/*/` — leave alone; they have no `## [Unreleased]` section.
 
 9. **Never invent `hyperd` flags or engine parameters.** Obtain `hyperd` via `make download-hyperd` (it bootstraps the release pinned in `hyperdb-bootstrap/hyperd-version.toml`) and start servers through the documented path — `HyperProcess::new()` in tests, the Makefile targets, or `HYPERD_PATH` as described above. If you think a startup flag or parameter is needed, confirm it against `hyperd --help`, an existing script, or this file **before** relying on it. Fabricated `hyperd` parameters silently fail against the real binary — they have previously made tests hang while appearing to "run."
 
