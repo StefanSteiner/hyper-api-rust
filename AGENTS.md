@@ -30,7 +30,7 @@ This is a **pure-Rust implementation** of the Hyper database API, using the Post
 **Key characteristics:**
 
 - 100% pure Rust (no FFI, no C dependencies)
-- High performance (25M rows/sec inserts, 31M rows/sec queries single-connection; 48M / 73M across 4 connections)
+- High performance on a single connection (100M-row benchmark, Apple M3 Max): 68.9M rows/sec inserts via the async `AsyncArrowInserter`, 25.0M rows/sec via the sync `Inserter`, 31.1M rows/sec full-scan queries via the sync path. See [docs/BENCHMARK_GUIDE.md](docs/BENCHMARK_GUIDE.md) for the multi-connection and per-platform figures.
 - Independent library (can be extracted from this repository)
 - Zero build system dependencies (uses standard Cargo)
 - **No feature flags on `hyperdb-api`** — every capability of the flagship crate (TLS, pooling, geography, transactions, chrono) is always available. A few companion crates do carry optional features; see [Feature Flags](#feature-flags) for the complete list.
@@ -393,7 +393,7 @@ fail loudly when stale.
 
 - **Inserter API uses binary COPY protocol** - 10-100x faster than INSERT statements
 - **Streaming results** - Always process in chunks, never load all rows
-- **Arrow batching** - Use `ArrowInserter` for maximum throughput (30M rows/sec single-connection, 48M+ across 4)
+- **Arrow batching** - Use the async `AsyncArrowInserter` for maximum insert throughput: 68.9M rows/sec on a single connection, versus 25.0M rows/sec for the sync `Inserter`. Only the async variant is benchmarked at that rate — the sync `ArrowInserter` is not measured by the suite. Spending extra connections on an Arrow insert buys nothing on the benchmarked host.
 - **Release builds** - Use `--release` for benchmarks (debug is 10x+ slower)
 - **Connection pooling** - Use `pool` module for async high-concurrency scenarios
 
