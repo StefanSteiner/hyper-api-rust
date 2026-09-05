@@ -256,6 +256,15 @@ jobs:
         # its own workflow when wired up. hyperdb-bootstrap has its own
         # coverage (next step) and doesn't need hyperd running.
 
+      - name: hyperdb-compile-check tests
+        # Declares its own [workspace], so the run above cannot see it. Nothing
+        # else ran this published crate's tests — the msrv and RHEL jobs only
+        # `cargo check` it.
+        shell: bash
+        env:
+          HYPERD_PATH: ${{ github.workspace }}/.hyperd/current
+        run: cargo test --manifest-path hyperdb-compile-check/Cargo.toml
+
       - name: hyperdb-bootstrap tests
         run: cargo test -p hyperdb-bootstrap
 

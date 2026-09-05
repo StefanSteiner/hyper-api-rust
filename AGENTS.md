@@ -470,9 +470,9 @@ All commit messages **must** follow the format `<type>(<scope>): <subject>` — 
 
 8. **Update the *per-crate* `CHANGELOG.md` for user-visible crate-level
  changes.** When a PR adds, changes, or removes any public API surface in a
- publishable crate (`hyperdb-api`, `hyperdb-api-core`, `hyperdb-api-derive`,
- `hyperdb-api-node`, `hyperdb-api-salesforce`, `hyperdb-bootstrap`,
- `hyperdb-mcp`, `sea-query-hyperdb`), append a bullet to the
+ publishable crate (`hyperdb-api`, `hyperdb-api-core`, `hyperdb-compile-check`,
+ `hyperdb-api-derive`, `hyperdb-api-node`, `hyperdb-api-salesforce`,
+ `hyperdb-bootstrap`, `hyperdb-mcp`, `sea-query-hyperdb`), append a bullet to the
  `## [Unreleased]` section of that crate's `CHANGELOG.md` under the
  appropriate [Keep a Changelog](https://keepachangelog.com/) heading
  (`### Added`, `### Changed`, `### Deprecated`, `### Removed`, `### Fixed`,
@@ -482,7 +482,7 @@ All commit messages **must** follow the format `<type>(<scope>): <subject>` — 
  **Which changelog files you may edit** — this is the part that trips people up, because [CONTRIBUTING.md](CONTRIBUTING.md#what-contributors-do) says contributors do *not* hand-edit changelogs. Both rules are correct; they govern different files:
 
 - **Root [`CHANGELOG.md`](CHANGELOG.md) — never hand-edit.** It is release-please-generated, has no `## [Unreleased]` section, and is the only `changelog-path` in `release-please-config.json`.
-- **The eight per-crate `CHANGELOG.md` files — hand-maintained.** Each carries exactly one `## [Unreleased]` section and none appear in release-please's `packages` or `extra-files`. This reminder applies to these.
+- **The nine per-crate `CHANGELOG.md` files — hand-maintained.** Each carries exactly one `## [Unreleased]` section and none appear in release-please's `packages` or `extra-files`. This reminder applies to these. `hyperdb-compile-check` is the ninth: it is published (`release.yml` does so explicitly, since it declares its own `[workspace]` and `--workspace` cannot see it) but was missing from this list, which is why it had no changelog until 1.0.0.
 - **The npm sub-package changelogs** under `hyperdb-api-node/npm/*/` and `hyperdb-mcp/npm/*/` — leave alone; they have no `## [Unreleased]` section.
 
 1. **Never invent `hyperd` flags or engine parameters.** Obtain `hyperd` via
