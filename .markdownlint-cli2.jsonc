@@ -24,6 +24,18 @@
     // reference, so hand-edits are undone by the next refresh.
     "hyperdb-mcp/scripts/dc_sql_reference.md",
 
+    // Root changelog only. release-please generates it -- it is the sole
+    // "changelog-path" in release-please-config.json -- so any hand-fix is
+    // clobbered on the next release. Deliberately NOT "**/CHANGELOG.md": the
+    // nine per-crate changelogs are hand-maintained and stay in scope.
+    "CHANGELOG.md",
+
+    // Point-in-time planning artifacts (see AGENTS.md "Documentation
+    // Conventions"): a spec and plan are written before a feature, reviewed
+    // alongside the change that implements it, and then not maintained.
+    // Reflowing prose in a settled record is churn no reader benefits from.
+    "docs/superpowers/**",
+
     // npm platform sub-packages: packaging boilerplate, largely generated
     "hyperdb-api-node/npm/**",
     "hyperdb-mcp/npm/**"
