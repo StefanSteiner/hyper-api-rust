@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `query_as!` and `query_scalar!` no longer report false "not registered"
+  errors in rust-analyzer. Registration is a process-global side effect of
+  expanding `derive(Table)`, which under `cargo` always happens before
+  function-body macros in the same host process. rust-analyzer's
+  `proc-macro-srv` is long-lived and expands lazily, out of order, and from
+  cache, so a `query_as!` could be re-expanded in a process where no derive had
+  run — yielding a red squiggle on code that `cargo check` compiles cleanly.
+  Validation now treats a completely empty registry as "no information" and
+  skips, rather than concluding the type is unregistered. Genuine diagnostics
+  are unaffected: once anything is registered, a miss is still a real miss.
+
 ### Changed
 
 - **BREAKING:** the minimum supported Rust version is now **1.88**, up from
