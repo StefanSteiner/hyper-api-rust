@@ -18,11 +18,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   overriding the workspace's deliberate `rustls = { features = ["ring"] }`
   selection, because Cargo unifies features across the graph. It now uses
   `rustls-no-provider`, which enables reqwest's rustls plumbing without picking
-  a provider and lets the ring selection apply.
+  a provider.
+
+  Because that leaves no provider at all, and `reqwest` resolves one through
+  `CryptoProvider::get_default()` (which has no crate-feature fallback),
+  `DataCloudTokenProvider::new` now installs ring as the process-wide default
+  before building its HTTP client. **Embedders take note:** if your application
+  installs its own `CryptoProvider`, install it before constructing a provider
+  here; ours defers to an already-installed one rather than replacing it.
 
   This removes `aws-lc-sys`, which compiled AWS-LC (Amazon's BoringSSL fork)
-  from source and required `cmake` plus a C++ toolchain to build. Verified
-  against live HTTPS endpoints, not just a green compile.
+  from source and required `cmake` plus a C++ toolchain to build. Guarded by
+  `tests/crypto_provider_tests.rs`, which constructs a provider and needs no
+  network or credentials because the failure is a panic inside `build()`.
 
 ## [0.1.1] - 2026-05-13
 

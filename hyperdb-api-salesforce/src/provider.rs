@@ -80,6 +80,24 @@ pub struct DataCloudTokenProvider {
     cached_dc_jwt: Option<DataCloudToken>,
 }
 
+/// Installs `ring` as the process-wide rustls crypto provider.
+///
+/// The workspace `reqwest` entry uses the `rustls-no-provider` feature, which
+/// links no provider of its own. `reqwest` resolves one via
+/// `CryptoProvider::get_default()`, which has no crate-feature fallback, and
+/// *panics* while building a `Client` if nothing is installed. So this must
+/// run before the first client is built.
+///
+/// An `Err` from `install_default` means something else — most likely the host
+/// application — installed a provider first. That is deliberately ignored: a
+/// library must not override an embedder's choice.
+fn ensure_crypto_provider() {
+    static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    INIT.get_or_init(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 impl DataCloudTokenProvider {
     /// Creates a new DC JWT provider with the given configuration.
     ///
@@ -89,6 +107,7 @@ impl DataCloudTokenProvider {
     pub fn new(config: SalesforceAuthConfig) -> SalesforceAuthResult<Self> {
         config.validate()?;
 
+        ensure_crypto_provider();
         let http_client = HttpClient::builder()
             .timeout(Duration::from_secs(config.timeout_secs))
             .build()

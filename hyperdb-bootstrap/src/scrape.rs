@@ -19,6 +19,24 @@ use crate::release::PinnedRelease;
 
 const RELEASES_URL: &str = "https://tableau.github.io/hyper-db/docs/releases";
 
+/// Installs `ring` as the process-wide rustls crypto provider.
+///
+/// Our `reqwest` uses the `rustls-no-provider` feature, which links no
+/// provider of its own. `reqwest` resolves one via
+/// `CryptoProvider::get_default()`, which has no crate-feature fallback, and
+/// *panics* while building a `Client` if nothing is installed. So this must
+/// run before the first client is built.
+///
+/// An `Err` from `install_default` means something else — most likely the host
+/// application — installed a provider first. That is deliberately ignored: a
+/// library must not override an embedder's choice.
+fn ensure_crypto_provider() {
+    static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    INIT.get_or_init(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 /// Fetches the public releases page and returns the newest `PinnedRelease`
 /// that has a Java download for `platform`.
 ///
@@ -33,6 +51,7 @@ const RELEASES_URL: &str = "https://tableau.github.io/hyper-db/docs/releases";
 ///   expected structure.
 pub fn scrape_latest(platform: Platform) -> Result<PinnedRelease, Error> {
     tracing::info!(url = RELEASES_URL, "scraping latest release");
+    ensure_crypto_provider();
     let client = reqwest::blocking::Client::builder()
         .user_agent(concat!("hyperd-bootstrap/", env!("CARGO_PKG_VERSION")))
         .build()
@@ -84,6 +103,22 @@ fn parse_latest(html: &str, platform: Platform) -> Result<PinnedRelease, Error> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Guards the `rustls-no-provider` feature choice.
+    ///
+    /// `reqwest` panics inside `build()` when no crypto provider is installed,
+    /// so this needs no network to fail. Without
+    /// [`ensure_crypto_provider`] it aborts the test thread outright.
+    #[test]
+    fn client_builds_with_a_crypto_provider_installed() {
+        ensure_crypto_provider();
+        assert!(
+            reqwest::blocking::Client::builder()
+                .user_agent("hyperd-bootstrap-test")
+                .build()
+                .is_ok()
+        );
+    }
 
     #[test]
     fn parse_real_page_snippet() {
