@@ -21,12 +21,6 @@ hyperdb-mcp/scripts/dc_sql_reference.md
 # patterns, so the equivalent entry there needs no slash.)
 /CHANGELOG.md
 
-# Point-in-time planning artifacts (see AGENTS.md "Documentation
-# Conventions"): a spec and plan are written before a feature, reviewed
-# alongside the change that implements it, and then not maintained.
-# Reflowing prose in a settled record is churn no reader benefits from.
-docs/superpowers/
-
 # npm platform sub-packages: packaging boilerplate, largely generated
 hyperdb-api-node/npm/
 hyperdb-mcp/npm/
