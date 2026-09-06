@@ -443,8 +443,15 @@ runs on every push to `main` and opens (or updates) a
 hand-edit a crate version or the root `CHANGELOG.md`. See
 [CONTRIBUTING.md](CONTRIBUTING.md#release-process) for the full flow and
 [docs/GITHUB_OPERATIONS.md](docs/GITHUB_OPERATIONS.md#cutting-a-release) for the
-maintainer steps, including the `Release-As:` footer used for `-rc.N`
-pre-releases.
+maintainer steps.
+
+While the workspace is on an `-rc.N` line, the rc counter increments
+automatically from any conventional commit — no `Release-As:` footer needed —
+because [`release-please-config.json`](release-please-config.json) sets
+`prerelease`, `prerelease-type`, and `versioning`. Those keys must be removed
+when the final release ships, or the next `fix:` computes another rc instead of
+a stable patch. The mechanism and that removal step are documented once, in
+[docs/GITHUB_OPERATIONS.md → Pre-releases](docs/GITHUB_OPERATIONS.md#pre-releases).
 
 All commit messages **must** follow the format `<type>(<scope>): <subject>` — for the full specification including commit types, version impact, and examples, see [CONTRIBUTING.md](CONTRIBUTING.md#commit-message-format).
 

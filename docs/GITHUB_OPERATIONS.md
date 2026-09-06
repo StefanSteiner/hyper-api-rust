@@ -220,6 +220,15 @@ The tag and GitHub Release **are** created by hand; see step 5.
    different bump is needed (e.g., promote a `0.x.0` patch to a minor) by
    editing the PR or by tagging commits with
    [`Release-As: X.Y.Z`](https://github.com/googleapis/release-please?tab=readme-ov-file#how-can-i-fix-release-notes).
+   **Read the version in the PR title before merging** — it is the last check
+   before anything becomes permanent.
+
+   **While the rc line is open**, that version bumps itself to the next
+   `-rc.N` with no footer needed; see [Pre-releases](#pre-releases).
+   **Before shipping `1.0.0` final, remove the prerelease keys from
+   [release-please-config.json](../release-please-config.json)** — leave them
+   in and the release after `1.0.0` computes `1.0.1-rc`. See
+   [Graduating to `1.0.0`](#graduating-to-100).
 4. **Merge the release PR.** This lands the version bumps and changelogs on
    `main`. It does **not** tag: `skip-github-release` is `true` in
    `release-please-config.json`, so release-please creates neither the tag nor
@@ -382,19 +391,31 @@ semver treats all of `0.x` as unstable — so bump examples written before
 After the workspace is on `1.x.y`, the same prefixes follow normal
 semver: `feat!:` will bump `1.2.3` → `2.0.0` as expected.
 
-> **`bump-minor-pre-major: true` is inert and is not what keeps `2.0.0` away.**
-> It appears twice in
-> [release-please-config.json](../release-please-config.json) (top level and
-> inside the `.` package), but release-please only consults it when
-> `version.isPreMajor` — defined as `major < 1`. The workspace has been at
-> major `1` since `1.0.0-rc.1`, so neither copy has had any effect since.
-> Read it as leftover `0.x` configuration, not as protection against an
-> accidental major bump. The only thing standing between a `feat!:` on `main`
-> and a `2.0.0-rc.2` release PR today is a maintainer noticing the version in
-> the PR title. See [Pre-releases](#pre-releases).
+> **While the rc line is open, that table does not apply.** The config sets
+> `"versioning": "prerelease"` and `"prerelease": true`, so every releasing
+> prefix above collapses to the *next rc* instead of moving
+> `major.minor.patch`: measured from `1.0.0-rc.2`, each of `fix:`, `feat:`, and
+> `feat!:` computes `1.0.0-rc.3`. The table describes what happens once those
+> keys come back out. JSON takes no comments, so this note is the only place
+> that pairing is written down — see [Pre-releases](#pre-releases) and
+> [Graduating to `1.0.0`](#graduating-to-100).
 
-To stabilize the API and cut `1.0.0`, add a `Release-As: 1.0.0` footer to a
-conventional-commit on `main`:
+`bump-minor-pre-major` used to appear twice in
+[release-please-config.json](../release-please-config.json) (top level and
+inside the `.` package). It was **removed** alongside the prerelease keys.
+release-please only consults it when `version.isPreMajor` — defined as
+`major < 1` — and the workspace has been at major `1` since `1.0.0-rc.1`, so
+neither copy had any effect after that point. It read as protection against an
+accidental major bump while providing none. Dry runs confirmed removing it
+changes no computed version, under either the old or the new config. Don't
+re-add it: at `1.x` it cannot do anything except mislead the next reader.
+
+To stabilize the API and cut `1.0.0`, flip `"prerelease"` to `false` in
+[release-please-config.json](../release-please-config.json) — the full
+procedure and its alternatives are in
+[Graduating to `1.0.0`](#graduating-to-100). A `Release-As: 1.0.0` footer on a
+conventional-commit on `main` also produces `1.0.0` without touching the
+config:
 
 ```text
 feat: stabilize public API
@@ -402,77 +423,16 @@ feat: stabilize public API
 Release-As: 1.0.0
 ```
 
+The footer alone is **not sufficient**, though. It pins that one release to
+`1.0.0` and leaves the prerelease keys in place, so the *next* `fix:` computes
+`1.0.1-rc`. However you cut `1.0.0`, the keys still have to come out.
+
 ### Pre-releases
 
-For an `-rc.N` / `-alpha.N` / `-beta.N` release, add a footer to a
-commit on `main`:
-
-```text
-Release-As: 0.2.0-rc.1
-```
-
-release-please will produce a release PR with that exact version on the
-next run. Pre-release tags flow through `release.yml` and
-`npm-build-publish.yml` exactly as stable releases do; the GitHub
-Release is auto-flagged as `prerelease: true`, and the npm `dist-tag` is
-set to `rc` / `alpha` / `beta` instead of `latest` so `npm install
-hyperdb-mcp` doesn't pull a pre-release by default.
-
-#### Every rc needs its own footer
-
-The config has **no prerelease keys** (`prerelease`, `prerelease-type`,
-`versioning`), so release-please does not know the repo is in an rc line. It
-applies the default strategy, which bumps `major.minor.patch` and **carries
-the existing `-rc.N` suffix along unchanged**. Left to itself it never
-produces the next rc.
-
-Measured against `1.0.0-rc.2` with `npx release-please release-pr --dry-run`:
-
-| Highest-precedence commit since the tag | Computed version | Wanted? |
-|---|---|---|
-| `fix:` | `1.0.1-rc.2` | no |
-| `feat:` | `1.1.0-rc.2` | no |
-| `feat!:` / `fix!:` / `BREAKING CHANGE:` | `2.0.0-rc.2` | no |
-| any of the above **+ `Release-As: 1.0.0-rc.3`** | `1.0.0-rc.3` | yes |
-
-So a `Release-As:` footer is not an override for unusual cases — during an rc
-line it is load-bearing on **every** release, and forgetting it is the default
-outcome rather than an unlikely slip.
-
-Two properties make that dangerous rather than merely annoying:
-
-- **The wrong version is well-formed.** `v1.0.1-rc.2` satisfies the tag regex
-  in both publish workflows, and it matches the `Cargo.toml` the release PR
-  itself wrote, so the tag-vs-manifest guard agrees too. Nothing in CI objects.
-- **`1.0.1-rc.2` sorts above `1.0.0`.** Publishing it makes a later `1.0.0`
-  final a *downgrade*, permanently forfeiting the ability to complete the
-  1.0.0 rc line cleanly. `cargo yank` hides a version but never frees the
-  number.
-
-The version in the release PR title is the last check. Read it before merging.
-
-Landing the footer: recent PRs are **squash**-merged, so the footer must be in
-the **squash commit body** — a footer that exists only on a branch commit is
-discarded. (`v1.0.0-rc.2`'s footer survived because that PR got a real merge
-commit.) Alternatively an admin can push a direct empty commit, since
-`enforce_admins` is false on `main`:
-
-```bash
-git commit --allow-empty -m "chore: release 1.0.0-rc.3" -m "Release-As: 1.0.0-rc.3"
-```
-
-An already-open release PR computed from the wrong version **self-corrects in
-place** once the footer lands on `main` — release-please recomputes and
-force-pushes its branch on the next run. Don't close or hand-edit it.
-
-Automating this is possible but not free, and it has not been adopted; see
-[Automating the rc line](#automating-the-rc-line).
-
-#### Automating the rc line
-
-Adding three keys to
-[release-please-config.json](../release-please-config.json) makes
-release-please increment the rc itself:
+While the repo is on an `-rc.N` line, **the rc counter increments by itself**.
+Three keys on the `.` package in
+[release-please-config.json](../release-please-config.json) put release-please
+in prerelease mode:
 
 ```json
 "prerelease": true,
@@ -480,59 +440,140 @@ release-please increment the rc itself:
 "versioning": "prerelease"
 ```
 
-This was verified, not assumed. `npx release-please@17.11.2 release-pr
---dry-run` — 17.11.2 being the version `release-please-action@v5` pins — first
-reproduced the live `1.0.1-rc.2` that PR #282 computed, confirming the harness
-matches CI, then ran each shape below against a real config file:
+With those set, `PrereleaseVersioningStrategy` handles the bump: while the
+current version carries a prerelease **and** the `major.minor.patch` part is
+unchanged, every conventional commit increments the prerelease counter instead
+of moving the version triple. Measured from `1.0.0-rc.2`, every releasing
+prefix computes `1.0.0-rc.3` — no footer, no maintainer action:
 
-| Config | Highest-precedence commit | Computed |
+| Highest-precedence commit since the tag | Computed version |
+|---|---|
+| `fix:` | `1.0.0-rc.3` |
+| `feat:` | `1.0.0-rc.3` |
+| `feat!:` / `fix!:` / `BREAKING CHANGE:` | `1.0.0-rc.3` |
+| any of the above **+ `Release-As: X.Y.Z`** | exactly `X.Y.Z` |
+
+Pre-release tags flow through `release.yml` and `npm-build-publish.yml` exactly
+as stable releases do; the GitHub Release is flagged as `prerelease: true`, and
+the npm `dist-tag` is set to `rc` / `alpha` / `beta` instead of `latest` so
+`npm install hyperdb-mcp` doesn't pull a pre-release by default.
+
+#### `Release-As:` is an override, not the routine path
+
+A `Release-As: X.Y.Z` footer works and always wins: `determineReleaseType`
+looks for a `RELEASE AS` note first and short-circuits before any prerelease
+logic runs. Reach for it to pin one specific version — skipping a burned
+number, or jumping straight to `1.0.0` — rather than to produce the next rc,
+which happens on its own.
+
+**When you do use the footer, it has to land in the squash commit body.**
+Recent PRs are squash-merged, and a footer that exists only on a branch commit
+is discarded. (`v1.0.0-rc.2`'s footer survived because that PR got a real merge
+commit.) Alternatively an admin can push a direct empty commit, since
+`enforce_admins` is false on `main`:
+
+```bash
+git commit --allow-empty -m "chore: release 1.0.0-rc.4" -m "Release-As: 1.0.0-rc.4"
+```
+
+An already-open release PR **self-corrects in place** whenever anything lands
+on `main` — release-please recomputes and force-pushes its branch on the next
+run. Don't close or hand-edit it.
+
+#### Reading the prerelease keys against the schema
+
+`prerelease` is an overloaded key. The config schema documents it as "create
+the GitHub release as prerelease", but `PrereleaseVersioningStrategy` also
+reads it to decide whether to keep the prerelease suffix or truncate it. Here
+the release-flag meaning is moot: `skip-github-release: true` means
+release-please never creates the GitHub Release at all — a maintainer does
+that by hand, passing `--prerelease` to `gh release create` — so the key acts
+purely as the versioning switch.
+
+All three keys are valid at the top level *and* inside the `.` package. The
+root of the config schema pulls in the same `ReleaserConfigOptions` that each
+package entry uses, and `mergeReleaserConfig` resolves every field as
+`package ?? top-level ?? built-in default`. Dry runs confirmed all three
+placements (package-only, top-level-only, both) compute the same version. They
+live on the `.` package here because that is the winning side of that merge,
+and because one location means one place to edit at `1.0.0` instead of two.
+
+#### Graduating to `1.0.0`
+
+**The prerelease keys must come out when `1.0.0` final ships.** This is the one
+cost the automation adds, and it is not optional.
+
+Left in place at a non-prerelease version, `PrereleaseVersioningStrategy` takes
+its other branch: with no prerelease suffix to increment, it bumps the triple
+and *attaches* `prerelease-type` instead. So the first `fix:` after `1.0.0`
+computes **`1.0.1-rc`** — verified by dry run — and every subsequent stable
+release becomes an rc until someone edits the config.
+
+Either edit closes the rc line:
+
+- **Flip `"prerelease"` to `false`**, leaving the other two keys. The strategy
+  computes the bump and then truncates the prerelease, so the very next release
+  is `1.0.0`. A one-character graduation.
+- **Delete all three keys.** Restores the plain default strategy and makes the
+  table in [How commits drive version bumps](#how-commits-drive-version-bumps)
+  accurate again. Prefer this once `1.0.0` has shipped and the rc line is
+  closed for good.
+
+**Why this trade is worth taking.** Both setups can put a wrong version in the
+release PR; they fail *differently*, and that is the whole point:
+
+| | Before (footer on every rc) | After (automatic rc bump) |
 |---|---|---|
-| current | `fix:` | `1.0.1-rc.2` |
-| current | `feat:` | `1.1.0-rc.2` |
-| current | `feat!:` | `2.0.0-rc.2` |
-| proposed | `fix:` | `1.0.0-rc.3` |
-| proposed | `feat:` | `1.0.0-rc.3` |
-| proposed | `feat!:` | `1.0.0-rc.3` |
-| proposed + `Release-As: 1.0.0` | any | `1.0.0` |
-| proposed, but `"prerelease": false` | any | `1.0.0` |
+| Correct human action needed | on **every** rc release | **once**, at `1.0.0` |
+| Version if forgotten | `1.0.1-rc.2` | `1.0.1-rc` |
+| How you find out | nothing objects | wrong version in the PR title |
+| Recoverable? | **no**, once published | yes, before merging |
 
-All three commit shapes collapse to `1.0.0-rc.3`, so the footer stops being
-load-bearing. The mechanism is `PrereleaseVersioningStrategy`: while the
-current version carries a prerelease and the `major.minor.patch` part is
-unchanged, every bump increments the prerelease counter instead.
+The old failure was silent *and* terminal. `v1.0.1-rc.2` is well-formed: it
+satisfies the tag regex in both publish workflows and it matches the
+`Cargo.toml` the release PR itself wrote, so the tag-vs-manifest guard agrees
+and nothing in CI objects. And because `1.0.1-rc.2` sorts *above* `1.0.0`,
+publishing it would make a later `1.0.0` final a downgrade, permanently
+forfeiting the ability to finish the rc line — `cargo yank` hides a version but
+never frees the number.
 
-**Exiting the rc line stays easy** — the last two rows are the important ones.
-Flipping `"prerelease"` to `false` (keeping the other two keys) makes the very
-next release `1.0.0`: the strategy computes the bump and then truncates the
-prerelease. A `Release-As: 1.0.0` footer also still works, because the
-`RELEASE AS` note short-circuits `determineReleaseType` before any prerelease
-logic runs. So automation does not trade a footer-per-rc for a harder exit.
+The new failure is loud and cheap: `1.0.1-rc` appears in the release PR title
+before anything is tagged or published, and the fix is the config edit that was
+missed. The tripwire moved from silent-and-unrecoverable to
+visible-and-reversible. It did not disappear, which is why reading the version
+in the release PR title before merging is still the last check.
 
-**One caveat, and it is a real one.** These keys must be *removed* once
-`1.0.0` ships. Left in place at a non-prerelease version, the next `fix:`
-computes `1.0.1-rc` — verified — turning every subsequent stable release into
-an rc. That failure is loud (it shows up in the release PR title) and
-harmless to fix, unlike the current failure mode, but it is a second config
-change that must not be forgotten.
+#### Re-verifying the prerelease behaviour
 
-Net: the current setup requires a correct human action on **every** rc and
-fails silently into an unrecoverable version; the proposed setup requires one
-config change now and one at `1.0.0`, and its failure mode is a visibly-wrong
-title. That is a strictly better trade, but it is a change to the file that
-drives releases and should land as its own reviewed PR with a dry run
-attached — not folded into a docs change.
+If release-please is upgraded, or the config is edited again, re-run the dry
+runs rather than trusting this section. Three things make that harder than it
+looks:
 
-Two details worth knowing before writing that PR:
+- `release-please-action@v5` bundles release-please **17.6.0** — `dist/index.js`
+  at the `v5` tag carries `VERSION = '17.6.0'`. The action's `package.json`
+  only declares `^17.6.0`, so the range is not the pin; read the bundle.
+- `release-pr` has **no `--prerelease` flag** (only `github-release` does), so
+  `prerelease: true` can only be exercised through a real config file.
+- `--local` / `--local-path` does **not** read the config from the local clone.
+  Config and manifest always come over the API from the target branch, so a
+  variant has to be committed and pushed to a branch somewhere.
 
-- `prerelease` is overloaded. The config schema documents it as "create the
-  GitHub release as prerelease", but `PrereleaseVersioningStrategy` also reads
-  it to decide whether to keep the prerelease suffix. Here the release-flag
-  meaning is moot (`skip-github-release: true`), so it acts purely as the
-  versioning switch.
-- Set the keys on the `.` package. Top-level values are inherited as
-  defaults, so setting both places is redundant but harmless — the pattern
-  the existing `skip-github-release` and `bump-minor-pre-major` entries
-  already follow.
+Which means: push the candidate config to a scratch branch (a fork is fine as
+long as the last release tag exists there), then point a dry run at it.
+
+```bash
+npx release-please@17.6.0 release-pr \
+  --repo-url=<owner>/<repo> \
+  --target-branch=<scratch-branch> \
+  --config-file=release-please-config.json \
+  --manifest-file=.release-please-manifest.json \
+  --token="$(gh auth token)" \
+  --dry-run
+```
+
+Validate the harness before trusting it: run the *current* config against
+`main` first and confirm it reproduces the version in the open release PR. If
+it doesn't, nothing downstream counts.
 
 ### Lockstep versioning
 
