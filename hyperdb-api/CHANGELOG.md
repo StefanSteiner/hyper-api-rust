@@ -124,6 +124,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `Catalog::copy_table` — copies a table while reproducing its schema instead
+  of letting `CREATE TABLE AS SELECT` infer it. CTAS derives the destination
+  schema from the query's result columns, which carry types but no
+  constraints, so a CTAS "copy" came out with every column nullable, no
+  defaults and no keys. `copy_table` reflects the source out of `pg_catalog`,
+  issues an explicit `CREATE TABLE`, then moves rows with `INSERT ... SELECT`.
+  Source and destination may live in different databases. Returns a
+  `CopyTableReport` — **a successful return does not imply full fidelity**;
+  check `CopyTableReport::is_fully_preserved`.
+- `CopyTableReport`, `UnpreservedItem` and `UnpreservedReason` — what a copy
+  reproduced (`NOT NULL`, `DEFAULT`, `ASSUMED PRIMARY KEY`, `ASSUMED UNIQUE`
+  counts) and what it deliberately dropped. Hyper stores non-literal defaults
+  database-qualified (`NOW()` reads back as `"mydb"."pg_catalog"."now"()`), so
+  copying one verbatim into another database would leave the copy depending on
+  `"mydb"` still being attached. Those defaults are dropped and reported rather
+  than reproduced unsoundly.
+- `TableConstraint` — `AssumedPrimaryKey` / `AssumedUnique`, the only
+  table-level constraint forms Hyper accepts. Real `PRIMARY KEY`, `UNIQUE` and
+  `FOREIGN KEY` are rejected at `CREATE TABLE` with `Index support is
+  disabled`, and `CHECK` with `check constraints not implemented yet`, so no
+  Hyper table can carry one. Assumed constraints are recorded and reported by
+  the engine but **not enforced** — a duplicate key insert succeeds.
+- `TableDefinition::constraints`, `add_constraint`, `push_constraint` and
+  `set_constraints`; `ColumnDefinition::default_expr`, `set_default_expr`,
+  `with_default_expr` and `clear_default_expr`. `TableDefinition::to_create_sql`
+  now emits `DEFAULT` clauses and table-level assumed constraints.
+- `Catalog::get_table_definition` now also populates `DEFAULT` expressions and
+  assumed key constraints, not just names, types and nullability.
 - `impl ToSqlParam for Geography` — geography values can now be passed to
   `query_params` / `command_params` and used in predicates and projections.
   They bind as WKT text, because Hyper has no PostgreSQL-binary *input*

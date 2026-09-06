@@ -3608,12 +3608,21 @@ async fn resolved_database_data_success_shapes() -> TestResult {
                 "output_path",
                 "resolved_database",
                 "rows",
+                "schema_fidelity",
                 "stats",
             ],
-        ) && (payload["rows"] != serde_json::json!(0)
-            || payload["stats"]["format"] != serde_json::json!("hyper")
-            || payload["output_path"] != serde_json::json!(hyper_export_path.to_string_lossy()))
-        {
+        ) && (
+            // Was pinned at 0: the hyper export ran on `CREATE TABLE AS
+            // SELECT`, which reports no affected rows however much it copied.
+            // The constraint-preserving copy uses `INSERT ... SELECT` and
+            // reports the real count.
+            match payload["rows"].as_u64() {
+                Some(rows) => rows == 0,
+                None => true,
+            } || payload["schema_fidelity"]["fully_preserved"] != serde_json::json!(true)
+                || payload["stats"]["format"] != serde_json::json!("hyper")
+                || payload["output_path"] != serde_json::json!(hyper_export_path.to_string_lossy())
+        ) {
             failures.push(format!(
                 "export bare local hyper snapshot: legacy snapshot payload changed: {payload}"
             ));

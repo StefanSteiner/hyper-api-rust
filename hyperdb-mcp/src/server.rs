@@ -3277,15 +3277,39 @@ impl HyperMcpServer {
                 source_db: target_db.clone(),
             };
             let export_result = export_to_file(engine, &opts)?;
-            Self::with_resolved_database(
-                json!({
-                    "output_path": export_result.stats.output_path,
-                    "rows": export_result.rows,
-                    "file_size_bytes": export_result.stats.file_size_bytes,
-                    "stats": export_result.stats.to_json(),
-                }),
-                target_db.as_deref(),
-            )
+            let mut payload = json!({
+                "output_path": export_result.stats.output_path,
+                "rows": export_result.rows,
+                "file_size_bytes": export_result.stats.file_size_bytes,
+                "stats": export_result.stats.to_json(),
+            });
+            // `format = "hyper"` copies schema, not just rows. Report what
+            // survived so a backup that lost a constraint says so at the time
+            // rather than being discovered relaxed months later.
+            if let Some(report) = export_result.schema_fidelity
+                && let Some(obj) = payload.as_object_mut()
+            {
+                obj.insert(
+                    "schema_fidelity".into(),
+                    json!({
+                        "fully_preserved": report.is_fully_preserved(),
+                        "not_null_columns": report.not_null_columns,
+                        "default_columns": report.default_columns,
+                        "assumed_primary_keys": report.assumed_primary_keys,
+                        "assumed_unique_constraints": report.assumed_unique_constraints,
+                        "unpreserved": report
+                            .unpreserved
+                            .iter()
+                            .map(|item| json!({
+                                "column": item.column,
+                                "reason": item.reason.to_string(),
+                                "detail": item.detail,
+                            }))
+                            .collect::<Vec<_>>(),
+                    }),
+                );
+            }
+            Self::with_resolved_database(payload, target_db.as_deref())
         });
 
         match result {

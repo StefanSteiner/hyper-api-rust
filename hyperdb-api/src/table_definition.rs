@@ -63,6 +63,58 @@ impl SqlTypeOrName {
     }
 }
 
+/// A table-level constraint.
+///
+/// Hyper accepts only the *assumed* constraint forms on `CREATE TABLE`. Real
+/// `PRIMARY KEY`, `UNIQUE`, and `FOREIGN KEY` clauses are rejected with
+/// `Index support is disabled`, and `CHECK` with `check constraints not
+/// implemented yet`, so they can never appear on a Hyper table in the first
+/// place. Assumed constraints are declarations the optimizer trusts but the
+/// engine does **not** enforce — inserting a duplicate key succeeds.
+///
+/// Hyper also rejects `CONSTRAINT <name> …` (`named constraints not
+/// implemented yet`), so constraints carry no user-chosen name; the engine
+/// derives one from the table and column names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TableConstraint {
+    /// `ASSUMED PRIMARY KEY (cols…)`. Every listed column must be `NOT NULL`.
+    AssumedPrimaryKey {
+        /// Key columns, in declaration order.
+        columns: Vec<String>,
+    },
+    /// `ASSUMED UNIQUE (cols…)`.
+    AssumedUnique {
+        /// Key columns, in declaration order.
+        columns: Vec<String>,
+    },
+}
+
+impl TableConstraint {
+    /// Returns the columns the constraint covers, in declaration order.
+    #[must_use]
+    pub fn columns(&self) -> &[String] {
+        match self {
+            Self::AssumedPrimaryKey { columns } | Self::AssumedUnique { columns } => columns,
+        }
+    }
+
+    /// Renders the constraint as the SQL clause used inside `CREATE TABLE`.
+    fn to_sql(&self) -> String {
+        let keyword = match self {
+            Self::AssumedPrimaryKey { .. } => "ASSUMED PRIMARY KEY",
+            Self::AssumedUnique { .. } => "ASSUMED UNIQUE",
+        };
+        let cols = self
+            .columns()
+            .iter()
+            .map(|c| SqlIdentifier(c).to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{keyword} ({cols})")
+    }
+}
+
 /// A column definition.
 ///
 /// This struct supports both string-based type names (for simplicity) and
@@ -78,6 +130,8 @@ pub struct ColumnDefinition {
     pub nullable: bool,
     /// The collation for text columns (e.g., "`en_US`", "binary").
     collation: Option<String>,
+    /// The `DEFAULT` expression, as SQL source text.
+    default_expr: Option<String>,
 }
 
 impl ColumnDefinition {
@@ -98,6 +152,7 @@ impl ColumnDefinition {
             sql_type_or_name: SqlTypeOrName::TypeName(type_name.into()),
             nullable,
             collation: None,
+            default_expr: None,
         }
     }
 
@@ -123,6 +178,7 @@ impl ColumnDefinition {
             sql_type_or_name: SqlTypeOrName::SqlType(sql_type),
             nullable: nullability.is_nullable(),
             collation: None,
+            default_expr: None,
         }
     }
 
@@ -150,6 +206,7 @@ impl ColumnDefinition {
             sql_type_or_name: SqlTypeOrName::SqlType(sql_type),
             nullable: nullability.is_nullable(),
             collation: Some(collation.into()),
+            default_expr: None,
         }
     }
 
@@ -197,6 +254,35 @@ impl ColumnDefinition {
         self.collation.as_deref()
     }
 
+    /// Returns the `DEFAULT` expression, as SQL source text, if the column has one.
+    ///
+    /// The text is a SQL expression (`42`, `'n/a'`, `NOW()`), not a value — it
+    /// is rendered verbatim into `CREATE TABLE`.
+    #[must_use]
+    pub fn default_expr(&self) -> Option<&str> {
+        self.default_expr.as_deref()
+    }
+
+    /// Sets the `DEFAULT` expression from SQL source text.
+    ///
+    /// The expression is emitted verbatim, so it must be valid SQL in the
+    /// database the table is created in. See [`TableDefinition::to_create_sql`].
+    pub fn set_default_expr(&mut self, expr: impl Into<String>) {
+        self.default_expr = Some(expr.into());
+    }
+
+    /// Sets the `DEFAULT` expression, consuming and returning `self`.
+    #[must_use]
+    pub fn with_default_expr(mut self, expr: impl Into<String>) -> Self {
+        self.default_expr = Some(expr.into());
+        self
+    }
+
+    /// Removes the `DEFAULT` expression.
+    pub fn clear_default_expr(&mut self) {
+        self.default_expr = None;
+    }
+
     /// Sets the collation for this column.
     pub fn set_collation(&mut self, collation: impl Into<String>) {
         self.collation = Some(collation.into());
@@ -224,6 +310,7 @@ impl From<TypesColumnDefinition> for ColumnDefinition {
             sql_type_or_name: SqlTypeOrName::SqlType(col.sql_type),
             nullable: col.nullability.is_nullable(),
             collation: None,
+            default_expr: None,
         }
     }
 }
@@ -264,6 +351,8 @@ pub struct TableDefinition {
     pub columns: Vec<ColumnDefinition>,
     /// Table persistence (permanent or temporary).
     persistence: Persistence,
+    /// Table-level constraints.
+    constraints: Vec<TableConstraint>,
 }
 
 impl Default for TableDefinition {
@@ -293,6 +382,7 @@ impl TableDefinition {
             database: None,
             columns: Vec::new(),
             persistence: Persistence::Permanent,
+            constraints: Vec::new(),
         }
     }
 
@@ -343,6 +433,7 @@ impl TableDefinition {
             database: table_name.database().map(|d| d.unescaped().to_string()),
             columns: Vec::new(),
             persistence: Persistence::Permanent,
+            constraints: Vec::new(),
         })
     }
 
@@ -556,6 +647,7 @@ impl TableDefinition {
             sql_type_or_name,
             nullable,
             collation: None,
+            default_expr: None,
         });
     }
 
@@ -574,6 +666,7 @@ impl TableDefinition {
             sql_type_or_name: SqlTypeOrName::SqlType(sql_type),
             nullable,
             collation: None,
+            default_expr: None,
         });
     }
 
@@ -608,6 +701,28 @@ impl TableDefinition {
             }
             _ => None,
         }
+    }
+
+    /// Returns the table-level constraints.
+    #[must_use]
+    pub fn constraints(&self) -> &[TableConstraint] {
+        &self.constraints
+    }
+
+    /// Adds a table-level constraint (fluent builder pattern).
+    pub fn add_constraint(mut self, constraint: TableConstraint) -> Self {
+        self.constraints.push(constraint);
+        self
+    }
+
+    /// Adds a table-level constraint in place.
+    pub fn push_constraint(&mut self, constraint: TableConstraint) {
+        self.constraints.push(constraint);
+    }
+
+    /// Replaces the table-level constraints.
+    pub fn set_constraints(&mut self, constraints: Vec<TableConstraint>) {
+        self.constraints = constraints;
     }
 
     /// Returns the number of columns.
@@ -814,6 +929,14 @@ impl TableDefinition {
             if !col.nullable {
                 sql.push_str(" NOT NULL");
             }
+
+            if let Some(default_expr) = &col.default_expr {
+                let _ = write!(sql, " DEFAULT {default_expr}");
+            }
+        }
+
+        for constraint in &self.constraints {
+            let _ = write!(sql, ", {}", constraint.to_sql());
         }
 
         sql.push(')');

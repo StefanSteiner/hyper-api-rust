@@ -209,7 +209,11 @@ fn export_hyper_requires_no_sql_or_table() {
     };
     let result = export_to_file(&te.engine, &opts)
         .expect("hyper format must accept a bare (path, format) call without sql or table");
-    assert_eq!(result.rows, 0);
+    // The two rows `setup_test_table` inserted. This asserted 0 while the
+    // export ran on `CREATE TABLE AS SELECT`, which reports no affected rows;
+    // the constraint-preserving copy uses `INSERT ... SELECT` and reports the
+    // count it actually wrote.
+    assert_eq!(result.rows, 2);
     assert_eq!(result.stats.format, "hyper");
     assert_eq!(result.stats.output_path, path_str);
     assert!(std::fs::metadata(path_str).unwrap().len() > 0);
@@ -914,4 +918,100 @@ fn format_options_invalid_shapes_reject_cleanly() {
         .execute_query_to_json("SELECT COUNT(*) AS n FROM test_export")
         .unwrap();
     assert_eq!(rows[0]["n"], 2);
+}
+
+/// The bug behind issue #127: the `.hyper` export used `CREATE TABLE AS
+/// SELECT`, which infers the destination schema from the query's result
+/// columns and therefore drops every constraint. A "backup" came back with
+/// all columns nullable, no defaults and no keys. Assert the whole schema
+/// now survives an export followed by a fresh attach of the exported file —
+/// reading the constraints straight out of the exported database's own
+/// `pg_catalog` rather than trusting the report.
+#[test]
+fn export_hyper_preserves_constraints() {
+    let te = TestEngine::new_ephemeral();
+    te.engine
+        .execute_command(
+            "CREATE TABLE constrained (id INT NOT NULL, code TEXT NOT NULL, \
+             qty INT DEFAULT 7, note TEXT DEFAULT 'n/a', \
+             ASSUMED PRIMARY KEY (id), ASSUMED UNIQUE (code))",
+        )
+        .unwrap();
+    te.engine
+        .execute_command("INSERT INTO constrained (id, code) VALUES (1, 'a')")
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("constrained.hyper");
+    let path_str = path.to_str().unwrap();
+    let result = export_to_file(
+        &te.engine,
+        &ExportOptions {
+            sql: None,
+            table: None,
+            path: path_str.into(),
+            format: "hyper".into(),
+            overwrite: true,
+            format_options: None,
+            source_db: None,
+        },
+    )
+    .expect("hyper export must succeed");
+
+    let report = result
+        .schema_fidelity
+        .expect("hyper export must report schema fidelity");
+    assert_eq!(report.rows_copied, 1);
+    assert_eq!(report.not_null_columns, 2);
+    assert_eq!(report.default_columns, 2);
+    assert_eq!(report.assumed_primary_keys, 1);
+    assert_eq!(report.assumed_unique_constraints, 1);
+    assert!(report.is_fully_preserved(), "{:?}", report.unpreserved);
+
+    // Re-open the exported file on its own and read its real catalog.
+    te.engine
+        .execute_command(&format!(
+            "ATTACH DATABASE {} AS \"verify\"",
+            hyperdb_api::escape_sql_path(path_str)
+        ))
+        .unwrap();
+
+    let column_rows = te
+        .engine
+        .execute_query_to_json(
+            "SELECT a.attname AS name, CAST(a.attnotnull AS TEXT) AS nn, \
+             CAST(a.atthasdef AS TEXT) AS hd \
+             FROM \"verify\".pg_catalog.pg_attribute a \
+             JOIN \"verify\".pg_catalog.pg_class c ON a.attrelid = c.oid \
+             WHERE c.relname = 'constrained' AND a.attnum > 0 ORDER BY a.attnum",
+        )
+        .unwrap();
+    assert_eq!(column_rows.len(), 4);
+    assert_eq!(column_rows[0]["name"], "id");
+    assert_eq!(column_rows[0]["nn"], "true");
+    assert_eq!(column_rows[1]["nn"], "true");
+    assert_eq!(column_rows[2]["hd"], "true");
+    assert_eq!(column_rows[3]["hd"], "true");
+
+    let constraint_rows = te
+        .engine
+        .execute_query_to_json(
+            "SELECT CAST(con.contype AS TEXT) AS t, a.attname AS col \
+             FROM \"verify\".pg_catalog.pg_constraint con \
+             JOIN \"verify\".pg_catalog.pg_class c ON con.conrelid = c.oid, \
+             unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) \
+             JOIN \"verify\".pg_catalog.pg_attribute a \
+               ON a.attrelid = con.conrelid AND a.attnum = k.attnum \
+             WHERE c.relname = 'constrained' ORDER BY con.contype",
+        )
+        .unwrap();
+    assert_eq!(constraint_rows.len(), 2);
+    assert_eq!(constraint_rows[0]["t"], "p");
+    assert_eq!(constraint_rows[0]["col"], "id");
+    assert_eq!(constraint_rows[1]["t"], "u");
+    assert_eq!(constraint_rows[1]["col"], "code");
+
+    te.engine
+        .execute_command("DETACH DATABASE \"verify\"")
+        .unwrap();
 }

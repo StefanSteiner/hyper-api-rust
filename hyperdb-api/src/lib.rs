@@ -190,6 +190,7 @@ mod result;
 mod row_accessor;
 mod server_version;
 mod table;
+mod table_copy;
 mod table_definition;
 mod transaction;
 mod transport;
@@ -237,7 +238,8 @@ pub use row_accessor::RowAccessor;
 pub use query_as::{QueryAs, QueryScalar};
 pub use server_version::ServerVersion;
 pub use table::Table;
-pub use table_definition::{ColumnDefinition, Persistence, TableDefinition};
+pub use table_copy::{CopyTableReport, UnpreservedItem, UnpreservedReason};
+pub use table_definition::{ColumnDefinition, Persistence, TableConstraint, TableDefinition};
 pub use transaction::Transaction;
 
 // Re-export types from hyperdb-api-core's types layer.
