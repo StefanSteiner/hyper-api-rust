@@ -314,8 +314,9 @@ fn health_listener_waits_for_command_after_accept() {
                 }
             }
 
-            // Keep the already-accepted first socket idle for more than two
-            // additional 100ms listener polls before sending its first command.
+            // Keep the already-accepted first socket idle for well over the
+            // listener's 5ms accept-loop poll interval before sending its
+            // first command.
             std::thread::sleep(Duration::from_millis(350));
             idle_client.ping("delayed first-client")
         })();
@@ -1232,7 +1233,10 @@ fn takeover_decision_both_unparseable_reuses() {
 // ─── Integration tests: full daemon lifecycle with real hyperd ─────────────────
 
 #[test]
-#[ignore = "flaky on macOS CI — daemon startup exceeds 150s timeout"]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "flaky on macOS CI — daemon startup exceeds 150s timeout"
+)]
 fn daemon_mode_engine_connects_to_shared_hyperd() {
     let _lock = acquire_env_lock();
     let daemon = TestDaemon::start();
@@ -1251,7 +1255,10 @@ fn daemon_mode_engine_connects_to_shared_hyperd() {
 }
 
 #[test]
-#[ignore = "flaky on macOS CI — daemon startup exceeds 150s timeout"]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "flaky on macOS CI — daemon startup exceeds 150s timeout"
+)]
 fn daemon_mode_two_engines_share_same_hyperd() {
     let _lock = acquire_env_lock();
     let daemon = TestDaemon::start();
@@ -1294,7 +1301,10 @@ fn daemon_mode_two_engines_share_same_hyperd() {
 }
 
 #[test]
-#[ignore = "flaky on macOS CI — daemon startup exceeds 150s timeout"]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "flaky on macOS CI — daemon startup exceeds 150s timeout"
+)]
 fn daemon_mode_persistent_database_file_survives_engine_drop() {
     let _lock = acquire_env_lock();
     let _daemon = TestDaemon::start();
@@ -1319,7 +1329,10 @@ fn daemon_mode_persistent_database_file_survives_engine_drop() {
 }
 
 #[test]
-#[ignore = "flaky on macOS CI — daemon startup exceeds 150s timeout"]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "flaky on macOS CI — daemon startup exceeds 150s timeout"
+)]
 fn daemon_mode_persistent_engine_data_is_queryable() {
     let _lock = acquire_env_lock();
     let daemon = TestDaemon::start();
@@ -1348,7 +1361,10 @@ fn daemon_mode_persistent_engine_data_is_queryable() {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "flaky on macOS CI — daemon startup exceeds 150s timeout"]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "flaky on macOS CI — daemon startup exceeds 150s timeout"
+)]
 fn hyperd_monitor_detects_killed_hyperd_and_restarts() {
     let _lock = acquire_env_lock();
     let daemon = TestDaemon::start();
@@ -1376,7 +1392,10 @@ fn hyperd_monitor_detects_killed_hyperd_and_restarts() {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "flaky on macOS CI — daemon startup exceeds 150s timeout"]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "flaky on macOS CI — daemon startup exceeds 150s timeout"
+)]
 fn client_report_triggers_restart_after_kill() {
     let _lock = acquire_env_lock();
     let daemon = TestDaemon::start();
@@ -1404,7 +1423,10 @@ fn client_report_triggers_restart_after_kill() {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "flaky on macOS CI — daemon startup exceeds 150s timeout"]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "flaky on macOS CI — daemon startup exceeds 150s timeout"
+)]
 fn engine_recovers_after_hyperd_killed() {
     // End-to-end test: the user-visible behavior of this whole feature.
     // 1. Start daemon + create an Engine (= an MCP client connection).
@@ -1456,7 +1478,10 @@ fn engine_recovers_after_hyperd_killed() {
 }
 
 #[test]
-#[ignore = "flaky on macOS CI — daemon startup exceeds 150s timeout"]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "flaky on macOS CI — daemon startup exceeds 150s timeout"
+)]
 fn daemon_mode_ephemeral_database_cleaned_up_on_drop() {
     let _lock = acquire_env_lock();
     let _daemon = TestDaemon::start();

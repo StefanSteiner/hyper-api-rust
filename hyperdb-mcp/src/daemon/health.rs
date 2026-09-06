@@ -136,20 +136,19 @@ impl HealthListener {
                 break;
             }
 
-            match self.listener.accept() {
-                Ok((stream, _addr)) => {
-                    if let Err(error) = stream.set_nonblocking(false) {
-                        warn!(
-                            error = %error,
-                            "could not make accepted health connection blocking"
-                        );
-                        continue;
-                    }
+            match accept_and_force_blocking(&self.listener) {
+                Ok(AcceptedConnection::Ready(stream)) => {
                     let state = Arc::clone(&state);
                     let info = Arc::clone(&info);
                     std::thread::spawn(move || {
                         handle_client(stream, &state, &info);
                     });
+                }
+                Ok(AcceptedConnection::ForceBlockingFailed(error)) => {
+                    warn!(
+                        error = %error,
+                        "could not make accepted health connection blocking"
+                    );
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     // Poll tightly: the doctor network phase budgets only a
@@ -166,6 +165,40 @@ impl HealthListener {
             }
         }
         debug!("health listener shut down");
+    }
+}
+
+/// Outcome of [`accept_and_force_blocking`] once a connection has actually
+/// been accepted (as opposed to `accept()` itself erroring, which is
+/// propagated through the outer `io::Result`).
+enum AcceptedConnection {
+    /// Accepted and confirmed blocking; ready to hand to [`handle_client`].
+    Ready(TcpStream),
+    /// Accepted, but the attempt to clear the non-blocking flag failed. The
+    /// connection is dropped; the caller logs and moves on to the next
+    /// `accept()`.
+    ForceBlockingFailed(std::io::Error),
+}
+
+/// Accept one connection and force it into blocking mode.
+///
+/// [`HealthListener::bind`] puts the *listening* socket into non-blocking
+/// mode so [`HealthListener::run`]'s loop can poll `should_shutdown` between
+/// accepts. On BSD-derived kernels — macOS and other BSDs, but **not**
+/// Linux, which keeps a newly accepted socket's blocking mode independent of
+/// the listener's — `accept()` propagates the listening socket's
+/// `O_NONBLOCK` flag to the accepted socket. Left non-blocking, the accepted
+/// stream would return `WouldBlock` from `read_line` in
+/// [`handle_client`] in microseconds — typically before the client has even
+/// written its first byte — tearing the connection down before it ever
+/// received a command. `set_nonblocking(false)` below undoes that
+/// propagation unconditionally, which is a no-op (not a bug) on platforms
+/// that never had the problem.
+fn accept_and_force_blocking(listener: &TcpListener) -> std::io::Result<AcceptedConnection> {
+    let (stream, _addr) = listener.accept()?;
+    match stream.set_nonblocking(false) {
+        Ok(()) => Ok(AcceptedConnection::Ready(stream)),
+        Err(error) => Ok(AcceptedConnection::ForceBlockingFailed(error)),
     }
 }
 
@@ -701,6 +734,67 @@ mod tests {
             result.as_ref().err().map(std::io::Error::kind),
             Some(std::io::ErrorKind::InvalidData),
             "newline-free health responses beyond the 64 KiB protocol limit must be rejected; {outcome}"
+        );
+    }
+
+    /// Asserts the accepted socket's actual blocking state via `fcntl`,
+    /// rather than inferring it from read-timing behavior. On Linux an
+    /// accepted socket is blocking regardless of the listener's mode, so a
+    /// behavioral test (send late, expect it to still be read) passes
+    /// trivially there even with `accept_and_force_blocking`'s
+    /// `set_nonblocking(false)` reverted — it would only catch a regression
+    /// on the BSD-derived kernels (macOS and other BSDs) that actually
+    /// propagate `O_NONBLOCK` to accepted sockets. Reading the `O_NONBLOCK`
+    /// flag directly makes the test verify the real contract everywhere,
+    /// rather than a platform-dependent behavioral proxy for it.
+    #[cfg(unix)]
+    #[test]
+    fn accept_and_force_blocking_clears_nonblocking_flag() {
+        use std::os::unix::io::AsRawFd;
+
+        let listener = HealthListener::bind(0).expect("bind test health listener");
+        let port = listener.port;
+
+        let client = std::thread::spawn(move || {
+            // Held for the duration of the accept below; dropped (and thus
+            // closed) only once this thread returns.
+            std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect test client")
+        });
+
+        let accept_deadline = Instant::now() + Duration::from_secs(2);
+        let accepted = loop {
+            match accept_and_force_blocking(&listener.listener) {
+                Ok(AcceptedConnection::Ready(stream)) => break stream,
+                Ok(AcceptedConnection::ForceBlockingFailed(error)) => {
+                    panic!("force-blocking the accepted test connection failed: {error}")
+                }
+                Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < accept_deadline,
+                        "timed out waiting to accept the test client connection"
+                    );
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                Err(error) => panic!("accept failed: {error}"),
+            }
+        };
+        client.join().expect("test client thread must not panic");
+
+        // SAFETY: `accepted` is a live, owned, valid socket for the duration
+        // of this call; `F_GETFL` only reads flags and mutates nothing.
+        let flags = unsafe { libc::fcntl(accepted.as_raw_fd(), libc::F_GETFL) };
+        assert!(
+            flags >= 0,
+            "fcntl(F_GETFL) on the accepted test connection failed: {}",
+            std::io::Error::last_os_error()
+        );
+        assert_eq!(
+            flags & libc::O_NONBLOCK,
+            0,
+            "accepted health connection must be blocking (O_NONBLOCK must be clear); \
+             reverting accept_and_force_blocking's set_nonblocking(false) call would \
+             leave O_NONBLOCK set on BSD-derived kernels that propagate it from the \
+             listening socket"
         );
     }
 }

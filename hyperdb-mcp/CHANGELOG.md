@@ -232,6 +232,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `daemon status --port` now probes that exact health port, discovered-daemon
   error reports target the effective health port, and best-effort health I/O
   no longer retains the engine mutex.
+- **Health-listener connections could be torn down before the client sent its
+  first byte, on macOS and other BSD-derived kernels.** `HealthListener::bind`
+  puts the listening socket in non-blocking mode so its accept loop can poll
+  for shutdown; on BSD kernels (unlike Linux) `accept()` propagates that
+  `O_NONBLOCK` flag to the accepted socket, so the connection handler's first
+  `read_line` returned `WouldBlock` in microseconds and closed the connection
+  before a client had a chance to write a command. Liveness checks, restart
+  reporting, and heartbeats all depend on this connection surviving long
+  enough to receive one line, so accepted connections are now explicitly
+  forced back into blocking mode.
 - **Attachment contention is actionable for persistent *and* user attaches.**
   A lock conflict (SQLSTATE `55006`, or a legacy "already attached" / "file is
   locked" phrase from older hyperd) now returns `RESOURCE_BUSY` with the
