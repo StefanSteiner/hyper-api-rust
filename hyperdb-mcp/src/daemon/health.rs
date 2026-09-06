@@ -336,6 +336,12 @@ pub fn send_command_with_timeout(
         stream.set_read_timeout(Some(remaining_io_time(io_deadline)?))?;
         let mut byte = [0];
         match stream.read(&mut byte) {
+            Ok(0) if response.is_empty() => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "health command connection closed before any response was sent",
+                ));
+            }
             Ok(0) => break,
             Ok(_) if response.len() == MAX_HEALTH_RESPONSE_BYTES => {
                 return Err(std::io::Error::new(
@@ -795,6 +801,45 @@ mod tests {
              reverting accept_and_force_blocking's set_nonblocking(false) call would \
              leave O_NONBLOCK set on BSD-derived kernels that propagate it from the \
              listening socket"
+        );
+    }
+
+    /// A peer that reads the request and then closes without writing anything
+    /// must be reported as a failed command, not a successful empty response.
+    /// `daemon_stop` in `main.rs` treats `Ok(_)` as "the daemon responded" and
+    /// exits 0, so an `Ok("")` here would silently mask a peer that never
+    /// answered at all.
+    #[test]
+    fn peer_close_without_any_response_is_an_error_not_empty_success() {
+        let peer = spawn_test_peer(|stream, _stop| {
+            let request = read_test_command(&stream)?;
+            if request != "PING\n" {
+                return Err(format!("unexpected health command: {request:?}"));
+            }
+            // Close the connection immediately, writing nothing at all.
+            drop(stream);
+            Ok(())
+        });
+
+        let call = catch_unwind(AssertUnwindSafe(|| {
+            send_command_with_timeout(
+                peer.port,
+                "PING",
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            )
+        }));
+        peer.finish()
+            .expect("silent-close peer must shut down cleanly");
+        let result = match call {
+            Ok(outcome) => outcome,
+            Err(payload) => resume_unwind(payload),
+        };
+
+        assert_eq!(
+            result.as_ref().err().map(std::io::Error::kind),
+            Some(std::io::ErrorKind::UnexpectedEof),
+            "a peer that closes having sent nothing must be reported as an error, not {result:?}"
         );
     }
 }

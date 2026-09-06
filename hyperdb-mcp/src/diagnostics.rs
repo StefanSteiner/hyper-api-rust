@@ -346,6 +346,10 @@ pub(crate) enum DoctorDaemonState {
     Missing,
     Unreadable,
     Malformed,
+    /// The discovery file is well-formed but larger than any legitimate
+    /// record should be; distinct from `Malformed` so the user isn't told to
+    /// fix "invalid JSON" that parses just fine.
+    Oversized,
     ParsedUnreachable,
     LiveFromDiscovery,
     LiveFromScan,
@@ -375,6 +379,7 @@ pub(crate) enum DoctorDaemonWarning {
         kind: io::ErrorKind,
     },
     MalformedDiscovery,
+    OversizedDiscovery,
     DiscoveryCandidateUnreachable {
         responding_port: u16,
     },
@@ -435,6 +440,10 @@ pub(crate) fn collect_doctor_daemon(
         RawDiscoveryRead::Malformed { .. } => {
             warnings.push(DoctorDaemonWarning::MalformedDiscovery);
             (DoctorDaemonState::Malformed, None)
+        }
+        RawDiscoveryRead::Oversized { .. } => {
+            warnings.push(DoctorDaemonWarning::OversizedDiscovery);
+            (DoctorDaemonState::Oversized, None)
         }
         RawDiscoveryRead::Parsed { record, .. } => {
             (DoctorDaemonState::ParsedUnreachable, Some(record))
@@ -1304,6 +1313,10 @@ fn daemon_doctor_warning(warning: &DoctorDaemonWarning) -> DoctorWarning {
             "daemon_discovery_malformed",
             "The daemon discovery file was malformed; it was left unchanged.",
         ),
+        DoctorDaemonWarning::OversizedDiscovery => doctor_warning(
+            "daemon_discovery_oversized",
+            "The daemon discovery file is valid but larger than any legitimate record should be; it was left unchanged.",
+        ),
         DoctorDaemonWarning::DiscoveryCandidateUnreachable { responding_port } => doctor_warning(
             "daemon_discovery_candidate_unreachable",
             format!(
@@ -1439,6 +1452,7 @@ const fn daemon_state_label(state: DoctorDaemonState) -> &'static str {
         DoctorDaemonState::Missing => "missing",
         DoctorDaemonState::Unreadable => "unreadable",
         DoctorDaemonState::Malformed => "malformed",
+        DoctorDaemonState::Oversized => "oversized",
         DoctorDaemonState::ParsedUnreachable => "parsed_unreachable",
         DoctorDaemonState::LiveFromDiscovery => "live_from_discovery",
         DoctorDaemonState::LiveFromScan => "live_from_scan",
@@ -1688,6 +1702,7 @@ mod tests {
         Missing,
         Unreadable(io::ErrorKind),
         Malformed,
+        Oversized,
         Parsed(Value),
     }
 
@@ -1698,6 +1713,7 @@ mod tests {
                 Self::Missing => RawDiscoveryRead::Missing { path },
                 Self::Unreadable(kind) => RawDiscoveryRead::Unreadable { path, kind: *kind },
                 Self::Malformed => RawDiscoveryRead::Malformed { path },
+                Self::Oversized => RawDiscoveryRead::Oversized { path },
                 Self::Parsed(value) => RawDiscoveryRead::Parsed {
                     path,
                     record: serde_json::from_value(value.clone()).unwrap(),
@@ -2340,6 +2356,15 @@ mod tests {
                 expected_state: DoctorDaemonState::Malformed,
                 expected_live: None,
                 expected_warnings: vec![DoctorDaemonWarning::MalformedDiscovery],
+            },
+            Case {
+                name: "oversized",
+                raw: RawFixture::Oversized,
+                scan_ports: vec![],
+                status_responses: vec![],
+                expected_state: DoctorDaemonState::Oversized,
+                expected_live: None,
+                expected_warnings: vec![DoctorDaemonWarning::OversizedDiscovery],
             },
             Case {
                 name: "parsed-unreachable",

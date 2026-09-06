@@ -340,6 +340,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   than losing scratch tables. Load with `persist: true` if data must survive a
   panicking tool call. Fixes
   [issue #266](https://github.com/tableau/hyper-api-rust/issues/266).
+- **`discover()` rejected a live daemon over an unrecognized `identity`
+  block, defeating forward compatibility.** The client fast path deserialized
+  the whole `DaemonRecord` (added in 0.7.3) — including the nested `identity`
+  object — and discarded the enrichment immediately after
+  (`record.info().clone()`), so the added strictness bought nothing while
+  costing compatibility across daemon/client version skew: a retyped
+  `identity`, a reshaped `executable_path`, or an `identity` missing
+  `executable_path` each made a well-formed, live daemon's `daemon.json` fail
+  to parse, and `discover()` returned `None` for a healthy process.
+  `wait_for_daemon` (`spawn.rs`) then timed out and silently fell back to a
+  private `hyperd`, `status_degraded` (`server.rs`) reported no daemon, and
+  `Engine::is_running` returned false. `discover()` now always extracts the
+  legacy `DaemonInfo` fields, which ignore unknown fields, and only uses the
+  stricter `DaemonRecord` shape to choose a diagnostic log message — never to
+  gate discovery. The doctor's separate raw reader is unaffected and keeps
+  the strict contract, since it deliberately surfaces a malformed `identity`
+  block as a diagnostic. Fixes
+  [issue #270](https://github.com/tableau/hyper-api-rust/issues/270).
+- **The "atomic" discovery-file write wasn't atomic, on the strength of a
+  false premise about Windows.** `write_discovery_record` deleted the
+  existing `daemon.json` before renaming the temp file into place, with a
+  comment claiming "`rename` fails if target exists" on Windows — but
+  `std::fs::rename` replaces an existing target on both Windows
+  (`MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`, falling back to
+  `SetFileInformationByHandle`) and Unix. The unnecessary delete opened a
+  window where the file did not exist at all; since `try_restart_hyperd`
+  rewrites this file on every `hyperd` restart, a concurrent `discover()`
+  could observe `Missing` mid-restart. The write is now a single `rename`,
+  matching what the function's doc comment already promised.
+- **An oversized-but-well-formed discovery record was reported as
+  `Malformed`.** The doctor's bounded raw reader rejected any file over 64
+  KiB before attempting to parse it, so a file that was perfectly valid JSON
+  — just unexpectedly large — sent the user to fix "invalid JSON" that
+  parsed fine. `RawDiscoveryRead` gained an `Oversized` variant so the doctor
+  reports what actually happened instead.
+- **A daemon peer that closed a health-command connection without writing
+  anything was reported as a successful, empty response.** `daemon_stop`
+  printed `Daemon responded:` with nothing after it and exited 0, which a
+  calling script would read as a successful stop. `send_command_with_timeout`
+  now returns `UnexpectedEof` when the connection ends before any bytes are
+  read. Fixes 3 of the 5 items in
+  [issue #275](https://github.com/tableau/hyper-api-rust/issues/275).
 
 ## [0.5.0] - 2026-06-07
 
