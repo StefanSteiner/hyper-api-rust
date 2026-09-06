@@ -43,6 +43,36 @@ fn create_test_parquet(path: &str) {
     writer.close().unwrap();
 }
 
+/// Write a Parquet file with an INT32 "id" column plus a
+/// `congestion_surcharge` column stored with Parquet's physical
+/// **NullType** — the shape an optional column takes when a partition
+/// happens to be entirely null, and one hyperd cannot read at all.
+fn create_null_type_parquet(path: &str) {
+    use arrow::array::{Int32Array, NullArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use parquet::arrow::ArrowWriter;
+    use std::fs::File;
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int32, false),
+        Field::new("congestion_surcharge", DataType::Null, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int32Array::from(vec![1, 2, 3])),
+            Arc::new(NullArray::new(3)),
+        ],
+    )
+    .unwrap();
+
+    let file = File::create(path).unwrap();
+    let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+}
+
 /// Write a small Arrow IPC file with an INT32 "x" and FLOAT64 "y" column,
 /// both non-nullable, for use in tests.
 fn create_test_arrow_ipc(path: &str) {
@@ -768,4 +798,126 @@ fn ingest_arrow_ipc_merge_basic() {
     assert_eq!(rows[1]["y"], 9.9); // updated
     assert_eq!(rows[2]["x"], 30); // inserted
     assert_eq!(rows[2]["y"], 3.5);
+}
+
+/// A Parquet file with a physical `NullType` column must be rejected during
+/// footer inspection, before any SQL reaches hyperd.
+///
+/// Previously the column was mapped to `TEXT`, the ingest SQL looked
+/// well-formed, and hyperd answered with a generic
+/// `42804 ... hinting at a corrupted file` — which sends the user auditing
+/// a file that is in fact intact. There is no SQL-level workaround (a
+/// `schema` override becomes a projection cast the engine never reaches, and
+/// even selecting only the other columns still fails), so the honest move is
+/// to stop locally and name the column.
+///
+/// Asserting the target table does not exist afterwards is what pins
+/// "before issuing SQL": in replace mode the ingest path would otherwise
+/// have already run `DROP TABLE IF EXISTS` + `CREATE TABLE AS`.
+#[test]
+fn ingest_parquet_null_type_column_fails_before_issuing_sql() {
+    let te = TestEngine::new_ephemeral();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nulltype.parquet");
+    let path_str = path.to_str().unwrap();
+    create_null_type_parquet(path_str);
+
+    let opts = IngestOptions {
+        table: "nulltype_data".into(),
+        mode: "replace".into(),
+        schema_override: None,
+        merge_key: None,
+        target_db: None,
+    };
+    let err = ingest_parquet_file(&te.engine, path_str, &opts)
+        .expect_err("a physical NullType column must be rejected");
+
+    assert_eq!(err.code, hyperdb_mcp::error::ErrorCode::UnsupportedFormat);
+    assert!(
+        err.message.contains("congestion_surcharge"),
+        "must name the offending column: {}",
+        err.message
+    );
+    assert!(
+        err.message.contains("NullType") && err.message.contains("42804"),
+        "must explain what the engine does: {}",
+        err.message
+    );
+    assert!(
+        err.message.contains("`schema` override cannot fix"),
+        "must rule out the override workaround: {}",
+        err.message
+    );
+    assert!(
+        !err.message.contains("corrupt"),
+        "must not repeat the engine's file-corruption red herring: {}",
+        err.message
+    );
+
+    // No SQL was issued, so the table was never created (nor dropped).
+    let err = te
+        .engine
+        .execute_query_to_json("SELECT COUNT(*) FROM nulltype_data")
+        .expect_err("table must not exist");
+    assert!(
+        err.message.to_lowercase().contains("nulltype_data"),
+        "expected a missing-table error, got: {}",
+        err.message
+    );
+}
+
+/// An override cannot rescue a `NullType` column, so supplying one must not
+/// change the outcome — the caller still gets the same fail-fast rejection
+/// rather than a plausible-looking SQL statement and a 42804.
+#[test]
+fn ingest_parquet_null_type_column_rejected_even_with_schema_override() {
+    let te = TestEngine::new_ephemeral();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nulltype_override.parquet");
+    let path_str = path.to_str().unwrap();
+    create_null_type_parquet(path_str);
+
+    let mut override_map = serde_json::Map::new();
+    override_map.insert(
+        "congestion_surcharge".to_string(),
+        serde_json::Value::String("DOUBLE PRECISION".into()),
+    );
+    let opts = IngestOptions {
+        table: "nulltype_override".into(),
+        mode: "replace".into(),
+        schema_override: Some(override_map),
+        merge_key: None,
+        target_db: None,
+    };
+    let err = ingest_parquet_file(&te.engine, path_str, &opts)
+        .expect_err("a schema override must not appear to fix a NullType column");
+    assert_eq!(err.code, hyperdb_mcp::error::ErrorCode::UnsupportedFormat);
+}
+
+/// `inspect_file` must report a physical `NullType` column as `NULL`, not
+/// `TEXT`. The tool's contract is that its output is safe to feed back as a
+/// `schema` override, so a fabricated `TEXT` here is worse than the engine's
+/// own error: it hides the only fact that matters about the file.
+#[test]
+fn inspect_file_reports_null_type_column_as_null() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nulltype_inspect.parquet");
+    let path_str = path.to_str().unwrap();
+    create_null_type_parquet(path_str);
+
+    let report = hyperdb_mcp::inspect::inspect_source(path_str, 5).expect("inspect");
+    assert_eq!(report.file_format, "parquet");
+    let col = report
+        .columns
+        .iter()
+        .find(|c| c.name == "congestion_surcharge")
+        .expect("congestion_surcharge column");
+    assert_eq!(col.hyper_type, "NULL");
+    // Neighbouring typed columns are unaffected.
+    let id = report
+        .columns
+        .iter()
+        .find(|c| c.name == "id")
+        .expect("id column");
+    assert_eq!(id.hyper_type, "INT");
 }

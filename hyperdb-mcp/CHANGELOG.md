@@ -90,6 +90,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- The LLM-facing SQL-dialect notes — the `get_readme` payload and the MCP
+  server instructions — document three verified engine behaviors that were
+  previously absent. `to_char` accepts DATE / TIMESTAMP (`to_char(DATE
+  '2020-01-02', 'YYYY')` → `2020`) but has **no numeric overload**:
+  `to_char(123.456, 'FM990.00')` fails with `42601 unsupported data types in
+  call to 'to_char'`. That is an argument-type error, not a missing function —
+  a function Hyper genuinely lacks returns `42883`, as `format()` does.
+  `expr::TEXT` is the scale-preserving numeric-output idiom
+  (`CAST(9.5 AS NUMERIC(8,2))::TEXT` → `9.50`) and the practical stand-in for
+  numeric `to_char`. Parquet columns stored with the physical `NullType`
+  cannot be read at all; see the matching entry under **Fixed**. Part of
+  [issue #165](https://github.com/tableau/hyper-api-rust/issues/165).
 - The `arrow` and `parquet` dependencies moved from **58** to **59**. Not a
   library-API change (this crate ships a binary), but it removes the `thrift`
   dependency and the Apache Thrift excessive-size-allocation advisory with it:
@@ -123,6 +135,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Parquet and Arrow IPC files carrying a column stored with the physical
+  `NullType` — what a writer emits for an optional column that happens to be
+  entirely null in one partition — are rejected during footer inspection, with
+  an error naming the offending column(s), instead of being handed to the
+  engine. `arrow_type_to_hyper` mapped `DataType::Null` to `TEXT`, so
+  `inspect_file` advertised a readable `TEXT` column with `null_count: 0`, and
+  `load_file` / `load_files` / `query_file` (and the directory watcher) built
+  well-formed-looking SQL only for hyperd to answer `42804 ... hinting at a
+  corrupted file` — sending users to audit a file that is intact. There is no
+  SQL-level workaround: selecting only the other columns fails identically,
+  and a `schema` override becomes a cast in the projection that the engine
+  never evaluates. The new error states the only real remedy — re-type the
+  column where the file is written, e.g. cast it to `DOUBLE`. `inspect_file`
+  now reports such a column as type `NULL`, which `map_hyper_type`
+  deliberately does not resolve, so an override copied from that report is
+  rejected rather than silently becoming `TEXT`. Part of
+  [issue #165](https://github.com/tableau/hyper-api-rust/issues/165).
 - Public documentation on `PersistentAttachOutcome`, `ensure_exists_in`,
   `list_in`, `upsert_stub_in`, `set_metadata_in` and `reconcile_in` no longer
   links to private items, which made `cargo doc` fail under

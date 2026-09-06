@@ -305,6 +305,20 @@ differences from standard PostgreSQL:
 - **`external(path, format => '...')`** — read Parquet / CSV / Iceberg
   directly from disk inside a query without first loading it as a
   table. Usable in the FROM clause.
+- **Physical `NullType` Parquet columns are unreadable** — what a writer
+  emits for an all-null optional column in one partition. Hyper rejects
+  the *whole file* with `42804` (\"hinting at a corrupted file\" — it
+  isn't); selecting only the other columns doesn't help, and a `schema`
+  override can't fix it. Re-type the column at the writer (e.g. cast to
+  DOUBLE) and regenerate. `inspect_file` reports it as `NULL`; the
+  load/query tools fail fast and name it.
+- **`to_char` is date/time only.** `to_char(DATE '2020-01-02', 'YYYY')`
+  → `2020` works; there is no numeric overload — `to_char(123.456,
+  'FM990.00')` fails `42601 unsupported data types in call to 'to_char'`.
+  The function exists; one Hyper truly lacks gives `42883` (`format()`).
+- **`expr::TEXT` formats numbers, preserving scale:**
+  `CAST(9.5 AS NUMERIC(8,2))::TEXT` → `9.50`. Use instead of `to_char`
+  on a number, and for exact decimal output.
 - **`APPROX_COUNT_DISTINCT(expr)`** — approximate cardinality, 5-100x
   faster than `COUNT(DISTINCT ...)` at high cardinality, on TEXT as well
   as numeric keys. It accelerates the distinct step only, so a per-row
