@@ -202,12 +202,20 @@ The tag and GitHub Release **are** created by hand; see step 5.
 2. The [release-please workflow](../.github/workflows/release-please.yml)
    runs on every push to `main`. It opens (or updates) a single
    **release PR** titled `chore(main): release X.Y.Z`. That PR contains:
-   - All 8 workspace members' versions bumped (Cargo.toml + package.json),
-     plus out-of-workspace `hyperdb-compile-check` — 9 path crates in all.
-   - The `optionalDependencies` and inter-crate version pins updated.
-   - A new dated section in each crate's `CHANGELOG.md` summarizing the
-     conventional commits that landed since the last release.
-   - An updated `.release-please-manifest.json`.
+   - `Cargo.toml`'s `[workspace.package] version`, which all 8 workspace
+     members inherit via `version.workspace = true`, plus out-of-workspace
+     `hyperdb-compile-check`'s own `version` — 9 path crates in all.
+   - The inter-crate `= "X.Y.Z"` pins, updated in place between the
+     `x-release-please-start-version` markers.
+   - A new dated section in the **root** [`CHANGELOG.md`](../CHANGELOG.md)
+     summarizing the conventional commits that landed since the last release.
+   - An updated `.release-please-manifest.json` and `version.txt`.
+   - Both lockfiles, resynced by a follow-up workflow step.
+
+   It does **not** touch the nine per-crate `CHANGELOG.md` files, and it does
+   **not** touch any `package.json` — see
+   [Per-crate changelogs](#per-crate-changelogs-are-not-automated) and
+   [npm versions](#npm-versions-are-stamped-at-publish-time-not-in-the-release-pr).
 3. A maintainer reviews the release PR. Adjust the version manually if a
    different bump is needed (e.g., promote a `0.x.0` patch to a minor) by
    editing the PR or by tagging commits with
@@ -291,6 +299,9 @@ After the tag is created:
 2. Watch [`npm-build-publish.yml`](https://github.com/tableau/hyper-api-rust/actions/workflows/npm-build-publish.yml)
    in parallel.
 3. Confirm the new version landed (see [Verifying a release](#verifying-a-release)).
+4. **Roll over the per-crate changelogs** — see
+   [Rolling over the per-crate changelogs](#rolling-over-the-per-crate-changelogs).
+   Nothing automates this, and skipping it is silent.
 
 **To stop a release after the PR merges but before tagging.** If you find
 a problem in the merged release PR before creating the tag, nothing has
@@ -312,6 +323,39 @@ shipped yet — you have options:
 - **Revert the release PR's commit on `main`** if the bump itself is
   wrong, fix the manifest by hand if needed, and let release-please
   reconcile on the next run.
+
+### Rolling over the per-crate changelogs
+
+release-please does not touch the nine per-crate `CHANGELOG.md` files (see
+[Per-crate changelogs are not automated](#per-crate-changelogs-are-not-automated)),
+so after a release ships, every bullet contributors added under
+`## [Unreleased]` still sits there describing work that is now published.
+
+Once the tag exists, open a follow-up `docs:` PR that, for each crate whose
+`## [Unreleased]` section is non-empty:
+
+1. Renames `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD`, keeping its
+   `### Added` / `### Changed` / `### Fixed` subsections in
+   [Keep a Changelog](https://keepachangelog.com/) order.
+2. Inserts a fresh, empty `## [Unreleased]` above it.
+
+Leave crates with an empty `## [Unreleased]` alone — not every crate changes
+in every release, and an empty dated section is noise.
+
+Two things to watch:
+
+- Run `npx markdownlint-cli2` afterwards. The most common failure is **MD024**
+  (duplicate sibling headings) when the new dated section ends up next to an
+  existing one with the same `### Fixed` / `### Added` subheading.
+- Do this as its own PR. Bundling it with feature work makes the release
+  bookkeeping invisible in review.
+
+This is deliberately manual rather than delegated to release-please. Handing
+all nine files to release-please would mean adding nine packages to
+[release-please-config.json](../release-please-config.json), which is exactly
+the multi-package layout the [lockstep](#lockstep-versioning) setup avoids —
+a large change to a working release pipeline in exchange for bookkeeping that
+takes minutes per release.
 
 ### How commits drive version bumps
 
@@ -336,8 +380,20 @@ semver treats all of `0.x` as unstable — so bump examples written before
 | Manual `Release-As: X.Y.Z` footer | exactly `X.Y.Z` (overrides the computed bump) |
 
 After the workspace is on `1.x.y`, the same prefixes follow normal
-semver: `feat!:` will bump `1.2.3` → `2.0.0` as expected. To stabilize
-the API and cut `1.0.0`, add a `Release-As: 1.0.0` footer to a
+semver: `feat!:` will bump `1.2.3` → `2.0.0` as expected.
+
+> **`bump-minor-pre-major: true` is inert and is not what keeps `2.0.0` away.**
+> It appears twice in
+> [release-please-config.json](../release-please-config.json) (top level and
+> inside the `.` package), but release-please only consults it when
+> `version.isPreMajor` — defined as `major < 1`. The workspace has been at
+> major `1` since `1.0.0-rc.1`, so neither copy has had any effect since.
+> Read it as leftover `0.x` configuration, not as protection against an
+> accidental major bump. The only thing standing between a `feat!:` on `main`
+> and a `2.0.0-rc.2` release PR today is a maintainer noticing the version in
+> the PR title. See [Pre-releases](#pre-releases).
+
+To stabilize the API and cut `1.0.0`, add a `Release-As: 1.0.0` footer to a
 conventional-commit on `main`:
 
 ```text
@@ -362,14 +418,171 @@ Release is auto-flagged as `prerelease: true`, and the npm `dist-tag` is
 set to `rc` / `alpha` / `beta` instead of `latest` so `npm install
 hyperdb-mcp` doesn't pull a pre-release by default.
 
+#### Every rc needs its own footer
+
+The config has **no prerelease keys** (`prerelease`, `prerelease-type`,
+`versioning`), so release-please does not know the repo is in an rc line. It
+applies the default strategy, which bumps `major.minor.patch` and **carries
+the existing `-rc.N` suffix along unchanged**. Left to itself it never
+produces the next rc.
+
+Measured against `1.0.0-rc.2` with `npx release-please release-pr --dry-run`:
+
+| Highest-precedence commit since the tag | Computed version | Wanted? |
+|---|---|---|
+| `fix:` | `1.0.1-rc.2` | no |
+| `feat:` | `1.1.0-rc.2` | no |
+| `feat!:` / `fix!:` / `BREAKING CHANGE:` | `2.0.0-rc.2` | no |
+| any of the above **+ `Release-As: 1.0.0-rc.3`** | `1.0.0-rc.3` | yes |
+
+So a `Release-As:` footer is not an override for unusual cases — during an rc
+line it is load-bearing on **every** release, and forgetting it is the default
+outcome rather than an unlikely slip.
+
+Two properties make that dangerous rather than merely annoying:
+
+- **The wrong version is well-formed.** `v1.0.1-rc.2` satisfies the tag regex
+  in both publish workflows, and it matches the `Cargo.toml` the release PR
+  itself wrote, so the tag-vs-manifest guard agrees too. Nothing in CI objects.
+- **`1.0.1-rc.2` sorts above `1.0.0`.** Publishing it makes a later `1.0.0`
+  final a *downgrade*, permanently forfeiting the ability to complete the
+  1.0.0 rc line cleanly. `cargo yank` hides a version but never frees the
+  number.
+
+The version in the release PR title is the last check. Read it before merging.
+
+Landing the footer: recent PRs are **squash**-merged, so the footer must be in
+the **squash commit body** — a footer that exists only on a branch commit is
+discarded. (`v1.0.0-rc.2`'s footer survived because that PR got a real merge
+commit.) Alternatively an admin can push a direct empty commit, since
+`enforce_admins` is false on `main`:
+
+```bash
+git commit --allow-empty -m "chore: release 1.0.0-rc.3" -m "Release-As: 1.0.0-rc.3"
+```
+
+An already-open release PR computed from the wrong version **self-corrects in
+place** once the footer lands on `main` — release-please recomputes and
+force-pushes its branch on the next run. Don't close or hand-edit it.
+
+Automating this is possible but not free, and it has not been adopted; see
+[Automating the rc line](#automating-the-rc-line).
+
+#### Automating the rc line
+
+Adding three keys to
+[release-please-config.json](../release-please-config.json) makes
+release-please increment the rc itself:
+
+```json
+"prerelease": true,
+"prerelease-type": "rc",
+"versioning": "prerelease"
+```
+
+This was verified, not assumed. `npx release-please@17.11.2 release-pr
+--dry-run` — 17.11.2 being the version `release-please-action@v5` pins — first
+reproduced the live `1.0.1-rc.2` that PR #282 computed, confirming the harness
+matches CI, then ran each shape below against a real config file:
+
+| Config | Highest-precedence commit | Computed |
+|---|---|---|
+| current | `fix:` | `1.0.1-rc.2` |
+| current | `feat:` | `1.1.0-rc.2` |
+| current | `feat!:` | `2.0.0-rc.2` |
+| proposed | `fix:` | `1.0.0-rc.3` |
+| proposed | `feat:` | `1.0.0-rc.3` |
+| proposed | `feat!:` | `1.0.0-rc.3` |
+| proposed + `Release-As: 1.0.0` | any | `1.0.0` |
+| proposed, but `"prerelease": false` | any | `1.0.0` |
+
+All three commit shapes collapse to `1.0.0-rc.3`, so the footer stops being
+load-bearing. The mechanism is `PrereleaseVersioningStrategy`: while the
+current version carries a prerelease and the `major.minor.patch` part is
+unchanged, every bump increments the prerelease counter instead.
+
+**Exiting the rc line stays easy** — the last two rows are the important ones.
+Flipping `"prerelease"` to `false` (keeping the other two keys) makes the very
+next release `1.0.0`: the strategy computes the bump and then truncates the
+prerelease. A `Release-As: 1.0.0` footer also still works, because the
+`RELEASE AS` note short-circuits `determineReleaseType` before any prerelease
+logic runs. So automation does not trade a footer-per-rc for a harder exit.
+
+**One caveat, and it is a real one.** These keys must be *removed* once
+`1.0.0` ships. Left in place at a non-prerelease version, the next `fix:`
+computes `1.0.1-rc` — verified — turning every subsequent stable release into
+an rc. That failure is loud (it shows up in the release PR title) and
+harmless to fix, unlike the current failure mode, but it is a second config
+change that must not be forgotten.
+
+Net: the current setup requires a correct human action on **every** rc and
+fails silently into an unrecoverable version; the proposed setup requires one
+config change now and one at `1.0.0`, and its failure mode is a visibly-wrong
+title. That is a strictly better trade, but it is a change to the file that
+drives releases and should land as its own reviewed PR with a dry run
+attached — not folded into a docs change.
+
+Two details worth knowing before writing that PR:
+
+- `prerelease` is overloaded. The config schema documents it as "create the
+  GitHub release as prerelease", but `PrereleaseVersioningStrategy` also reads
+  it to decide whether to keep the prerelease suffix. Here the release-flag
+  meaning is moot (`skip-github-release: true`), so it acts purely as the
+  versioning switch.
+- Set the keys on the `.` package. Top-level values are inherited as
+  defaults, so setting both places is redundant but harmless — the pattern
+  the existing `skip-github-release` and `bump-minor-pre-major` entries
+  already follow.
+
 ### Lockstep versioning
 
-All 8 workspace members share a single version number, enforced by the
-`linked-versions` plugin in
-[release-please-config.json](../release-please-config.json). When any
-crate's commits trigger a bump, every crate moves together. This keeps
-`cargo publish`'s strict inter-crate version pins (`= "X.Y.Z"`) in sync
-without manual edits.
+All **9 path crates** — the 8 workspace members plus out-of-workspace
+`hyperdb-compile-check` — share a single version number. When any crate's
+commits trigger a bump, every crate moves together, which keeps
+`cargo publish`'s strict inter-crate pins (`= "X.Y.Z"`) in sync without
+manual edits.
+
+There is **no `linked-versions` plugin**, and no `plugins` key at all, in
+[release-please-config.json](../release-please-config.json). Lockstep is not
+a plugin behaviour here — it falls out of the config declaring exactly **one**
+package (`"."`, `release-type: simple`) whose single version is fanned out to
+every crate:
+
+| Mechanism | What it patches |
+|---|---|
+| `release-type: simple` | `version.txt` and `.release-please-manifest.json` |
+| `extra-files` → `type: toml`, `jsonpath: $.workspace.package.version` | `Cargo.toml`; the 8 workspace members inherit it via `version.workspace = true` |
+| `extra-files` → 5 × `type: generic` | the lines between `# x-release-please-start-version` and `# x-release-please-end` in `hyperdb-api-core`, `hyperdb-api`, `hyperdb-api-derive`, `hyperdb-mcp`, and `hyperdb-compile-check` — the inter-crate `= "X.Y.Z"` pins, plus `hyperdb-compile-check`'s own `version` (it is outside the workspace, so it cannot inherit) |
+
+> **Do not "fix" this by adding the `linked-versions` plugin.** That plugin
+> exists to synchronize versions across *multiple* release-please packages.
+> This repo has one. Adding it would either be inert or force a multi-package
+> layout, and would break a setup that works. If a new crate joins the tree,
+> the correct change is to give it `version.workspace = true` (nothing to
+> configure) or, if it must live outside the workspace, add an
+> `x-release-please-start-version` marker plus an `extra-files` entry.
+
+### Per-crate changelogs are not automated
+
+release-please writes the **root** [`CHANGELOG.md`](../CHANGELOG.md) and
+nothing else: `changelog-path` is set on the `.` package only, and no
+per-crate changelog appears in `extra-files`. The nine per-crate
+`CHANGELOG.md` files are entirely hand-maintained, per
+[AGENTS.md](../AGENTS.md) reminder 8.
+
+Nothing rolls their `## [Unreleased]` sections over into a dated section, so
+entries for already-shipped work accumulate there indefinitely. Rolling them
+over is a manual release step — see
+[Rolling over the per-crate changelogs](#rolling-over-the-per-crate-changelogs).
+
+### npm versions are stamped at publish time, not in the release PR
+
+No `package.json` in the tree carries a `version` field or an
+`optionalDependencies` block in source. Both are materialized by
+[`npm-build-publish.yml`](../.github/workflows/npm-build-publish.yml) at
+publish time (`npm pkg set`) from the release tag, after that workflow
+verifies the tag matches the workspace `Cargo.toml` version. So a release PR
+that changes no `package.json` is correct, not a bug.
 
 ### Verifying a release
 
