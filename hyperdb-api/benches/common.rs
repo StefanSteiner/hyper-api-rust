@@ -15,7 +15,8 @@
 //! - one `ResourceStats` + `ResourceMonitor` is the sole source of
 //!   CPU/memory metrics — no more copy-pastes drifting apart.
 //! - formatting helpers (`fmt_count`, `fmt_rate`, `fmt_size`,
-//!   `fmt_mb`) produce identical output everywhere.
+//!   `fmt_mb`) produce identical output everywhere, all in decimal
+//!   units (see [`BYTES_PER_MB`]).
 //! - `HOST_ENV` collects the OS, CPU, RAM, Rust version, hyperd git
 //!   hash so the unified result tables in `BENCHMARK_GUIDE.md` are
 //!   self-describing.
@@ -64,7 +65,9 @@ pub(crate) const BYTES_PER_ROW: usize = 24;
 /// trivial (`SELECT COUNT(*)`, `SELECT SUM(value)` etc).
 #[inline]
 pub(crate) fn gen_id(start_id: i64, i: i64) -> i32 {
-    (start_id + i) as i32
+    // Narrowing `as` would silently wrap past 2^31 rows and emit duplicate,
+    // negative IDs — corrupting the very throughput numbers being measured.
+    i32::try_from(start_id + i).expect("benchmark row IDs must fit the `id INT` column")
 }
 #[inline]
 pub(crate) fn gen_sensor_id(id: i32) -> i32 {
@@ -110,14 +113,14 @@ impl ResourceStats {
         } else {
             let avg =
                 self.memory_samples.iter().sum::<u64>() as f64 / self.memory_samples.len() as f64;
-            avg / (1024.0 * 1024.0)
+            avg / BYTES_PER_MB
         }
     }
     pub(crate) fn memory_max_mb(&self) -> f64 {
-        self.memory_samples.iter().copied().max().unwrap_or(0) as f64 / (1024.0 * 1024.0)
+        self.memory_samples.iter().copied().max().unwrap_or(0) as f64 / BYTES_PER_MB
     }
     pub(crate) fn memory_min_mb(&self) -> f64 {
-        self.memory_samples.iter().copied().min().unwrap_or(0) as f64 / (1024.0 * 1024.0)
+        self.memory_samples.iter().copied().min().unwrap_or(0) as f64 / BYTES_PER_MB
     }
 }
 
@@ -177,6 +180,17 @@ impl ResourceMonitor {
 // Formatting helpers.
 // =============================================================================
 
+/// Bytes in one megabyte.
+///
+/// **Decimal (10^6), not binary (2^20).** Every unit this module reports is
+/// decimal: `fmt_count`, `fmt_rate` and `fmt_size` were already, but the
+/// `MB`-labelled helpers divided by 1024² and so emitted MiB under an `MB`
+/// label. That made a single `MB/sec` column in `BENCHMARK_GUIDE.md` carry two
+/// different units depending on which platform's run produced the row — a
+/// 4.86% discrepancy. Decimal is also the conventional unit for I/O
+/// throughput. Anything labelled `MB` here divides by this constant.
+pub(crate) const BYTES_PER_MB: f64 = 1_000_000.0;
+
 /// Format a row count like `123.4K`, `12.3M`, `1.23B`.
 pub(crate) fn fmt_count(n: u64) -> String {
     if n >= 1_000_000_000 {
@@ -203,12 +217,12 @@ pub(crate) fn fmt_rate(rows_per_sec: f64) -> String {
     }
 }
 
-/// Format MB/sec with two decimals.
+/// Format decimal MB/sec with one decimal place.
 pub(crate) fn fmt_mb(bytes: usize, elapsed_secs: f64) -> String {
     if elapsed_secs <= 0.0 {
         return "—".to_string();
     }
-    let mb = bytes as f64 / (1024.0 * 1024.0);
+    let mb = bytes as f64 / BYTES_PER_MB;
     format!("{:.1} MB/s", mb / elapsed_secs)
 }
 
@@ -257,6 +271,9 @@ impl HostEnv {
             .unwrap_or_default();
         let physical = sysinfo::System::physical_core_count().unwrap_or(cpus.len());
         let logical = cpus.len();
+        // Deliberately binary (2^30), unlike the decimal `MB` throughput
+        // units above: installed RAM is universally quoted in binary units,
+        // so a 36 GiB machine must read "36.0 GB" here and not "38.7".
         let total_memory_gb = sys.total_memory() as f64 / (1024.0 * 1024.0 * 1024.0);
 
         HostEnv {
@@ -358,11 +375,12 @@ impl BenchRecord {
             self.rows as f64 / self.elapsed_secs
         }
     }
+    /// Decimal megabytes per second — see [`BYTES_PER_MB`].
     pub(crate) fn mb_per_sec(&self) -> f64 {
         if self.elapsed_secs <= 0.0 {
             0.0
         } else {
-            (self.bytes as f64 / (1024.0 * 1024.0)) / self.elapsed_secs
+            (self.bytes as f64 / BYTES_PER_MB) / self.elapsed_secs
         }
     }
 }

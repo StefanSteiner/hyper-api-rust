@@ -59,7 +59,7 @@ use hyperdb_api::{
     InsertChunk, Parameters, Result, SqlType, TableDefinition,
 };
 
-use common::{BYTES_PER_ROW, fmt_count, fmt_rate};
+use common::{BYTES_PER_MB, BYTES_PER_ROW, fmt_count, fmt_rate};
 
 /// Await all `handles`, converting join errors into `hyperdb_api::Error`
 /// and collecting successful results. Replaces `futures::try_join_all`
@@ -236,7 +236,7 @@ impl BenchTotals {
         self.total_rows() as f64 / self.wall_secs
     }
     fn agg_mb_per_sec(&self) -> f64 {
-        (self.total_bytes() as f64) / (1024.0 * 1024.0) / self.wall_secs
+        (self.total_bytes() as f64) / BYTES_PER_MB / self.wall_secs
     }
     /// Ratio of summed per-worker time to wall-clock time. ~N means
     /// near-perfect parallelism; 1.0 means fully serial.
@@ -403,7 +403,7 @@ async fn arrow_worker(
         worker_id,
         fmt_count(rows),
         worker_time.as_secs_f64(),
-        (total_bytes as f64) / (1024.0 * 1024.0) / worker_time.as_secs_f64()
+        (total_bytes as f64) / BYTES_PER_MB / worker_time.as_secs_f64()
     );
 
     Ok(WorkerResult {
@@ -531,7 +531,7 @@ fn chunk_sender_worker(
         worker_id,
         fmt_count(rows),
         worker_time.as_secs_f64(),
-        (total_bytes as f64) / (1024.0 * 1024.0) / worker_time.as_secs_f64()
+        (total_bytes as f64) / BYTES_PER_MB / worker_time.as_secs_f64()
     );
 
     Ok(WorkerResult {
@@ -674,7 +674,7 @@ async fn query_worker(
         worker_id,
         fmt_count(rows),
         worker_time.as_secs_f64(),
-        (bytes as f64) / (1024.0 * 1024.0) / worker_time.as_secs_f64().max(1e-9),
+        (bytes as f64) / BYTES_PER_MB / worker_time.as_secs_f64().max(1e-9),
         checksum
     );
 

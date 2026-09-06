@@ -25,6 +25,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   since the rename to `hyperdb-bootstrap`. The command failed with
   "package(s) `hyperd-bootstrap` not found in workspace", which is the first
   thing a new user saw when `HYPERD_PATH` was unset.
+- The benchmark examples reported **MiB/s under an `MB/s` label**. `fmt_mb`,
+  `BenchRecord::mb_per_sec` and the `memory_*_mb` helpers in
+  `benches/common.rs`, plus the equivalent divisions in `benchmark`,
+  `arrow_batching_benchmark` and `async_parallel_benchmark`, all divided byte
+  counts by 1024². Their sibling formatters (`fmt_count`, `fmt_rate`,
+  `fmt_size`) were already decimal, so a single `MB/sec` column in
+  [docs/BENCHMARK_GUIDE.md](../docs/BENCHMARK_GUIDE.md) carried two different
+  units depending on which platform produced the row — a 4.86% discrepancy.
+  All `MB`-labelled output is now decimal (10^6). Installed-RAM reporting stays
+  binary, since RAM is conventionally quoted that way.
 
 ### Changed
 
