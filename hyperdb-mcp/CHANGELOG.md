@@ -300,6 +300,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   of failing fast and reconnecting. This is most visible since the daemon
   became resident-by-default in 0.5.0, which made long-lived idle connections
   the norm. (Fixed in `hyperdb-api-core` for both the sync and async clients.)
+- **A panicking tool call no longer bricks the server for the rest of the
+  process's lifetime.** `with_engine` holds a `std::sync::MutexGuard` across
+  the tool closure it invokes; a panic propagating out of that closure dropped
+  the guard mid-unwind and poisoned the engine mutex, and every subsequent
+  tool call then failed with `InternalError "Lock poisoned"` until the process
+  restarted. `ensure_engine`'s engine lock now recovers from poisoning the
+  same way it already recovers from `ConnectionLost`: it discards the
+  (possibly mid-mutation) `Engine` behind the poisoned guard, clears the
+  poison flag, and rebuilds a fresh engine on the next call — never reusing a
+  value a panic may have left in a broken state. Fixes
+  [issue #266](https://github.com/tableau/hyper-api-rust/issues/266).
 
 ## [0.5.0] - 2026-06-07
 

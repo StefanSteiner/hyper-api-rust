@@ -1409,6 +1409,43 @@ impl HyperMcpServer {
         .map_err(McpError::from)
     }
 
+    /// Lock [`Self::engine`], recovering if a previous tool call panicked
+    /// while holding it.
+    ///
+    /// `with_engine` runs each tool's closure with this mutex held (see its
+    /// doc comment), so a panic inside a tool handler unwinds through the
+    /// guard's `Drop` and marks the `Mutex` poisoned per `std`'s default
+    /// behavior. Left alone, every subsequent `.lock()` — i.e. every future
+    /// tool call — would keep returning `Err`, bricking the server for the
+    /// rest of the process's life ([#266]).
+    ///
+    /// A poisoned guard may be observing an `Engine` that a panic caught
+    /// mid-mutation, so its invariants can't be trusted; unlike the
+    /// `ConnectionLost` recovery elsewhere in this file, we cannot keep
+    /// *using* the guarded value. Instead we discard it — `*guard = None`
+    /// drops the (possibly broken) `Engine`, running its normal `Drop`
+    /// teardown — clear the poison flag, and fall through to the same
+    /// single-flight rebuild path used for `ConnectionLost`. The next
+    /// tool call gets a fresh `Engine` instead of a possibly-corrupt one,
+    /// which is the safe default when we don't know what broke.
+    ///
+    /// [#266]: https://github.com/tableau/hyper-api-rust/issues/266
+    fn lock_engine_recovering_poison(&self) -> std::sync::MutexGuard<'_, Option<Engine>> {
+        match self.engine.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!(
+                    "engine mutex was poisoned by a panicking tool call; \
+                     discarding the engine and rebuilding"
+                );
+                let mut guard = poisoned.into_inner();
+                *guard = None;
+                self.engine.clear_poison();
+                guard
+            }
+        }
+    }
+
     /// Lazily start the Hyper engine on first use, returning a mutex guard
     /// that holds a reference to the initialized `Engine`.
     ///
@@ -1421,10 +1458,7 @@ impl HyperMcpServer {
     /// its best-effort health report, and attachment replay may all perform
     /// slow I/O.
     fn ensure_engine(&self) -> Result<std::sync::MutexGuard<'_, Option<Engine>>, McpError> {
-        let guard = self
-            .engine
-            .lock()
-            .map_err(|_| McpError::new(ErrorCode::InternalError, "Lock poisoned"))?;
+        let guard = self.lock_engine_recovering_poison();
         if guard.is_some() {
             return Ok(guard);
         }
@@ -1437,10 +1471,7 @@ impl HyperMcpServer {
 
         // A competing initializer may have completed while this caller was
         // waiting for the single-flight guard. Recheck before constructing.
-        let guard = self
-            .engine
-            .lock()
-            .map_err(|_| McpError::new(ErrorCode::InternalError, "Lock poisoned"))?;
+        let guard = self.lock_engine_recovering_poison();
         if guard.is_some() {
             drop(initialization);
             return Ok(guard);
@@ -1470,10 +1501,7 @@ impl HyperMcpServer {
             tracing::warn!(err = %e.message, "failed to replay attachments on new engine");
         }
 
-        let mut guard = self
-            .engine
-            .lock()
-            .map_err(|_| McpError::new(ErrorCode::InternalError, "Lock poisoned"))?;
+        let mut guard = self.lock_engine_recovering_poison();
         debug_assert!(
             guard.is_none(),
             "single-flight initializer lost engine ownership"
@@ -6044,5 +6072,61 @@ mod heartbeat_debounce_tests {
             "heartbeat reservation failures:\n{}",
             failures.join("\n")
         );
+    }
+}
+
+/// Regression tests for [issue #266](https://github.com/tableau/hyper-api-rust/issues/266):
+/// a panicking tool call must not brick the server for the rest of the
+/// process's lifetime.
+///
+/// These must drive [`HyperMcpServer::with_engine`] directly rather than an
+/// `Engine` built through the `TestEngine` test helper used elsewhere in this
+/// crate. The defect lives in the `Mutex<Option<Engine>>` guard that
+/// `with_engine` holds across the tool closure — a bare `Engine` (no
+/// surrounding server mutex) simply cannot exhibit it, which is exactly why
+/// the crate's existing panic-path tests (`transaction_tests.rs`, which call
+/// `Engine::execute_in_transaction` directly) never caught this.
+#[cfg(test)]
+mod engine_mutex_poison_tests {
+    use super::*;
+
+    /// A private, no-daemon server: same construction `doctor_catalog_snapshot`
+    /// uses to avoid depending on a shared `hyperd` daemon process, with an
+    /// ephemeral-only workspace (`persistent_path = None`).
+    fn test_server() -> HyperMcpServer {
+        HyperMcpServer::with_no_daemon(None, false, true)
+    }
+
+    #[test]
+    fn panicking_tool_closure_does_not_poison_engine_for_next_call() {
+        let server = test_server();
+
+        // First call: warm the engine, then panic inside the `with_engine`
+        // closure to simulate a bug in a tool handler (e.g. an `unwrap()` on
+        // `None`). `catch_unwind` at the `std::panic` boundary lets the test
+        // observe the aftermath without aborting the whole test binary — the
+        // real MCP server survives this the same way, because each tool call
+        // already runs on its own task.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            server.with_engine(|engine| -> Result<(), McpError> {
+                engine.execute_command("CREATE TABLE poison_probe (v INT)")?;
+                panic!("simulated tool handler bug");
+            })
+        }));
+        assert!(
+            outcome.is_err(),
+            "panic should propagate out of with_engine"
+        );
+
+        // Second call: without the fix, the panic above dropped the
+        // `MutexGuard` mid-unwind and poisoned `self.engine`, so
+        // `ensure_engine`'s `.lock()` returns `Err` forever after — every
+        // subsequent tool call fails with "Lock poisoned" and the server is
+        // bricked until the process restarts. With the fix, the poisoned
+        // engine is discarded and rebuilt transparently.
+        let rows = server
+            .with_engine(|engine| engine.execute_query_to_json("SELECT 1 AS one"))
+            .expect("server must recover from a panicking tool call, not stay poisoned forever");
+        assert_eq!(rows[0]["one"].as_i64(), Some(1));
     }
 }
