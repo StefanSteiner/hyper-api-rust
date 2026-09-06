@@ -2971,8 +2971,19 @@ impl HyperMcpServer {
                 ChartType::Histogram => params.x.as_deref().or(params.y.as_deref()),
                 ChartType::Bar | ChartType::Line | ChartType::Scatter => params.y.as_deref(),
             };
-            let chart_rows =
-                engine.execute_chart_query_to_json(&params.sql, measure_column)?;
+            // Only line/scatter ever treat x as a typed numeric coordinate
+            // (bar's x is always categorical; histogram has no separate x
+            // column) — requesting the sidecar for the other types would
+            // just be dead weight.
+            let x_measure_column = match chart_type {
+                ChartType::Line | ChartType::Scatter => params.x.as_deref(),
+                ChartType::Bar | ChartType::Histogram => None,
+            };
+            let chart_rows = engine.execute_chart_query_to_json(
+                &params.sql,
+                measure_column,
+                x_measure_column,
+            )?;
 
             // Parse color_map: skip entries whose hex string is malformed,
             // logging them via the description rather than hard-failing.
@@ -3011,6 +3022,7 @@ impl HyperMcpServer {
                 &opts,
                 presentation,
                 &chart_rows.measures,
+                chart_rows.x_measures.as_deref(),
             )?;
 
             // Decide disk vs inline vs both. Write to disk *before*

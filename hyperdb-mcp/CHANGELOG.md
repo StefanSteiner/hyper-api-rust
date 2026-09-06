@@ -304,6 +304,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `CREATE DATABASE IF NOT EXISTS` (a TOCTOU window between the existence
   check and the `CREATE`) is closed the same way. Fixes part of
   [issue #277](https://github.com/tableau/hyper-api-rust/issues/277).
+- **Chart x-axis never got the typed-numeric treatment the y-axis already
+  had.** A NUMERIC value too large for `f64` to round-trip serializes as an
+  exact-text JSON *string* (see the NUMERIC entry above); on the y-axis this
+  is handled correctly via a typed sidecar, but the x-axis fell back to
+  reading the raw JSON, so `detect_line_x_mode` saw a non-numeric,
+  non-temporal string and silently misclassified a numeric axis as
+  categorical — flattening it to evenly-spaced ordinal positions with no
+  warning. Detection also sampled only row 0, so a leading `NULL` x on an
+  otherwise numeric or temporal column flipped the whole chart's
+  interpretation and plotted the `NULL` row as a real point with a blank
+  label. `execute_chart_query_to_json` now builds the same typed
+  `ChartMeasureValue` sidecar for line/scatter's x column that it already
+  built for the measure column, `detect_line_x_mode` prefers that sidecar
+  (falling back to raw-JSON sampling only when none was requested, e.g. the
+  public `render_chart` API), and both detection and grouping skip leading
+  `NULL`s instead of only inspecting the first row. Part of
+  [issue #277](https://github.com/tableau/hyper-api-rust/issues/277).
 
 ## [0.5.0] - 2026-06-07
 

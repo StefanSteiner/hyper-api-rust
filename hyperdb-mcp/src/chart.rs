@@ -627,19 +627,21 @@ pub(crate) fn render_chart_with_presentation(
     opts: &ChartOptions,
     presentation: ChartPresentation,
 ) -> Result<ChartResult, McpError> {
-    render_chart_impl(rows, opts, presentation, None)
+    render_chart_impl(rows, opts, presentation, None, None)
 }
 
-/// Extended MCP renderer that consumes row-aligned typed measure metadata.
-/// The public JSON renderer delegates without this sidecar and retains its
-/// established source and behavior contract.
+/// Extended MCP renderer that consumes row-aligned typed measure metadata
+/// for the y (always) and, for line/scatter, x (`x_measures`) columns.
+/// The public JSON renderer delegates without either sidecar and retains
+/// its established source and behavior contract.
 pub(crate) fn render_chart_with_measure_metadata(
     rows: &[Value],
     opts: &ChartOptions,
     presentation: ChartPresentation,
     measures: &[ChartMeasureValue],
+    x_measures: Option<&[ChartMeasureValue]>,
 ) -> Result<ChartResult, McpError> {
-    render_chart_impl(rows, opts, presentation, Some(measures))
+    render_chart_impl(rows, opts, presentation, Some(measures), x_measures)
 }
 
 fn render_chart_impl(
@@ -647,6 +649,7 @@ fn render_chart_impl(
     opts: &ChartOptions,
     presentation: ChartPresentation,
     measures: Option<&[ChartMeasureValue]>,
+    x_measures: Option<&[ChartMeasureValue]>,
 ) -> Result<ChartResult, McpError> {
     const MAX_CHART_ROWS: usize = 50_000;
     if rows.is_empty() {
@@ -668,7 +671,9 @@ fn render_chart_impl(
             "Add `LIMIT {MAX_CHART_ROWS}` to your query, or use GROUP BY to aggregate."
         )));
     }
-    if measures.is_some_and(|values| values.len() != rows.len()) {
+    if measures.is_some_and(|values| values.len() != rows.len())
+        || x_measures.is_some_and(|values| values.len() != rows.len())
+    {
         return Err(McpError::new(
             ErrorCode::InternalError,
             "Chart measure metadata is not aligned with the query rows",
@@ -680,8 +685,8 @@ fn render_chart_impl(
     presentation.validate(opts.chart_type)?;
 
     match opts.format {
-        ChartFormat::Png => render_png(rows, opts, presentation, measures),
-        ChartFormat::Svg => render_svg(rows, opts, presentation, measures),
+        ChartFormat::Png => render_png(rows, opts, presentation, measures, x_measures),
+        ChartFormat::Svg => render_svg(rows, opts, presentation, measures, x_measures),
     }
 }
 
@@ -712,6 +717,7 @@ fn render_png(
     opts: &ChartOptions,
     presentation: ChartPresentation,
     measures: Option<&[ChartMeasureValue]>,
+    x_measures: Option<&[ChartMeasureValue]>,
 ) -> Result<ChartResult, McpError> {
     let tmp = tempfile::Builder::new()
         .suffix(".png")
@@ -725,7 +731,7 @@ fn render_png(
     let path = tmp.path().to_path_buf();
     let rows_plotted = {
         let backend = BitMapBackend::new(&path, (opts.width, opts.height));
-        draw_on_backend(backend, rows, opts, presentation, measures)?
+        draw_on_backend(backend, rows, opts, presentation, measures, x_measures)?
     };
     let bytes = std::fs::read(&path).map_err(|e| {
         McpError::new(
@@ -746,11 +752,12 @@ fn render_svg(
     opts: &ChartOptions,
     presentation: ChartPresentation,
     measures: Option<&[ChartMeasureValue]>,
+    x_measures: Option<&[ChartMeasureValue]>,
 ) -> Result<ChartResult, McpError> {
     let mut svg_string = String::new();
     let rows_plotted = {
         let backend = SVGBackend::with_string(&mut svg_string, (opts.width, opts.height));
-        draw_on_backend(backend, rows, opts, presentation, measures)?
+        draw_on_backend(backend, rows, opts, presentation, measures, x_measures)?
     };
     Ok(ChartResult {
         bytes: svg_string.into_bytes(),
@@ -766,6 +773,7 @@ fn draw_on_backend<DB: DrawingBackend>(
     opts: &ChartOptions,
     presentation: ChartPresentation,
     measures: Option<&[ChartMeasureValue]>,
+    x_measures: Option<&[ChartMeasureValue]>,
 ) -> Result<usize, McpError>
 where
     <DB as DrawingBackend>::ErrorType: 'static,
@@ -774,9 +782,11 @@ where
     root.fill(&WHITE).map_err(draw_err)?;
 
     match opts.chart_type {
+        // Bar's x is always categorical and histogram has no separate x
+        // column, so neither reads `x_measures` — only line/scatter do.
         ChartType::Bar => draw_bar(&root, rows, opts, presentation, measures),
-        ChartType::Line => draw_line(&root, rows, opts, presentation, measures),
-        ChartType::Scatter => draw_scatter(&root, rows, opts, presentation, measures),
+        ChartType::Line => draw_line(&root, rows, opts, presentation, measures, x_measures),
+        ChartType::Scatter => draw_scatter(&root, rows, opts, presentation, measures, x_measures),
         ChartType::Histogram => draw_histogram(&root, rows, opts, measures),
     }
 }
@@ -1106,22 +1116,56 @@ fn parse_temporal(s: &str) -> Option<(TemporalKind, f64)> {
     None
 }
 
-/// Decide the x mode for a line/scatter chart from the first row's
-/// x value. Used when the caller didn't explicitly set `x_as_category`.
+/// Decide the x mode for a line/scatter chart. Used when the caller didn't
+/// explicitly set `x_as_category`.
 ///
 /// Priority:
-/// 1. Numeric (JSON number) → [`XMode::Numeric`].
-/// 2. String parsing as DATE/TIMESTAMP/TIMESTAMPTZ → [`XMode::Temporal`].
-/// 3. Anything else (TEXT, missing) → [`XMode::Categorical`] fallback.
-fn detect_line_x_mode(rows: &[Value], x_col: &str) -> XMode {
-    let Some(x_raw) = rows
-        .first()
-        .and_then(Value::as_object)
-        .and_then(|obj| obj.get(x_col))
-    else {
+/// 1. `x_measures` (the typed sidecar `execute_chart_query_to_json` builds
+///    for line/scatter) says the column is `Finite`/`NonFinite` numeric
+///    → [`XMode::Numeric`], skipping any leading `Null` rows. This is the
+///    authoritative signal: it catches columns whose exact-precision JSON
+///    serializes as a *string* (e.g. `NUMERIC` values near or above 2^53 —
+///    see `ChartMeasureValue`), which the raw-JSON fallback below would
+///    otherwise misdetect as textual and silently flatten to an evenly
+///    spaced categorical axis.
+/// 2. No sidecar (the public [`render_chart`] entry point doesn't build
+///    one) or a genuinely textual column (`NonNumeric` on first non-null):
+///    fall back to sampling the first non-NULL raw JSON x value —
+///    - JSON number → [`XMode::Numeric`].
+///    - String parsing as DATE/TIMESTAMP/TIMESTAMPTZ → [`XMode::Temporal`].
+///    - Anything else (TEXT, all-NULL/missing) → [`XMode::Categorical`].
+///
+/// Both paths skip leading `NULL`s rather than only inspecting row 0, so a
+/// single blank x on an otherwise numeric or temporal column doesn't flip
+/// the whole chart's interpretation to categorical.
+fn detect_line_x_mode(
+    rows: &[Value],
+    x_col: &str,
+    x_measures: Option<&[ChartMeasureValue]>,
+) -> XMode {
+    if let Some(measures) = x_measures
+        && let Some(measure) = measures
+            .iter()
+            .find(|m| !matches!(m, ChartMeasureValue::Null))
+    {
+        match measure {
+            ChartMeasureValue::Finite { .. } | ChartMeasureValue::NonFinite => {
+                return XMode::Numeric;
+            }
+            ChartMeasureValue::NonNumeric => {}
+            ChartMeasureValue::Null => unreachable!("filtered out by the `find` above"),
+        }
+    }
+
+    let first_non_null = rows
+        .iter()
+        .filter_map(Value::as_object)
+        .map(|obj| obj.get(x_col).cloned().unwrap_or(Value::Null))
+        .find(|value| !value.is_null());
+    let Some(x_raw) = first_non_null else {
         return XMode::Categorical;
     };
-    if as_number(x_raw).is_some() {
+    if as_number(&x_raw).is_some() {
         return XMode::Numeric;
     }
     if let Some(s) = x_raw.as_str()
@@ -1171,7 +1215,7 @@ fn group_series(
     series_col: Option<&str>,
     x_mode: XMode,
 ) -> Result<SeriesMap, McpError> {
-    group_chart_series(rows, x_col, y_col, series_col, x_mode, None).map(|groups| {
+    group_chart_series(rows, x_col, y_col, series_col, x_mode, None, None).map(|groups| {
         groups
             .into_iter()
             .map(|(series, points)| {
@@ -1192,6 +1236,7 @@ fn group_chart_series(
     series_col: Option<&str>,
     x_mode: XMode,
     measures: Option<&[ChartMeasureValue]>,
+    x_measures: Option<&[ChartMeasureValue]>,
 ) -> Result<ChartSeriesMap, McpError> {
     let mut groups: ChartSeriesMap = BTreeMap::new();
     let mut category_index: BTreeMap<String, f64> = BTreeMap::new();
@@ -1212,28 +1257,35 @@ fn group_chart_series(
         )?;
 
         let x_raw = obj.get(x_col).cloned().unwrap_or(Value::Null);
-        let x_label = as_string(&x_raw);
-        let x_val = match x_mode {
+        let (x_val, x_label) = match x_mode {
             XMode::Categorical => {
+                let label = as_string(&x_raw);
                 let next = category_index.len() as f64;
-                *category_index.entry(x_label.clone()).or_insert(next)
+                let val = *category_index.entry(label.clone()).or_insert(next);
+                (val, label)
             }
-            XMode::Numeric => as_number(&x_raw).ok_or_else(|| {
-                McpError::new(
-                    ErrorCode::SchemaMismatch,
-                    format!("Column '{x_col}' is missing or not numeric in at least one row"),
-                )
-            })?,
-            XMode::Temporal(_) => parse_temporal(&x_label)
-                .map(|(_, ts)| ts)
-                .ok_or_else(|| {
+            // Route through the same typed-sidecar helper the y axis uses,
+            // so an x value whose exact JSON serializes as a string (e.g. a
+            // large NUMERIC — see `ChartMeasureValue`) still gets its exact
+            // display text and an unrounded f64 coordinate rather than
+            // falling back to `as_number`'s lossy JSON-number parse.
+            XMode::Numeric => chart_measure_coordinate_and_label(
+                x_measures.and_then(|values| values.get(row_index)),
+                &x_raw,
+                x_col,
+            )?,
+            XMode::Temporal(_) => {
+                let label = as_string(&x_raw);
+                let val = parse_temporal(&label).map(|(_, ts)| ts).ok_or_else(|| {
                     McpError::new(
                         ErrorCode::SchemaMismatch,
                         format!(
-                            "Column '{x_col}' value '{x_label}' is not a recognized DATE / TIMESTAMP / TIMESTAMPTZ form"
+                            "Column '{x_col}' value '{label}' is not a recognized DATE / TIMESTAMP / TIMESTAMPTZ form"
                         ),
                     )
-                })?,
+                })?;
+                (val, label)
+            }
         };
 
         let series_key = match series_col {
@@ -1355,6 +1407,9 @@ where
         opts.series_column.as_deref(),
         XMode::Categorical,
         measures,
+        // Bar's x is always categorical (a raw string label), never a
+        // typed numeric coordinate — there is no x sidecar to pass.
+        None,
     )?;
     let categories = collect_chart_categories(&groups);
     let values: Vec<f64> = groups
@@ -1831,11 +1886,12 @@ fn draw_line<DB: DrawingBackend>(
     opts: &ChartOptions,
     presentation: ChartPresentation,
     measures: Option<&[ChartMeasureValue]>,
+    x_measures: Option<&[ChartMeasureValue]>,
 ) -> Result<usize, McpError>
 where
     <DB as DrawingBackend>::ErrorType: 'static,
 {
-    line_or_scatter(root, rows, opts, true, presentation, measures)
+    line_or_scatter(root, rows, opts, true, presentation, measures, x_measures)
 }
 
 fn draw_scatter<DB: DrawingBackend>(
@@ -1844,11 +1900,12 @@ fn draw_scatter<DB: DrawingBackend>(
     opts: &ChartOptions,
     presentation: ChartPresentation,
     measures: Option<&[ChartMeasureValue]>,
+    x_measures: Option<&[ChartMeasureValue]>,
 ) -> Result<usize, McpError>
 where
     <DB as DrawingBackend>::ErrorType: 'static,
 {
-    line_or_scatter(root, rows, opts, false, presentation, measures)
+    line_or_scatter(root, rows, opts, false, presentation, measures, x_measures)
 }
 
 /// Shared implementation for line and scatter charts. `connect_points` controls
@@ -1860,6 +1917,7 @@ fn line_or_scatter<DB: DrawingBackend>(
     connect_points: bool,
     presentation: ChartPresentation,
     measures: Option<&[ChartMeasureValue]>,
+    x_measures: Option<&[ChartMeasureValue]>,
 ) -> Result<usize, McpError>
 where
     <DB as DrawingBackend>::ErrorType: 'static,
@@ -1869,14 +1927,17 @@ where
     // Decide the x mode:
     // - Explicit `x_as_category=Some(true)` → Categorical (force).
     // - Explicit `x_as_category=Some(false)` → Numeric (force).
-    // - Default (None): peek at the first row's x value:
+    // - Default (None): `detect_line_x_mode` prefers the typed `x_measures`
+    //   sidecar when present (catches exact-precision values that
+    //   serialize as JSON strings), else falls back to sampling the first
+    //   non-NULL raw JSON x value:
     //   - parses as DATE/TIMESTAMP/TIMESTAMPTZ → Temporal (proportional time axis).
     //   - non-numeric (TEXT) → Categorical fallback.
     //   - numeric → Numeric.
     let x_mode = match opts.x_as_category {
         Some(true) => XMode::Categorical,
         Some(false) => XMode::Numeric,
-        None => detect_line_x_mode(rows, x_col),
+        None => detect_line_x_mode(rows, x_col, x_measures),
     };
     let groups = group_chart_series(
         rows,
@@ -1885,6 +1946,7 @@ where
         opts.series_column.as_deref(),
         x_mode,
         measures,
+        x_measures,
     )?;
 
     let default_title = if connect_points {
@@ -2816,36 +2878,155 @@ mod tests {
     #[test]
     fn detect_line_x_mode_picks_temporal_for_dates() {
         let rows = vec![serde_json::json!({"ts": "2026-05-01"})];
-        let mode = detect_line_x_mode(&rows, "ts");
+        let mode = detect_line_x_mode(&rows, "ts", None);
         assert!(matches!(mode, XMode::Temporal(TemporalKind::Date)));
     }
 
     #[test]
     fn detect_line_x_mode_picks_temporal_for_timestamps() {
         let rows = vec![serde_json::json!({"ts": "2026-05-01 08:00:00"})];
-        let mode = detect_line_x_mode(&rows, "ts");
+        let mode = detect_line_x_mode(&rows, "ts", None);
         assert!(matches!(mode, XMode::Temporal(TemporalKind::DateTime)));
     }
 
     #[test]
     fn detect_line_x_mode_picks_temporal_for_timestamptz() {
         let rows = vec![serde_json::json!({"ts": "2026-05-01 08:00:00+00:00"})];
-        let mode = detect_line_x_mode(&rows, "ts");
+        let mode = detect_line_x_mode(&rows, "ts", None);
         assert!(matches!(mode, XMode::Temporal(TemporalKind::DateTimeTz(0))));
     }
 
     #[test]
     fn detect_line_x_mode_falls_back_to_categorical_for_text() {
         let rows = vec![serde_json::json!({"x": "alpha"})];
-        let mode = detect_line_x_mode(&rows, "x");
+        let mode = detect_line_x_mode(&rows, "x", None);
         assert!(matches!(mode, XMode::Categorical));
     }
 
     #[test]
     fn detect_line_x_mode_picks_numeric_for_numbers() {
         let rows = vec![serde_json::json!({"x": 42.0})];
-        let mode = detect_line_x_mode(&rows, "x");
+        let mode = detect_line_x_mode(&rows, "x", None);
         assert!(matches!(mode, XMode::Numeric));
+    }
+
+    /// Regression (issue #277, fix 2, part A): a leading NULL x on an
+    /// otherwise-numeric column used to flip `detect_line_x_mode`'s row-0
+    /// sample to `Categorical`, plotting the NULL row as a real point at
+    /// index 0 with a blank label. Scanning past leading NULLs fixes it —
+    /// even with no typed sidecar (the public `render_chart` entry point
+    /// never builds one).
+    #[test]
+    fn detect_line_x_mode_skips_leading_null_without_sidecar() {
+        let rows = vec![
+            serde_json::json!({"x": null}),
+            serde_json::json!({"x": 42.0}),
+        ];
+        let mode = detect_line_x_mode(&rows, "x", None);
+        assert!(
+            matches!(mode, XMode::Numeric),
+            "expected Numeric, got {mode:?}"
+        );
+    }
+
+    /// Same leading-NULL scenario, but for a temporal column, to confirm
+    /// the categorical fallback path (not just the numeric fast path)
+    /// skips NULLs before sampling.
+    #[test]
+    fn detect_line_x_mode_skips_leading_null_for_temporal_without_sidecar() {
+        let rows = vec![
+            serde_json::json!({"ts": null}),
+            serde_json::json!({"ts": "2026-05-01"}),
+        ];
+        let mode = detect_line_x_mode(&rows, "ts", None);
+        assert!(matches!(mode, XMode::Temporal(TemporalKind::Date)));
+    }
+
+    /// Regression (issue #277, fix 2, part B): a NUMERIC value whose exact
+    /// text can't round-trip through `f64` (see `ChartMeasureValue`)
+    /// serializes as a JSON *string*. Without the typed sidecar,
+    /// `detect_line_x_mode` would see a non-numeric, non-temporal string
+    /// and silently misclassify a numeric axis as `Categorical`. The
+    /// sidecar is the fix: it carries the column's true numeric-ness
+    /// independent of how the JSON scalar happened to serialize.
+    #[test]
+    fn detect_line_x_mode_uses_sidecar_for_string_serialized_numeric() {
+        let rows = vec![serde_json::json!({"x": "99999999999999999.99"})];
+        let x_measures = vec![ChartMeasureValue::Finite {
+            coordinate: 1.0e17,
+            display: "99999999999999999.99".to_string(),
+        }];
+        let mode = detect_line_x_mode(&rows, "x", Some(&x_measures));
+        assert!(
+            matches!(mode, XMode::Numeric),
+            "expected Numeric via sidecar, got {mode:?}"
+        );
+    }
+
+    /// The sidecar must also skip a leading NULL row before consulting the
+    /// first real measure, mirroring the raw-JSON fallback's behavior.
+    #[test]
+    fn detect_line_x_mode_sidecar_skips_leading_null() {
+        let rows = vec![
+            serde_json::json!({"x": null}),
+            serde_json::json!({"x": "99999999999999999.99"}),
+        ];
+        let x_measures = vec![
+            ChartMeasureValue::Null,
+            ChartMeasureValue::Finite {
+                coordinate: 1.0e17,
+                display: "99999999999999999.99".to_string(),
+            },
+        ];
+        let mode = detect_line_x_mode(&rows, "x", Some(&x_measures));
+        assert!(matches!(mode, XMode::Numeric));
+    }
+
+    /// A genuinely textual x column reports `NonNumeric` for every row in
+    /// the sidecar; detection must fall through to the raw-JSON temporal/
+    /// categorical path rather than getting stuck.
+    #[test]
+    fn detect_line_x_mode_sidecar_nonnumeric_falls_back_to_temporal() {
+        let rows = vec![serde_json::json!({"ts": "2026-05-01"})];
+        let x_measures = vec![ChartMeasureValue::NonNumeric];
+        let mode = detect_line_x_mode(&rows, "ts", Some(&x_measures));
+        assert!(matches!(mode, XMode::Temporal(TemporalKind::Date)));
+    }
+
+    /// Regression (issue #277, fix 2, part B, coordinate half): once
+    /// `XMode::Numeric` is chosen, `group_chart_series` must also use the
+    /// sidecar for the x coordinate/label — not just for detection —
+    /// otherwise the axis is correctly classified as numeric but the exact
+    /// point still gets `as_number`'s lossy JSON round-trip and
+    /// `as_string`'s scientific-notation label (`"1e17"` instead of the
+    /// exact `"99999999999999999.99"`).
+    #[test]
+    fn group_chart_series_uses_x_sidecar_for_exact_label_in_numeric_mode() {
+        let rows = vec![serde_json::json!({
+            "x": "99999999999999999.99",
+            "y": 1.0,
+        })];
+        let x_measures = vec![ChartMeasureValue::Finite {
+            coordinate: 1.0e17,
+            display: "99999999999999999.99".to_string(),
+        }];
+        let groups = group_chart_series(
+            &rows,
+            "x",
+            "y",
+            None,
+            XMode::Numeric,
+            None,
+            Some(&x_measures),
+        )
+        .expect("numeric x mode with a sidecar must succeed");
+        let point = &groups[""][0];
+        // Bit-exact comparison (not `assert_eq!` on the `f64`s directly,
+        // which trips `clippy::float_cmp`): the coordinate is an untouched
+        // passthrough of `ChartMeasureValue::Finite::coordinate`, so exact
+        // equality is the correct expectation here, not an approximation.
+        assert_eq!(point.x.to_bits(), 1.0e17_f64.to_bits());
+        assert_eq!(point.x_label, "99999999999999999.99");
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]

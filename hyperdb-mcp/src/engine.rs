@@ -89,13 +89,19 @@ pub(crate) enum ChartMeasureValue {
     NonNumeric,
 }
 
-/// JSON rows plus a row-aligned typed sidecar for the chart's measure column.
-/// This remains crate-private so ordinary query results keep their established
-/// JSON shapes.
+/// JSON rows plus row-aligned typed sidecars for the chart's measure
+/// column and (for line/scatter) its x column. This remains crate-private
+/// so ordinary query results keep their established JSON shapes.
+///
+/// `x_measures` is `None` for chart types whose x axis is never a typed
+/// numeric coordinate (bar's x is always categorical; histogram has no
+/// separate x column) — only line/scatter request it. When present, it
+/// is row-aligned with `rows` exactly like `measures` is.
 #[derive(Debug)]
 pub(crate) struct ChartQueryRows {
     pub(crate) rows: Vec<Value>,
     pub(crate) measures: Vec<ChartMeasureValue>,
+    pub(crate) x_measures: Option<Vec<ChartMeasureValue>>,
 }
 
 /// Attach the persistent database under the reserved `"persistent"`
@@ -1141,18 +1147,25 @@ impl Engine {
         Ok(rows_json)
     }
 
-    /// Execute a chart query while retaining the selected measure's typed
-    /// state alongside the ordinary JSON rows. The sidecar is row-aligned and
-    /// is consumed only by the MCP chart renderer.
+    /// Execute a chart query while retaining the selected measure's (and,
+    /// for line/scatter, the x column's) typed state alongside the ordinary
+    /// JSON rows. Both sidecars are row-aligned and are consumed only by the
+    /// MCP chart renderer.
+    ///
+    /// `x_measure_column` is `None` for chart types that never treat x as a
+    /// typed numeric coordinate (bar, histogram); in that case
+    /// `ChartQueryRows::x_measures` is `None` too.
     pub(crate) fn execute_chart_query_to_json(
         &self,
         sql: &str,
         measure_column: Option<&str>,
+        x_measure_column: Option<&str>,
     ) -> Result<ChartQueryRows, McpError> {
         let mut result = self.connection.execute_query(sql).map_err(McpError::from)?;
 
         let mut rows_json = Vec::new();
         let mut measures = Vec::new();
+        let mut x_measures = x_measure_column.map(|_| Vec::new());
         let mut schema_opt = None;
         while let Some(chunk) = result.next_chunk().map_err(McpError::from)? {
             if schema_opt.is_none() {
@@ -1164,10 +1177,14 @@ impl Engine {
                 // so select the same occurrence for the typed sidecar.
                 let measure = measure_column
                     .and_then(|name| columns.iter().rev().find(|column| column.name() == name));
+                let x_measure = x_measure_column
+                    .and_then(|name| columns.iter().rev().find(|column| column.name() == name));
                 for row in &chunk {
                     let measure_value = measure.map_or(ChartMeasureValue::NonNumeric, |column| {
                         chart_measure_value(row, column.index(), &column.sql_type())
                     });
+                    let x_measure_value = x_measure
+                        .map(|column| chart_measure_value(row, column.index(), &column.sql_type()));
                     let mut obj = serde_json::Map::new();
                     for col in columns {
                         let val = row_value_to_json(row, col.index(), &col.sql_type());
@@ -1175,12 +1192,16 @@ impl Engine {
                     }
                     rows_json.push(Value::Object(obj));
                     measures.push(measure_value);
+                    if let Some(ref mut x_measures) = x_measures {
+                        x_measures.push(x_measure_value.unwrap_or(ChartMeasureValue::NonNumeric));
+                    }
                 }
             }
         }
         Ok(ChartQueryRows {
             rows: rows_json,
             measures,
+            x_measures,
         })
     }
 
