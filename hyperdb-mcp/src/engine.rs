@@ -59,6 +59,7 @@ use hyperdb_api::{
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError, TryLockError};
 
 /// Per-process counter so multiple `Engine` instances in the same PID get
 /// distinct ephemeral directories (parallel test runners, embedded uses).
@@ -2308,6 +2309,102 @@ impl Drop for Engine {
             let _ = std::fs::remove_dir_all(parent);
         }
     }
+}
+
+/// Lock a shared engine slot, recovering it if a previous holder panicked
+/// while the guard was alive.
+///
+/// This and its non-blocking sibling
+/// [`try_lock_engine_recovering_poison`] are the **only** sanctioned ways to
+/// lock the `Mutex<Option<Engine>>` that
+/// [`crate::server::HyperMcpServer`] and the watcher tasks co-own via
+/// `engine_handle()`. Every site must go through one of them: a panic
+/// anywhere poisons the mutex for *every* holder, so a call site that maps
+/// poisoning to an error (or to "busy") stays permanently broken until some
+/// other holder happens to clear the flag.
+///
+/// `with_engine` runs each tool's closure with this mutex held (see its doc
+/// comment), so a panic inside a tool handler unwinds through the guard's
+/// `Drop` and marks the `Mutex` poisoned per `std`'s default behavior. Left
+/// alone, every subsequent `.lock()` — i.e. every future tool call — would
+/// keep returning `Err`, bricking the server for the rest of the process's
+/// life ([#266]).
+///
+/// A poisoned guard may be observing an `Engine` that a panic caught
+/// mid-mutation, so its invariants can't be trusted; unlike the
+/// `ConnectionLost` recovery in `with_engine`, we cannot keep *using* the
+/// guarded value. Instead we discard it — `*guard = None` drops the
+/// (possibly broken) `Engine`, running its normal `Drop` teardown — clear
+/// the poison flag, and leave the slot empty. The server's `ensure_engine`
+/// then rebuilds through its existing single-flight path; a watcher instead
+/// observes `None` and returns its transient, retryable "Engine not
+/// initialized" error rather than a permanent poison error.
+///
+/// # Ephemeral data is destroyed
+///
+/// Discarding the `Engine` runs [`Engine`]'s `Drop`, which deletes the temp
+/// directory holding the **ephemeral primary** database. Every table loaded
+/// without `persist: true` is therefore lost, and the rebuilt engine starts
+/// with an empty ephemeral primary. Attached databases survive: the server
+/// replays its [`crate::attach::AttachRegistry`] onto the new engine and
+/// re-attaches `persistent`.
+///
+/// This is a deliberate trade: unlike the `ConnectionLost` path — where
+/// `hyperd` had already died and the data was gone regardless — here
+/// `hyperd` is alive and the ephemeral data was intact, so recovery is what
+/// throws it away. We accept that because an `Engine` a panic caught
+/// mid-mutation cannot be trusted, and silently handing it back out is worse
+/// than losing scratch tables. Callers who need data to survive a panicking
+/// tool call must load it with `persist: true`.
+///
+/// [#266]: https://github.com/tableau/hyper-api-rust/issues/266
+pub(crate) fn lock_engine_recovering_poison(
+    engine: &Mutex<Option<Engine>>,
+) -> MutexGuard<'_, Option<Engine>> {
+    match engine.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => recover_poisoned_engine(engine, poisoned),
+    }
+}
+
+/// Non-blocking sibling of [`lock_engine_recovering_poison`], for observers
+/// that must never wait behind a slow data-plane call — `status`, per
+/// [issue #118](https://github.com/tableau/hyper-api-rust/issues/118).
+///
+/// `None` means *genuinely contended* and nothing more. Distinguishing that
+/// from poisoning matters: a bare `try_lock().ok()` conflates them, so after
+/// a panicking tool call `status` would report `engine_busy: true` — telling
+/// the client to "retry later" — for the rest of the process's life, even
+/// with no call in flight, since the poison flag does not clear itself.
+/// Poisoning is recovered here instead, yielding an empty slot that the
+/// caller reports as degraded honestly, and leaving the mutex usable.
+pub(crate) fn try_lock_engine_recovering_poison(
+    engine: &Mutex<Option<Engine>>,
+) -> Option<MutexGuard<'_, Option<Engine>>> {
+    match engine.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(TryLockError::Poisoned(poisoned)) => Some(recover_poisoned_engine(engine, poisoned)),
+        Err(TryLockError::WouldBlock) => None,
+    }
+}
+
+/// The recovery shared by both lock helpers: discard the `Engine` a panic
+/// may have caught mid-mutation and clear the poison flag. See
+/// [`lock_engine_recovering_poison`] for why discarding is the safe default
+/// and what it costs.
+fn recover_poisoned_engine<'a>(
+    engine: &'a Mutex<Option<Engine>>,
+    poisoned: PoisonError<MutexGuard<'a, Option<Engine>>>,
+) -> MutexGuard<'a, Option<Engine>> {
+    tracing::warn!(
+        "engine mutex was poisoned by a panicking tool call; \
+         discarding the engine and rebuilding; tables in the \
+         ephemeral primary are lost"
+    );
+    let mut guard = poisoned.into_inner();
+    *guard = None;
+    engine.clear_poison();
+    guard
 }
 
 /// Decompose the libpq endpoint the engine is talking to into the several

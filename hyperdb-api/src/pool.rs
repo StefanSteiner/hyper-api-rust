@@ -196,9 +196,12 @@ pub enum RecycleStrategy {
     /// guard — `ping` only reads. Prefer `SelectOne` (the default) if your
     /// workload uses `AsyncTransaction`.
     Ping,
-    /// Skip the active probe entirely. The pool still drops connections that
-    /// fail the passive [`AsyncConnection::is_alive`] check. Use on hot paths
-    /// where the round-trip cost outweighs detecting a dead connection early.
+    /// Skip connection validation entirely: no round-trip, and no passive
+    /// check either — recycling is a genuine no-op, so a connection is
+    /// handed out in whatever state the previous borrower left it. Use on
+    /// hot paths where the round-trip cost outweighs detecting a dead
+    /// connection early, and expect the failure to surface on first use
+    /// instead.
     ///
     /// Does not discharge a transaction left open by a panicked or cancelled
     /// `AsyncTransaction` guard — there is no round-trip at all to piggyback

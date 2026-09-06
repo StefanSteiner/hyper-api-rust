@@ -105,6 +105,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `SyncRecycleStrategy::SelectOne` is unaffected — `Transaction`'s `Drop` can
   and does roll back synchronously, so the sync pool never leaks one of
   these. Fixes [issue #263](https://github.com/tableau/hyper-api-rust/issues/263).
+- **Corrected the documented behavior of `RecycleStrategy::None`.** Its doc
+  comment claimed the pool "still drops connections that fail the passive
+  `AsyncConnection::is_alive` check". The async connection manager never calls
+  `is_alive` — `None` is a genuine no-op, so a connection is handed out in
+  whatever state the previous borrower left it, and a dead one surfaces on
+  first use. (Only the *sync* pool performs an `is_alive` check.) Behavior is
+  unchanged; the documentation was wrong, and misleadingly reassuring for the
+  caller most exposed to it — one combining `None` with `AsyncTransaction`.
 
 ### Changed
 
