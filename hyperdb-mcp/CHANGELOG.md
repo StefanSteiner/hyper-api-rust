@@ -290,6 +290,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   of failing fast and reconnecting. This is most visible since the daemon
   became resident-by-default in 0.5.0, which made long-lived idle connections
   the norm. (Fixed in `hyperdb-api-core` for both the sync and async clients.)
+- **`export` lost its `RESOURCE_BUSY` classification for a lock conflict on
+  the destination file.** Exporting to a `.hyper` file another MCP server or
+  `hyperd` process holds open returned a generic `SQL_ERROR` with no recovery
+  guidance, where 0.7.2 returned `RESOURCE_BUSY` plus actionable advice
+  ("close the other MCP server, or copy the file first"). The 0.7.3 narrowing
+  of the generic error mapper to `sqlstate().is_none()` cases only was
+  compensated for in the reserved and user `attach_database` paths — both
+  already routed through the attach-context mapper that re-checks
+  `sqlstate() == Some("55006")` — but `export`'s own `CREATE DATABASE` /
+  `ATTACH DATABASE` statements still went through the plain command path.
+  Both now route through the same mapper, and the same gap in `attach`'s
+  `CREATE DATABASE IF NOT EXISTS` (a TOCTOU window between the existence
+  check and the `CREATE`) is closed the same way. Fixes part of
+  [issue #277](https://github.com/tableau/hyper-api-rust/issues/277).
 
 ## [0.5.0] - 2026-06-07
 

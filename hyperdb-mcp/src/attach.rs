@@ -318,7 +318,14 @@ impl AttachRegistry {
                                 "CREATE DATABASE IF NOT EXISTS {}",
                                 escape_sql_path(&path.to_string_lossy()),
                             );
-                            engine.execute_command(&create_sql)?;
+                            // Same attach-context mapper as the ATTACH
+                            // below: a lock conflict racing with this
+                            // create-if-missing (another process wins
+                            // the create/attach between our `!path.exists()`
+                            // check above and this statement) should
+                            // surface as `RESOURCE_BUSY`, not a generic
+                            // `SqlError`.
+                            engine.execute_attach_command(&create_sql, path)?;
                             file_was_created = true;
                         }
                     }

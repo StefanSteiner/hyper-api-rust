@@ -480,12 +480,24 @@ fn export_hyper(
         timer.elapsed_ms(),
     );
 
-    engine.execute_command(&format!("CREATE DATABASE {}", escape_sql_path(path)))?;
-    engine.execute_command(&format!(
-        "ATTACH DATABASE {} AS \"{}\"",
-        escape_sql_path(path),
-        alias.replace('"', "\"\""),
-    ))?;
+    // Route both statements through the same attach-context error
+    // mapper `attach.rs` uses so a lock conflict on the export target
+    // (another MCP server or hyperd process holds it) surfaces as
+    // `RESOURCE_BUSY` with recovery guidance instead of a generic
+    // `SqlError` — see `Engine::execute_attach_command`.
+    let target_path = std::path::Path::new(path);
+    engine.execute_attach_command(
+        &format!("CREATE DATABASE {}", escape_sql_path(path)),
+        target_path,
+    )?;
+    engine.execute_attach_command(
+        &format!(
+            "ATTACH DATABASE {} AS \"{}\"",
+            escape_sql_path(path),
+            alias.replace('"', "\"\""),
+        ),
+        target_path,
+    )?;
 
     let result = populate_export_target(engine, source_db, &alias);
 

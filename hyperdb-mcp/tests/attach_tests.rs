@@ -314,6 +314,56 @@ fn attach_on_missing_create_is_idempotent_for_existing_file() {
     assert_eq!(rows[0]["a"], 7);
 }
 
+/// Regression test for #277: when `on_missing='create'` targets a path
+/// that already exists (so the new `CREATE DATABASE IF NOT EXISTS`
+/// branch is skipped — see `attach.rs`) *and* that file is genuinely
+/// held open by another `hyperd` process, the subsequent `ATTACH
+/// DATABASE` must surface `RESOURCE_BUSY` with the SQLSTATE `55006`
+/// preserved, not a generic `SqlError`. Reproduced against a live,
+/// pinned `hyperd`: a separate engine (its own `hyperd` process) owns
+/// `target` as its persistent workspace for the duration of the check.
+#[test]
+fn attach_on_missing_create_against_externally_locked_existing_file_is_resource_busy() {
+    let (engine, dir) = primary_workspace();
+    let target = dir.path().join("locked.hyper");
+
+    let owner = Engine::new_no_daemon(Some(target.to_string_lossy().into_owned()))
+        .expect("owner engine must attach the target as its own persistent workspace");
+    assert!(target.exists(), "owner must have created the file");
+
+    let registry = AttachRegistry::new();
+    let err = registry
+        .attach(
+            &engine,
+            AttachRequest {
+                alias: "locked".into(),
+                source: AttachSource::LocalFile {
+                    path: target.clone(),
+                },
+                writable: true,
+                on_missing: OnMissing::Create,
+            },
+        )
+        .expect_err("attach against an externally-locked existing file must fail");
+
+    assert_eq!(
+        err.code,
+        ErrorCode::ResourceBusy,
+        "expected RESOURCE_BUSY, got {err:?}"
+    );
+    assert!(
+        err.message.contains("55006"),
+        "must retain the lock SQLSTATE: {}",
+        err.message
+    );
+    assert!(
+        err.suggestion.is_some(),
+        "RESOURCE_BUSY must carry recovery guidance"
+    );
+
+    drop(owner);
+}
+
 // --- _table_catalog seeding policy on attach --------------------------------
 
 /// Return `true` iff the attached database identified by `alias` already

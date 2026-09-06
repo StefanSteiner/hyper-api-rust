@@ -369,6 +369,95 @@ fn export_overwrite_true_replaces_existing_file() {
     assert!(contents.contains("Alice") && contents.contains("Bob"));
 }
 
+/// Regression test for #277: `export.rs`'s `CREATE DATABASE` /
+/// `ATTACH DATABASE` pair for `format: "hyper"` now routes through the
+/// same attach-context error mapper (`Engine::execute_attach_command`)
+/// that `attach.rs` uses, so a lock conflict on the export target
+/// surfaces as `RESOURCE_BUSY` instead of a generic `SqlError`.
+///
+/// **What this test does and doesn't prove**, from live investigation
+/// against the real pinned `hyperd`:
+///
+/// - I confirmed live that a raw `ATTACH DATABASE` against a `.hyper`
+///   file another `hyperd` process holds open returns SQLSTATE `55006`
+///   ("the database file is locked by another process") — the
+///   `is_attach_lock_conflict` model `execute_attach_command` relies on
+///   is real, not hypothetical (see `engine_tests.rs`'s
+///   `execute_attach_command_maps_real_lock_conflict_to_resource_busy`,
+///   which reproduces it end to end through this exact helper).
+/// - However, `export_hyper` unconditionally deletes any pre-existing
+///   target before issuing `CREATE DATABASE` (deliberately avoiding
+///   `IF NOT EXISTS`, so a stale target is never silently reused — see
+///   the comment above the delete in `export.rs`). On Unix, `unlink`
+///   on an open file always succeeds regardless of who else has it
+///   open, so by the time `export_hyper`'s own `CREATE`/`ATTACH` run,
+///   the target is always a fresh, unlocked inode. I verified directly
+///   that exporting `format: "hyper"` over a path a *separate* `hyperd`
+///   process holds open currently succeeds silently on this platform —
+///   there is no live, non-flaky way to force `export_to_file`'s two
+///   statements to observe a genuine external lock through the public
+///   API. A tight racer thread attempting to attach the freshly
+///   created file in the gap between our own `CREATE` and `ATTACH`
+///   lost 5/5 attempts — the window is sub-millisecond.
+/// - What *is* live and deterministic is the case exercised below:
+///   exporting over a path that is already attached under a different
+///   alias **in the same session**. `CREATE DATABASE` (no `IF NOT
+///   EXISTS`) conflicts with hyperd's own per-connection registry and
+///   fails with SQLSTATE `42P04` ("database already exists") — a
+///   real, reachable error, but not one `is_resource_busy`'s phrase
+///   list (or SQLSTATE `55006`) matches, so it correctly stays
+///   `SqlError` both before and after this fix. This test pins that
+///   boundary: the routing change must not misclassify it.
+#[test]
+fn export_hyper_over_same_session_attached_target_stays_sql_error() {
+    let te = TestEngine::new_ephemeral();
+    setup_test_table(&te);
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("already_attached.hyper");
+    let path_str = path.to_str().unwrap();
+
+    // Attach the (fresh) target path under an unrelated alias first,
+    // exactly like a user calling `attach_database` on a file they
+    // then separately ask to export a hyper snapshot over.
+    te.engine
+        .execute_command(&format!(
+            "CREATE DATABASE {}",
+            hyperdb_api::escape_sql_path(path_str)
+        ))
+        .unwrap();
+    te.engine
+        .execute_command(&format!(
+            "ATTACH DATABASE {} AS \"holder\"",
+            hyperdb_api::escape_sql_path(path_str)
+        ))
+        .unwrap();
+
+    let opts = ExportOptions {
+        sql: None,
+        table: Some("test_export".into()),
+        path: path_str.into(),
+        format: "hyper".into(),
+        overwrite: true,
+        format_options: None,
+        source_db: None,
+    };
+    let err = export_to_file(&te.engine, &opts)
+        .expect_err("exporting over a path already attached in this session must fail");
+
+    assert_eq!(
+        err.code,
+        ErrorCode::SqlError,
+        "a same-session 'database already exists' conflict (42P04) is not a lock \
+         conflict and must not be reclassified as RESOURCE_BUSY: {err:?}"
+    );
+    assert!(
+        err.message.contains("42P04") || err.message.to_lowercase().contains("already exists"),
+        "expected a duplicate-database error, got: {}",
+        err.message
+    );
+}
+
 /// Iceberg round-trip: export a table to an Iceberg directory, then read
 /// it back with `load_iceberg` and verify the row count plus payload
 /// match. This is the best integration signal we can get without
