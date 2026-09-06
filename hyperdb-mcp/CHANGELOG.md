@@ -351,10 +351,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   to parse, and `discover()` returned `None` for a healthy process.
   `wait_for_daemon` (`spawn.rs`) then timed out and silently fell back to a
   private `hyperd`, `status_degraded` (`server.rs`) reported no daemon, and
-  `Engine::is_running` returned false. `discover()` now always extracts the
-  legacy `DaemonInfo` fields, which ignore unknown fields, and only uses the
-  stricter `DaemonRecord` shape to choose a diagnostic log message — never to
-  gate discovery. The doctor's separate raw reader is unaffected and keeps
+  `Engine::is_running` returned false. `discover()` now reads the file once
+  and parses those bytes twice: first as the strict `DaemonRecord`, which
+  remains the primary path, and — only when that fails — as a bare
+  `DaemonInfo`, which ignores unknown fields and never trips over a nested
+  object this fast path does not need. A record that only the tolerant
+  fallback could read is deliberately left on disk when its health check
+  fails, instead of being stale-cleaned: such a record is exactly what a
+  *newer* daemon looks like to an older client, the daemon rewrites
+  `daemon.json` only on `hyperd` restart, and deleting it over one failed
+  300 ms PING would hide a live daemon from every client on the machine, not
+  just this one. A strictly parsed record on a dead port is still cleaned up
+  as before. The doctor's separate raw reader is unaffected and keeps
   the strict contract, since it deliberately surfaces a malformed `identity`
   block as a diagnostic. Fixes
   [issue #270](https://github.com/tableau/hyper-api-rust/issues/270).
@@ -380,7 +388,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   printed `Daemon responded:` with nothing after it and exited 0, which a
   calling script would read as a successful stop. `send_command_with_timeout`
   now returns `UnexpectedEof` when the connection ends before any bytes are
-  read. Fixes 3 of the 5 items in
+  read. `doctor`'s separate `send_doctor_command` read loop had the same
+  shape and now classifies a silent close identically. This changes one
+  `doctor` warning: a recorded daemon candidate that accepts the connection
+  and then closes without answering is now reported as
+  `daemon_discovery_candidate_unreachable` ("did not return fresh enriched
+  STATUS") rather than `daemon_status_malformed` ("returned malformed or
+  unenriched STATUS"), which is what actually happened — the peer sent no
+  response to be malformed. Fixes 3 of the 5 items in
   [issue #275](https://github.com/tableau/hyper-api-rust/issues/275).
 
 ## [0.5.0] - 2026-06-07

@@ -28,7 +28,16 @@ fn callback_connection_shutdowns_hyperd_after_parent_kill() {
         let pid = hyper
             .pid()
             .expect("child must report HyperProcess public PID");
-        fs::write(pid_file, pid.to_string()).expect("child must report Hyper PID to parent");
+        // Publish the PID atomically — stage a sibling temp file, then rename
+        // it into place. A plain `fs::write` is `File::create` (truncate) then
+        // `write_all`, so a poll can observe not just an empty file but a
+        // truncated-yet-parseable prefix (`"123"` of `"12345"`), which would
+        // hand the parent a plausible but wrong PID with nothing to catch it.
+        let pid_file = std::path::PathBuf::from(pid_file);
+        let staged_pid_file = pid_file.with_extension("tmp");
+        fs::write(&staged_pid_file, pid.to_string()).expect("child must stage its Hyper PID");
+        fs::rename(&staged_pid_file, &pid_file)
+            .expect("child must publish its Hyper PID to parent");
 
         loop {
             thread::park();
@@ -78,12 +87,13 @@ fn wait_for_reported_pid(pid_file: &std::path::Path, timeout: Duration) -> Resul
             Ok(contents) => match contents.trim().parse::<u32>() {
                 Ok(pid) => return Ok(pid),
                 Err(_) => {
-                    // The child reports its PID with `fs::write`, which is
-                    // `File::create` (truncates/creates) then `write_all` —
-                    // not atomic. A poll can land in the window where the
-                    // file exists but is still empty or partially written;
-                    // treat that the same as "not created yet" rather than a
-                    // fatal parse error, and keep polling to the deadline.
+                    // The child publishes its PID with a rename, so a partial
+                    // read should not be observable at all. Tolerate one
+                    // anyway instead of panicking the whole test on it: this
+                    // retry is what keeps a writer that ever drops back to a
+                    // plain, non-atomic `fs::write` from resurrecting the
+                    // flake. Treat it as "not created yet" and keep polling to
+                    // the deadline.
                     last_unparseable = Some(contents);
                 }
             },
@@ -103,11 +113,14 @@ fn wait_for_reported_pid(pid_file: &std::path::Path, timeout: Duration) -> Resul
     }
 }
 
-/// The parent's `fs::write` of the PID report is `File::create` (truncates or
-/// creates, leaving an empty file momentarily) followed by `write_all` — not
-/// atomic. A poll landing in that window used to make `"".parse::<u32>()`
-/// panic the whole test; it must instead be treated as "not ready yet" and
-/// retried to the deadline.
+/// The *child* writes the PID report; the parent is the one polling for it.
+/// The child now publishes atomically (temp file plus `fs::rename`), but a
+/// plain `fs::write` is `File::create` (truncates or creates, leaving an empty
+/// file momentarily) followed by `write_all` — not atomic. A poll landing in
+/// that window used to make `"".parse::<u32>()` panic the whole test; it must
+/// instead be treated as "not ready yet" and retried to the deadline, so a
+/// writer that ever drops back to a non-atomic `fs::write` cannot resurrect
+/// the flake.
 #[test]
 fn wait_for_reported_pid_retries_past_a_torn_write() {
     let temp_dir = tempfile::tempdir().expect("create temp dir for torn-write simulation");
@@ -115,11 +128,11 @@ fn wait_for_reported_pid_retries_past_a_torn_write() {
 
     let writer_pid_file = pid_file.clone();
     let writer = thread::spawn(move || {
-        // Reproduces the exact non-atomic sequence: create (truncate) first,
-        // leaving the file present-but-empty for a deliberate window, then
-        // write the real content — same as the production `fs::write` call
-        // this helper polls for, just with the empty window stretched out
-        // long enough that a fast poller is guaranteed to observe it.
+        // Reproduces the non-atomic sequence a plain `fs::write` performs:
+        // create (truncate) first, leaving the file present-but-empty for a
+        // deliberate window, then write the real content — just with the empty
+        // window stretched out long enough that a fast poller is guaranteed to
+        // observe it.
         fs::File::create(&writer_pid_file).expect("create pid file (torn-write simulation)");
         thread::sleep(Duration::from_millis(150));
         fs::write(&writer_pid_file, "4242").expect("finish torn-write simulation");

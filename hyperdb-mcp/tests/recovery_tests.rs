@@ -481,7 +481,7 @@ fn run_slow_health_mutex_child() {
     let (report_seen_tx, report_seen_rx) = mpsc::channel();
     let (report_release_tx, report_release_rx) = mpsc::channel();
     // Set by each worker closure the instant its `resource_body_for_uri` call
-    // returns, and read by the peer *before* it probes the engine mutex (see
+    // returns, and read by the peer *after* it probes the engine mutex (see
     // `ReportObservation::probe_valid`). Reset before each worker starts.
     let worker_finished = Arc::new(AtomicBool::new(false));
     let peer_info = daemon_info.clone();
@@ -592,11 +592,11 @@ fn run_slow_health_mutex_child() {
 
     // A second public call now takes the post-loss initialization path. The
     // dead endpoint makes Engine::try_daemon_mode emit another slow report.
-    // The peer reads `worker_finished` and probes `try_lock` synchronously
-    // before releasing that response, so this cannot pass merely because a
-    // scheduler slept past the 200 ms I/O budget: if the worker's call had
-    // already returned by the time the peer checked, `probe_valid` is false
-    // and the observation is treated as inconclusive rather than a pass.
+    // The peer probes `try_lock` and then reads `worker_finished`, both
+    // synchronously before releasing that response, so this cannot pass merely
+    // because a scheduler slept past the 200 ms I/O budget: if the worker's
+    // call had already returned by the time the peer checked, `probe_valid` is
+    // false and the observation is treated as inconclusive rather than a pass.
     worker_finished.store(false, Ordering::Release);
     let reinit_server = Arc::clone(&server);
     let reinit_worker_finished = Arc::clone(&worker_finished);
@@ -758,12 +758,6 @@ fn run_controlled_health_peer(
                 let engine_handle = engine_probe
                     .get()
                     .ok_or_else(|| "engine probe was not installed before report".to_string())?;
-                // Read BEFORE probing the mutex. If the calling worker's
-                // public call had already returned, it already released
-                // (and would trivially show as released regardless of
-                // whether production ever held it during the pending
-                // report) — the probe below cannot then prove anything.
-                let probe_valid = !worker_finished.load(Ordering::Acquire);
                 let engine_mutex_available = match engine_handle.try_lock() {
                     Ok(guard) => {
                         drop(guard);
@@ -774,6 +768,17 @@ fn run_controlled_health_peer(
                         return Err("engine mutex was poisoned during report probe".to_string());
                     }
                 };
+                // Read AFTER probing the mutex. If the calling worker's public
+                // call had already returned, it already released the mutex
+                // (and would trivially show as released regardless of whether
+                // production ever held it during the pending report), so the
+                // probe above cannot then prove anything. The flag is
+                // monotonic false -> true, so observing `false` here implies
+                // it was also false before the probe; reading it first would
+                // instead leave a window for the worker to return in between,
+                // marking a vacuous probe valid. A late read can only produce
+                // a false *inconclusive*, never a false pass.
+                let probe_valid = !worker_finished.load(Ordering::Acquire);
                 report_seen_tx
                     .send(ReportObservation {
                         sequence: report_sequence,

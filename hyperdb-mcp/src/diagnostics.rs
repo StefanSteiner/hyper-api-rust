@@ -1187,6 +1187,17 @@ fn send_doctor_command(
         }
         let read_capacity = remaining_capacity.min(chunk.len());
         match stream.read(&mut chunk[..read_capacity]) {
+            // Classify a silent close exactly as `send_command_with_timeout`
+            // does. Returning `Ok("")` here would reach `verify_status_candidate`
+            // as an unparseable STATUS body and be reported as
+            // `MalformedStatus` — but a peer that never wrote a byte did not
+            // send a malformed response, it failed to answer at all.
+            Ok(0) if response.is_empty() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "doctor health peer closed the connection before any response was sent",
+                ));
+            }
             Ok(0) => break,
             Ok(count) => {
                 let line_end = chunk[..count]
@@ -1685,7 +1696,7 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::daemon::discovery::{
-        DaemonBuildIdentity, DaemonInfo, DaemonRecord, PortScan, RawDiscoveryRead,
+        DaemonBuildIdentity, DaemonInfo, DaemonRecord, DiscoveryBytes, PortScan, RawDiscoveryRead,
         read_discovery_file_raw,
     };
     use crate::daemon::health::{DaemonState, HealthListener};
@@ -1712,8 +1723,17 @@ mod tests {
             match self {
                 Self::Missing => RawDiscoveryRead::Missing { path },
                 Self::Unreadable(kind) => RawDiscoveryRead::Unreadable { path, kind: *kind },
-                Self::Malformed => RawDiscoveryRead::Malformed { path },
-                Self::Oversized => RawDiscoveryRead::Oversized { path },
+                // The doctor never reads the carried bytes — they exist for
+                // `discover()`'s tolerant fallback — so any non-record payload
+                // is a faithful fixture here.
+                Self::Malformed => RawDiscoveryRead::Malformed {
+                    path,
+                    contents: DiscoveryBytes::new(b"{ unterminated".to_vec()),
+                },
+                Self::Oversized => RawDiscoveryRead::Oversized {
+                    path,
+                    contents: DiscoveryBytes::new(b"{ well-formed but enormous }".to_vec()),
+                },
                 Self::Parsed(value) => RawDiscoveryRead::Parsed {
                     path,
                     record: serde_json::from_value(value.clone()).unwrap(),
@@ -2304,6 +2324,99 @@ mod tests {
         assert!(
             failures.is_empty(),
             "slow-drip deadline failures:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    /// A recorded daemon candidate that accepts the connection and then closes
+    /// without writing a byte never sent a response, so it cannot have sent a
+    /// malformed one. `send_doctor_command` used to return `Ok("")` there, which
+    /// reached `verify_status_candidate` as an unparseable STATUS body and was
+    /// reported to the operator as `daemon_status_malformed`. It must classify
+    /// the silent close the way `send_command_with_timeout` does — as an EOF —
+    /// so the candidate is reported unreachable instead.
+    #[test]
+    fn real_doctor_reports_a_silent_peer_close_as_unreachable_not_malformed() {
+        use std::io::{BufRead as _, BufReader};
+        use std::net::TcpListener;
+
+        let _network_guard = real_network_test_guard();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || -> Result<String, String> {
+            let (stream, _) = listener
+                .accept()
+                .map_err(|error| format!("silent-close peer accept failed: {error}"))?;
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .map_err(|error| error.to_string())?;
+            let mut command = String::new();
+            BufReader::new(&stream)
+                .read_line(&mut command)
+                .map_err(|error| format!("silent-close peer read failed: {error}"))?;
+            // Close having written nothing at all.
+            drop(stream);
+            Ok(command.trim().to_string())
+        });
+
+        let tmp = TempDir::new().unwrap();
+        let discovery_path = tmp.path().join("daemon.json");
+        std::fs::write(
+            &discovery_path,
+            serde_json::to_vec(&enriched_status(
+                4_242,
+                port,
+                "0.7.0.rsilent",
+                "/opt/hyperdb/bin/hyperdb-mcp",
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+
+        // `span: 0` leaves the port scan with no candidates, so the report
+        // reflects the discovery candidate's outcome alone.
+        let report = collect_real_doctor_daemon(
+            Some(&discovery_path),
+            None,
+            PortScan {
+                base: port,
+                span: 0,
+            },
+        );
+        let observed_command = server.join().unwrap();
+
+        let mut failures = Vec::new();
+        match observed_command {
+            Ok(command) if command == "STATUS" => {}
+            Ok(command) => failures.push(format!(
+                "discovery candidate was probed with {command:?}, expected a direct STATUS"
+            )),
+            Err(error) => failures.push(error),
+        }
+        if report.verified.is_some() {
+            failures.push("a peer that answered nothing was accepted as a daemon".to_string());
+        }
+        if report.state != DoctorDaemonState::ParsedUnreachable {
+            failures.push(format!(
+                "expected state parsed_unreachable, got {:?}",
+                report.state
+            ));
+        }
+        if report.warnings
+            != vec![DoctorDaemonWarning::DiscoveryCandidateUnreachable {
+                responding_port: port,
+            }]
+        {
+            failures.push(format!(
+                "a silent close must be reported as an unreachable candidate, not as malformed \
+                 STATUS; got {:?}",
+                report.warnings
+            ));
+        }
+
+        assert!(
+            failures.is_empty(),
+            "silent-close doctor classification failures:\n{}",
             failures.join("\n")
         );
     }
