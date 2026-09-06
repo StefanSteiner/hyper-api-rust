@@ -758,8 +758,16 @@ fn run_engine_report_child() {
 
 #[test]
 fn daemon_idle_timeout_shuts_down_daemon() {
-    let state = Arc::new(DaemonState::new());
     let idle_timeout = Duration::from_secs(2);
+
+    // Captured before `DaemonState::new()`, which is what starts the idle
+    // countdown. The monitor decides against `last_activity`, so a reference
+    // taken after construction measures a shorter interval than the one the
+    // daemon actually waited, and the lower bound below would then turn on how
+    // long this thread took to get from `new()` to `Instant::now()` rather
+    // than on the timeout under test.
+    let start = Instant::now();
+    let state = Arc::new(DaemonState::new());
 
     let monitor_state = Arc::clone(&state);
     let monitor = std::thread::spawn(move || {
@@ -775,13 +783,18 @@ fn daemon_idle_timeout_shuts_down_daemon() {
         }
     });
 
-    let start = Instant::now();
     monitor.join().unwrap();
     let elapsed = start.elapsed();
 
     assert!(state.should_shutdown());
-    assert!(elapsed >= Duration::from_secs(2));
-    assert!(elapsed < Duration::from_secs(4));
+    assert!(
+        elapsed >= idle_timeout,
+        "idle shutdown fired after {elapsed:?}, before the {idle_timeout:?} idle period elapsed"
+    );
+    assert!(
+        elapsed < idle_timeout * 2,
+        "idle shutdown took {elapsed:?}, far beyond the {idle_timeout:?} timeout"
+    );
 }
 
 #[test]
@@ -792,12 +805,19 @@ fn daemon_heartbeat_prevents_idle_shutdown() {
     let monitor_state = Arc::clone(&state);
     let heartbeat_state = Arc::clone(&state);
 
+    // Reports back the instant taken just before its final `touch()`. The
+    // monitor counts from what that `touch()` stored, so measuring from this
+    // reference — rather than from whenever the heartbeat thread happened to
+    // be joined — keeps the wait below tied to the reset the monitor saw.
     let heartbeat = std::thread::spawn(move || {
         let start = Instant::now();
+        let mut last_heartbeat = start;
         while start.elapsed() < Duration::from_millis(1500) {
+            last_heartbeat = Instant::now();
             heartbeat_state.touch();
             std::thread::sleep(Duration::from_millis(200));
         }
+        last_heartbeat
     });
 
     let monitor = std::thread::spawn(move || {
@@ -813,16 +833,15 @@ fn daemon_heartbeat_prevents_idle_shutdown() {
         }
     });
 
-    heartbeat.join().unwrap();
-    let start = Instant::now();
+    let last_heartbeat = heartbeat.join().unwrap();
     monitor.join().unwrap();
-    let after_heartbeat_stop = start.elapsed();
+    let waited = last_heartbeat.elapsed();
 
     assert!(state.should_shutdown());
     assert!(
-        after_heartbeat_stop >= Duration::from_millis(500),
-        "daemon should have waited for idle timeout after heartbeats stopped, \
-         but only waited {after_heartbeat_stop:?}"
+        waited >= idle_timeout,
+        "daemon shut down {waited:?} after the last heartbeat, before the \
+         {idle_timeout:?} idle period elapsed"
     );
 }
 
