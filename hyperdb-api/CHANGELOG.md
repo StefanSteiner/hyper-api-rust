@@ -20,6 +20,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **A `Numeric` with `scale() > 0` can now be bound to a parameterized query.**
+  Previously every parameter travelled as PostgreSQL binary, and Hyper rejects
+  a binary `NUMERIC` whose `dscale` exceeds the parameter's resolved scale with
+  SQLSTATE `0A000` ("cannot handle truncation when reading numerics") — and a
+  declared `numeric` parameter OID carries no type modifier, which Hyper
+  resolves to `NUMERIC(1,0)`, so *every* scaled value tripped that check
+  regardless of the SQL. Scaled values now bind as text with the OID left
+  unspecified, letting the server infer the scale from context; whole numbers
+  (`scale() == 0`) keep the binary fast path and the concrete `NUMERIC` OID
+  unchanged. One consequence to know about: because a scaled value has no
+  declared OID, a bare `SELECT $1` returns it as `TEXT` — wrap it in
+  `CAST($1 AS NUMERIC(p,s))` when the result type matters. Two further
+  consequences of that inference, now documented on `ToSqlParam for Numeric`:
+  `Row::get::<Numeric>` returns `None` for such a column (it really is text,
+  and `get::<String>` yields `"1234.56"`), and in `WHERE textcol = $1` the
+  comparison resolves to a *string* comparison, so `1234.56` matches
+  `'1234.56'` but not `'1234.560'`.
+
+  **This applies to the one-shot `query_params` / `command_params` path
+  only.** A `PreparedStatement` fixes its parameter OIDs at `prepare_typed`
+  time, before any value exists, so a single prepared statement cannot accept
+  both scale classes: `oids::NUMERIC` rejects scaled values with `22003`, and
+  `Oid::new(0)` rejects whole numbers with `0A000`. Use `query_params` when
+  the scale varies across calls. `Geography` has no such split — it declares a
+  concrete OID and always binds as text, so it works on both paths.
+
+- **Binding a `Numeric` whose `scale` is 39 or more no longer panics.** The
+  new text path renders the value through `Display`, which divided by
+  `10u128.pow(scale)` and overflowed. `Numeric::new` is an unvalidated
+  `const fn` and `try_from_f64` validates only the value against the 38-digit
+  precision limit, so `Numeric::from_f64(1e-39, 39)` reached it. Such a value
+  is out of range for the engine either way, but it now travels to the server
+  and is rejected cleanly instead of panicking inside the client.
+
+- `Geography::to_sql_literal` no longer renders a Hyper-legacy value as
+  `NULL`. Substituting `NULL` for a value that merely cannot be converted to
+  WKT silently erases it; the literal now carries the lossily-decoded bytes so
+  the server rejects it with `22P02`, matching what `encode_param` already did
+  for the same value. Single quotes are escaped in both branches, so neither
+  can break out of the literal.
 - The `HYPERD_PATH is not set` error suggested
   `cargo run -p hyperd-bootstrap -- download`, a package that has not existed
   since the rename to `hyperdb-bootstrap`. The command failed with
@@ -75,6 +115,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `impl ToSqlParam for Geography` — geography values can now be passed to
+  `query_params` / `command_params` and used in predicates and projections.
+  They bind as WKT text, because Hyper has no PostgreSQL-binary *input*
+  function for `geography` (binding one in binary fails with `42883`). A
+  `Geography` read back out of Hyper is in Hyper's proprietary legacy format,
+  which has no client-side WKT rendering; binding one of those is rejected by
+  the server with `22P02` rather than stored incorrectly. Check
+  `Geography::binary_format` first, or build the value with
+  `Geography::from_wkt` / `from_wkb`.
+- `ToSqlParam::param_format`, returning the new `ParamFormat` (`Text` or
+  `Binary`), and a `ParamFormat` re-export at the crate root. The method is
+  defaulted to `ParamFormat::Binary`, so existing external `ToSqlParam` impls
+  are unaffected. Parameters are bound with a per-parameter format-code array,
+  so text-only types travel alongside binary ones in the same statement
+  without slowing the binary path.
 - `Connection::begin_transaction_unguarded`, `commit_unguarded` and
   `rollback_unguarded`, plus the `AsyncConnection` equivalents. These are the
   supported replacement for the removed deprecated methods and were previously

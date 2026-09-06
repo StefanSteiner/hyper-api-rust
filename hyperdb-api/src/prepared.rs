@@ -21,7 +21,7 @@ use hyperdb_api_core::types::Oid;
 
 use crate::connection::Connection;
 use crate::error::{Error, Result};
-use crate::params::ToSqlParam;
+use crate::params::{ParamFormat, ToSqlParam};
 use crate::result::{ResultColumn, ResultSchema, Row, RowValue, Rowset};
 use crate::transport::Transport;
 
@@ -102,11 +102,12 @@ impl<'conn> PreparedStatement<'conn> {
     ///   `Execute` (type mismatch, runtime error while streaming).
     /// - Returns [`Error::Io`] on transport-level I/O failures.
     pub fn query(&self, params: &[&dyn ToSqlParam]) -> Result<Rowset<'conn>> {
-        let encoded = encode_params(params);
+        let (encoded, formats) = encode_params(params);
         let client = tcp_client(self.connection)?;
-        let stream = client.execute_streaming(
+        let stream = client.execute_streaming_with_formats(
             &self.inner,
             encoded,
+            &formats,
             crate::result::DEFAULT_BINARY_CHUNK_SIZE,
         )?;
         Ok(Rowset::from_prepared(stream))
@@ -122,9 +123,9 @@ impl<'conn> PreparedStatement<'conn> {
     ///   `Execute`.
     /// - Returns [`Error::Io`] on transport-level I/O failures.
     pub fn execute(&self, params: &[&dyn ToSqlParam]) -> Result<u64> {
-        let encoded = encode_params(params);
+        let (encoded, formats) = encode_params(params);
         let client = tcp_client(self.connection)?;
-        Ok(client.execute_no_result(&self.inner, encoded)?)
+        Ok(client.execute_no_result_with_formats(&self.inner, encoded, &formats)?)
     }
 
     /// Fetches exactly one row; errors if the result is empty.
@@ -186,10 +187,19 @@ impl<'conn> PreparedStatement<'conn> {
     }
 }
 
-/// Encode a slice of `&dyn ToSqlParam` into the binary-bytes form the
-/// prepared-statement Bind message expects. `None` encodes SQL NULL.
-pub(crate) fn encode_params(params: &[&dyn ToSqlParam]) -> Vec<Option<Vec<u8>>> {
-    params.iter().map(|p| p.encode_param()).collect()
+/// Encode a slice of `&dyn ToSqlParam` into the wire bytes the
+/// prepared-statement Bind message expects, plus the matching per-parameter
+/// format code. `None` encodes SQL NULL.
+///
+/// The two vectors are always the same length; index `i` of the format vector
+/// describes index `i` of the byte vector.
+pub(crate) fn encode_params(
+    params: &[&dyn ToSqlParam],
+) -> (Vec<Option<Vec<u8>>>, Vec<ParamFormat>) {
+    params
+        .iter()
+        .map(|p| (p.encode_param(), p.param_format()))
+        .collect()
 }
 
 /// Extract the underlying sync TCP client or error with a clear message

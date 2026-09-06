@@ -44,6 +44,7 @@ use crate::protocol::message::{backend::Message, frontend};
 
 use super::auth::{self, AuthState};
 use super::error::{Error, Result};
+use super::statement::{ParamFormat, bind_format_codes};
 
 /// Maximum number of messages [`RawConnection::consume_error`] (and its
 /// async sibling) will read while draining the tail of a failed request.
@@ -487,10 +488,10 @@ where
     /// [`Self::start_query_binary`].
     ///
     /// Format codes (`PostgreSQL` wire protocol):
-    /// - **Parameters**: format `1` (standard PG binary, big-endian).
-    ///   Hyper's server-side Bind decodes bound parameters as standard
-    ///   PG binary regardless of the format code we advertise. The
-    ///   caller is responsible for supplying parameter bytes in BE.
+    /// - **Parameters**: format `1` (standard PG binary, big-endian). The
+    ///   caller is responsible for supplying parameter bytes in BE. Use
+    ///   [`Self::start_execute_prepared_with_formats`] to send some or all
+    ///   parameters as text instead.
     /// - **Results**: format `2` (`HyperBinary`, little-endian). Hyper
     ///   supports this as a separate protocol extension; the row
     ///   decoders in [`super::row::StreamRow`] and the hyperdb-api `Row`
@@ -512,17 +513,52 @@ where
         params: &[Option<&[u8]>],
         column_count: usize,
     ) -> Result<()> {
+        self.start_execute_prepared_with_formats(statement_name, params, &[], column_count)
+    }
+
+    /// Same as [`Self::start_execute_prepared`], but with a caller-chosen
+    /// wire format per parameter.
+    ///
+    /// `param_formats` is either empty — meaning **every parameter is
+    /// binary**, exactly like [`Self::start_execute_prepared`] — or the same
+    /// length as `params`. Hyper accepts a mixed format-code array, so binary
+    /// stays the fast path and only the parameters that need it — scaled
+    /// `NUMERIC`, `geography` — degrade to text. See [`ParamFormat`] for why
+    /// those two types have no binary input function.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`Error`] (protocol) if `param_formats` is non-empty and its
+    ///   length differs from `params`.
+    /// - Otherwise the same failure modes as
+    ///   [`Self::start_execute_prepared`].
+    pub fn start_execute_prepared_with_formats(
+        &mut self,
+        statement_name: &str,
+        params: &[Option<&[u8]>],
+        param_formats: &[ParamFormat],
+        column_count: usize,
+    ) -> Result<()> {
+        let codes = bind_format_codes(param_formats, params.len())?;
+        self.bind_execute_sync(statement_name, params, &codes, column_count)
+    }
+
+    fn bind_execute_sync(
+        &mut self,
+        statement_name: &str,
+        params: &[Option<&[u8]>],
+        param_format_codes: &[i16],
+        column_count: usize,
+    ) -> Result<()> {
         self.ensure_healthy()?;
 
-        const PG_BINARY_FORMAT: i16 = 1;
         const HYPER_BINARY_FORMAT: i16 = 2;
-        let param_formats: Vec<i16> = vec![PG_BINARY_FORMAT; params.len()];
         let result_formats: Vec<i16> = vec![HYPER_BINARY_FORMAT; column_count];
 
         frontend::bind(
             "", // unnamed portal
             statement_name,
-            &param_formats,
+            param_format_codes,
             params,
             &result_formats,
             &mut self.write_buf,

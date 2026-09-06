@@ -24,6 +24,7 @@ use super::endpoint::ConnectionEndpoint;
 use super::error::{Error, Result};
 use super::notice::{Notice, NoticeReceiver};
 use super::row::{Row, StreamRow};
+use super::statement::ParamFormat;
 
 use crate::protocol::message::Message;
 
@@ -884,6 +885,25 @@ impl AsyncClient {
         statement: &AsyncPreparedStatement,
         params: P,
     ) -> Result<u64> {
+        self.execute_prepared_no_result_with_formats(statement, params, &[])
+            .await
+    }
+
+    /// Executes a prepared statement that doesn't return rows, choosing the
+    /// wire format per parameter (async).
+    ///
+    /// `param_formats` must be the same length as `params`, or empty to mean
+    /// "every parameter is binary". See [`ParamFormat`].
+    ///
+    /// # Errors
+    ///
+    /// Same failure modes as [`Self::execute_prepared_no_result`].
+    pub async fn execute_prepared_no_result_with_formats<P: AsRef<[Option<Vec<u8>>]>>(
+        &self,
+        statement: &AsyncPreparedStatement,
+        params: P,
+        param_formats: &[ParamFormat],
+    ) -> Result<u64> {
         let params_ref: Vec<Option<&[u8]>> = params
             .as_ref()
             .iter()
@@ -891,7 +911,7 @@ impl AsyncClient {
             .collect();
 
         let mut conn = self.connection.lock().await;
-        conn.execute_prepared_no_result(&statement.name, &params_ref)
+        conn.execute_prepared_no_result_with_formats(&statement.name, &params_ref, param_formats)
             .await
     }
 
@@ -913,6 +933,26 @@ impl AsyncClient {
         params: P,
         chunk_size: usize,
     ) -> Result<super::async_prepared_stream::AsyncPreparedQueryStream<'a>> {
+        self.execute_prepared_streaming_with_formats(statement, params, &[], chunk_size)
+            .await
+    }
+
+    /// Executes a prepared statement with streaming results, choosing the
+    /// wire format per parameter (async).
+    ///
+    /// `param_formats` must be the same length as `params`, or empty to mean
+    /// "every parameter is binary". See [`ParamFormat`].
+    ///
+    /// # Errors
+    ///
+    /// Same failure modes as [`Self::execute_prepared_streaming`].
+    pub async fn execute_prepared_streaming_with_formats<'a, P: AsRef<[Option<Vec<u8>>]>>(
+        &'a self,
+        statement: &AsyncPreparedStatement,
+        params: P,
+        param_formats: &[ParamFormat],
+        chunk_size: usize,
+    ) -> Result<super::async_prepared_stream::AsyncPreparedQueryStream<'a>> {
         let params_ref: Vec<Option<&[u8]>> = params
             .as_ref()
             .iter()
@@ -920,8 +960,18 @@ impl AsyncClient {
             .collect();
 
         let mut conn = self.connection.lock().await;
-        conn.start_execute_prepared(&statement.name, &params_ref, statement.columns.len())
+        if param_formats.is_empty() {
+            conn.start_execute_prepared(&statement.name, &params_ref, statement.columns.len())
+                .await?;
+        } else {
+            conn.start_execute_prepared_with_formats(
+                &statement.name,
+                &params_ref,
+                param_formats,
+                statement.columns.len(),
+            )
             .await?;
+        }
 
         let columns = std::sync::Arc::new(statement.columns.clone());
         Ok(super::async_prepared_stream::AsyncPreparedQueryStream::new(

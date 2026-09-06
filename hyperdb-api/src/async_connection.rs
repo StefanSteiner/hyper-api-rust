@@ -571,7 +571,7 @@ impl AsyncConnection {
         // Parse/Bind/Execute handling ever changes.
         let query = query.to_owned();
         let oids: Vec<crate::Oid> = params.iter().map(|p| p.sql_oid()).collect();
-        let encoded: Vec<Option<Vec<u8>>> = params.iter().map(|p| p.encode_param()).collect();
+        let (encoded, formats) = crate::async_prepared::encode_params(params);
         async_stream::try_stream! {
             let client = match &self.transport {
                 AsyncTransport::Tcp(tcp) => &tcp.client,
@@ -588,7 +588,12 @@ impl AsyncConnection {
             };
             let stmt = client.prepare_typed(&query, &oids).await?;
             let stream = client
-                .execute_prepared_streaming(&stmt, encoded, crate::result::DEFAULT_BINARY_CHUNK_SIZE)
+                .execute_prepared_streaming_with_formats(
+                    &stmt,
+                    encoded,
+                    &formats,
+                    crate::result::DEFAULT_BINARY_CHUNK_SIZE,
+                )
                 .await?;
             let mut rs = AsyncRowset::from_prepared(stream).with_statement_guard(stmt);
             // The Prepared path captures the schema at prepare time, so the
@@ -733,9 +738,14 @@ impl AsyncConnection {
         };
         let oids: Vec<crate::Oid> = params.iter().map(|p| p.sql_oid()).collect();
         let stmt = client.prepare_typed(query, &oids).await?;
-        let encoded: Vec<Option<Vec<u8>>> = params.iter().map(|p| p.encode_param()).collect();
+        let (encoded, formats) = crate::async_prepared::encode_params(params);
         let stream = client
-            .execute_prepared_streaming(&stmt, encoded, crate::result::DEFAULT_BINARY_CHUNK_SIZE)
+            .execute_prepared_streaming_with_formats(
+                &stmt,
+                encoded,
+                &formats,
+                crate::result::DEFAULT_BINARY_CHUNK_SIZE,
+            )
             .await?;
         Ok(AsyncRowset::from_prepared(stream).with_statement_guard(stmt))
     }
@@ -764,8 +774,10 @@ impl AsyncConnection {
         };
         let oids: Vec<crate::Oid> = params.iter().map(|p| p.sql_oid()).collect();
         let stmt = client.prepare_typed(query, &oids).await?;
-        let encoded: Vec<Option<Vec<u8>>> = params.iter().map(|p| p.encode_param()).collect();
-        Ok(client.execute_prepared_no_result(&stmt, encoded).await?)
+        let (encoded, formats) = crate::async_prepared::encode_params(params);
+        Ok(client
+            .execute_prepared_no_result_with_formats(&stmt, encoded, &formats)
+            .await?)
     }
 
     // =========================================================================

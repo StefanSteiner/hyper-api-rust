@@ -278,12 +278,49 @@ cargo kani -p hyperdb-api
 ### Parameterized Queries
 
 `query_params()` and `command_params()` use the PostgreSQL extended query
-protocol (Parse/Bind/Execute): each `$N` placeholder is bound to a
-binary-encoded parameter via `ToSqlParam::sql_oid()` + `encode_param()`, routed
-through `Connection::prepare_typed()`. Parameters are never interpolated into
+protocol (Parse/Bind/Execute): each `$N` placeholder is bound via
+`ToSqlParam::sql_oid()` + `encode_param()` + `param_format()`, routed through
+`Connection::prepare_typed()`. Parameters are never interpolated into
 the SQL text, so there is no injection surface. gRPC transport does not support
 prepared statements and returns `Error::FeatureNotSupported`. See rustdoc on
 `Connection::query_params()` in `connection.rs`.
+
+`Bind` carries a **per-parameter** format-code array, and Hyper honours a mixed
+one. Parameters default to PostgreSQL binary (`ParamFormat::Binary`); the two
+types Hyper has no binary *input* function for bind as text instead:
+
+- a `Numeric` with `scale() > 0` — a binary `NUMERIC` whose `dscale` exceeds the
+  parameter's resolved scale is rejected with `0A000`, and a declared `numeric`
+  OID (which carries no type modifier) resolves server-side to `NUMERIC(1,0)`,
+  so every scaled value hits that check. These bind as text *and* leave the OID
+  unspecified so the server infers the scale from context.
+- `Geography` — binary binds fail with `42883`; WKT text works.
+
+Everything else keeps the binary fast path. When every parameter is binary the
+`Bind` message ships a single format code rather than one per parameter (the
+protocol broadcasts a lone code across all of them), so the common path
+allocates nothing for formats at all.
+
+Two conventions in that plumbing are easy to get backwards:
+
+- **An empty `param_formats` slice means "all binary", not "all text."** The
+  PostgreSQL protocol reads a zero-length format array as all-text, so the
+  translation happens in exactly one place — `bind_format_codes` in
+  `hyperdb-api-core/src/client/statement.rs`, which takes the parameter count
+  precisely so it can distinguish "no parameters" (a zero-length array is
+  correct) from "no format overrides" (broadcast binary). It rejects a
+  non-empty slice whose length doesn't match. Don't reimplement this at a call
+  site.
+- **`sql_oid()` is consulted only on the one-shot path.** `prepare_typed()`
+  fixes parameter OIDs before any value exists, so a `PreparedStatement`
+  cannot serve both `Numeric` scale classes from one statement — `NUMERIC`
+  rejects scaled values (`22003`), unspecified (`0`) rejects whole numbers
+  (`0A000`). `query_params()` re-parses per call and picks the OID from the
+  value, so it handles both. `Geography` declares a concrete OID and always
+  binds as text, so it is unaffected and works on either path. Note also that
+  `Connection::prepare()` passes an empty OID list and Hyper does not infer
+  parameter types at Parse time, so it rejects any `$N` with `42601` —
+  `prepare_typed()` is the only route to a parameterized prepared statement.
 
 ### Key-Value Store
 

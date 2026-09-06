@@ -1019,7 +1019,24 @@ impl Numeric {
     /// HyperBinary format. Precision > 18 uses 128-bit storage.
     pub const SMALL_NUMERIC_MAX_PRECISION: u32 = 18;
 
+    /// Decimal digits in the largest `i128` magnitude, used to size the
+    /// stack buffer that [`Display`](fmt::Display) renders into.
+    ///
+    /// Both `i128::MAX` and `i128::MIN.unsigned_abs()` are exactly 39 digits.
+    /// This is *not* [`MAX_PRECISION`](Self::MAX_PRECISION): that is the
+    /// engine's limit on a valid `NUMERIC`, while this is the limit of the
+    /// storage type, and `Display` must stay total on out-of-range values.
+    const MAX_MAGNITUDE_DIGITS: usize = i128::MAX.ilog10() as usize + 1;
+
     /// Creates a Numeric from an unscaled value and scale.
+    ///
+    /// Neither argument is validated. A `scale` above
+    /// [`MAX_PRECISION`](Self::MAX_PRECISION), or a `value` wider than the
+    /// engine's 38-digit limit, is representable here and renders correctly
+    /// via [`Display`](fmt::Display), but the server rejects it when bound
+    /// as a parameter or inserted. Use
+    /// [`try_from_f64`](Self::try_from_f64) for a checked construction from
+    /// a float.
     pub const fn new(value: i128, scale: u8) -> Self {
         Numeric { value, scale }
     }
@@ -1223,23 +1240,45 @@ impl Numeric {
 impl fmt::Display for Numeric {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.scale == 0 {
-            write!(f, "{}", self.value)
-        } else {
-            // Compute the sign explicitly and format the magnitude. Deriving
-            // the sign from `int_part` alone loses it whenever `|value| < 1`
-            // (the integer part is `0`, which prints without a sign), so
-            // values like -0.5 would render as "0.5000". `unsigned_abs` also
-            // avoids the `i128::MIN` overflow that `.abs()` would hit.
-            let divisor = 10u128.pow(u32::from(self.scale));
-            let sign = if self.value < 0 { "-" } else { "" };
-            let abs = self.value.unsigned_abs();
-            let int_part = abs / divisor;
-            let frac_part = abs % divisor;
-            write!(
-                f,
-                "{sign}{int_part}.{frac_part:0width$}",
-                width = self.scale as usize
-            )
+            return write!(f, "{}", self.value);
+        }
+        // The point is *inserted* into the digit string rather than derived
+        // from `value / 10^scale`. A `10u128.pow(scale)` divisor overflows at
+        // `scale == 39` and wraps to exactly zero at `scale == 128` (2^128
+        // divides 10^128), so with a `u8` scale the arithmetic version panics
+        // on values that are merely out of range for the engine — which
+        // rejects them cleanly. Insertion is total for every `u8` scale.
+        //
+        // The sign is emitted separately: deriving it from the integer part
+        // loses it whenever `|value| < 1`, rendering -0.5 as "0.5". Taking
+        // `unsigned_abs` also avoids the `i128::MIN` overflow of `.abs()`.
+        if self.value < 0 {
+            f.write_str("-")?;
+        }
+        let mut buf = [0_u8; Numeric::MAX_MAGNITUDE_DIGITS];
+        let mut magnitude = self.value.unsigned_abs();
+        let mut start = buf.len();
+        loop {
+            start -= 1;
+            let digit = u8::try_from(magnitude % 10).expect("a base-10 digit is 0..=9");
+            buf[start] = b'0' + digit;
+            magnitude /= 10;
+            if magnitude == 0 {
+                break;
+            }
+        }
+        let digits =
+            std::str::from_utf8(&buf[start..]).expect("ASCII decimal digits are valid UTF-8");
+        let scale = usize::from(self.scale);
+        match digits.len().checked_sub(scale) {
+            // At least one integer digit: split the string at the point.
+            Some(point) if point > 0 => {
+                let (int_part, frac_part) = digits.split_at(point);
+                write!(f, "{int_part}.{frac_part}")
+            }
+            // |value| < 1: a lone leading zero, then zero-pad the fraction
+            // out to `scale` places.
+            _ => write!(f, "0.{digits:0>scale$}"),
         }
     }
 }
@@ -2248,6 +2287,164 @@ mod tests {
 
         // i128::MIN must not panic (unsigned_abs avoids the .abs() overflow).
         let _ = Numeric::new(i128::MIN, 4).to_string();
+    }
+
+    #[test]
+    fn test_numeric_display_is_total_over_every_u8_scale() {
+        // Regression: `Display` used to divide by `10u128.pow(scale)`. That
+        // overflows at scale 39 (panic in debug, garbage divisor in release)
+        // and wraps to exactly zero at scale 128, dividing by zero. Scales
+        // above MAX_PRECISION are out of range for the engine, but they are
+        // constructible — `Numeric::new` is an unvalidated `const fn`, and
+        // `try_from_f64` validates only the value — and they reach `Display`
+        // through the text bind path, where a panic would replace a clean
+        // server error.
+        assert_eq!(
+            Numeric::new(1, 38).to_string(),
+            format!("0.{}1", "0".repeat(37))
+        );
+        assert_eq!(
+            Numeric::new(1, 39).to_string(),
+            format!("0.{}1", "0".repeat(38))
+        );
+        assert_eq!(
+            Numeric::new(1, 128).to_string(),
+            format!("0.{}1", "0".repeat(127))
+        );
+        assert_eq!(
+            Numeric::new(-1, 255).to_string(),
+            format!("-0.{}1", "0".repeat(254))
+        );
+
+        // Every scale must render without panicking, for the extremes of the
+        // value domain as well as the trivial cases.
+        for scale in 0..=u8::MAX {
+            for value in [0_i128, 1, -1, i128::MAX, i128::MIN] {
+                let rendered = Numeric::new(value, scale).to_string();
+                assert!(!rendered.is_empty(), "empty render at scale {scale}");
+                assert_eq!(
+                    rendered.starts_with('-'),
+                    value < 0,
+                    "sign lost for {value} at scale {scale}"
+                );
+            }
+        }
+
+        // The digit sequence is preserved regardless of where the point lands.
+        assert_eq!(
+            Numeric::new(i128::MAX, 39).to_string(),
+            format!("0.{}", i128::MAX)
+        );
+        assert_eq!(
+            Numeric::new(i128::MAX, 38).to_string(),
+            format!("1.{}", &i128::MAX.to_string()[1..])
+        );
+    }
+
+    /// The `Display` algorithm exactly as it stood before the digit-insertion
+    /// rewrite, lifted verbatim from the parent commit so the differential
+    /// test below compares against the real thing rather than a
+    /// reconstruction. (`self.scale as usize` became `usize::from(scale)`,
+    /// which is the same value for a `u8` and satisfies the cast lint.)
+    ///
+    /// Valid only for `scale <= 38`: `10u128.pow(39)` overflows, which is the
+    /// defect the rewrite removed.
+    fn display_via_divisor(value: i128, scale: u8) -> String {
+        if scale == 0 {
+            format!("{value}")
+        } else {
+            let divisor = 10u128.pow(u32::from(scale));
+            let sign = if value < 0 { "-" } else { "" };
+            let abs = value.unsigned_abs();
+            let int_part = abs / divisor;
+            let frac_part = abs % divisor;
+            format!(
+                "{sign}{int_part}.{frac_part:0width$}",
+                width = usize::from(scale)
+            )
+        }
+    }
+
+    #[test]
+    fn test_numeric_display_matches_the_pre_rewrite_algorithm_byte_for_byte() {
+        // Totality (above) is a weaker property than byte-equality: it would
+        // not notice a dropped trailing zero, a missing leading `0`, or a
+        // misplaced sign. `Display` output is consumed as *data* — the MCP
+        // server serializes it into JSON, `to_sql_literal` embeds it in SQL —
+        // so the rewrite has to be output-identical wherever the old
+        // algorithm worked at all, which is every scale up to 38.
+
+        // Scale-independent boundaries: single digits, magnitudes that need
+        // left-padding, and several flavours of trailing zero.
+        const FIXED: &[i128] = &[
+            0,
+            1,
+            -1,
+            5,
+            -5,
+            9,
+            -9,
+            10,
+            -10,
+            42,
+            -42,
+            99,
+            -99,
+            100,
+            -100,
+            500,
+            -500,
+            999,
+            -999,
+            1_000,
+            -1_000,
+            10_500,
+            -10_500,
+            12_300,
+            -12_300,
+            123_456,
+            -123_456,
+            1_000_000,
+            -1_000_000,
+            i128::MAX,
+            i128::MIN,
+        ];
+
+        // The engine's 38-digit precision limit, included at every scale.
+        let max_precision = 10_i128.pow(38) - 1;
+
+        let mut comparisons = 0_usize;
+        for scale in 0..=38_u8 {
+            let mut values = FIXED.to_vec();
+            values.extend([max_precision, -max_precision]);
+
+            // Scale-relative boundaries. The integer part flips from zero to
+            // non-zero at exactly 10^scale; one below it, every fractional
+            // digit is significant and the leading `0` is load-bearing.
+            let pow10 = 10_i128.pow(u32::from(scale));
+            for boundary in [pow10 - 1, pow10, pow10 + 1, pow10 / 2] {
+                values.extend([boundary, -boundary]);
+            }
+            if scale > 0 {
+                // Fewer digits than `scale`, so the fraction needs padding.
+                values.extend([pow10 / 10, -(pow10 / 10)]);
+            }
+
+            for value in values {
+                assert_eq!(
+                    Numeric::new(value, scale).to_string(),
+                    display_via_divisor(value, scale),
+                    "rendering diverged from the pre-rewrite algorithm at \
+                     value={value} scale={scale}"
+                );
+                comparisons += 1;
+            }
+        }
+
+        assert_eq!(
+            comparisons, 1675,
+            "the comparison matrix changed size; update the count deliberately"
+        );
     }
 
     #[test]

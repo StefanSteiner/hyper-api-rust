@@ -73,6 +73,7 @@ use super::endpoint::ConnectionEndpoint;
 use super::error::{Error, ErrorKind, Result};
 use super::prepare;
 use super::row::{Row, StreamRow};
+use super::statement::ParamFormat;
 use super::sync_stream::SyncStream;
 
 use crate::protocol::message::Message;
@@ -974,12 +975,35 @@ impl Client {
         statement: &prepare::OwnedPreparedStatement,
         params: P,
     ) -> Result<u64> {
+        self.execute_no_result_with_formats(statement, params, &[])
+    }
+
+    /// Executes a prepared statement that doesn't return rows, choosing the
+    /// wire format per parameter.
+    ///
+    /// `param_formats` must be the same length as `params`, or empty to mean
+    /// "every parameter is binary". See [`ParamFormat`].
+    ///
+    /// # Errors
+    ///
+    /// Same failure modes as [`Self::execute_no_result`].
+    pub fn execute_no_result_with_formats<P: AsRef<[Option<Vec<u8>>]>>(
+        &self,
+        statement: &prepare::OwnedPreparedStatement,
+        params: P,
+        param_formats: &[ParamFormat],
+    ) -> Result<u64> {
         let params_ref: Vec<Option<&[u8]>> = params
             .as_ref()
             .iter()
             .map(|p| p.as_ref().map(std::vec::Vec::as_slice))
             .collect();
-        prepare::execute_prepared_no_result(&self.connection, statement.statement(), &params_ref)
+        prepare::execute_prepared_no_result_with_formats(
+            &self.connection,
+            statement.statement(),
+            &params_ref,
+            param_formats,
+        )
     }
 
     /// Executes a prepared statement with streaming results.
@@ -1005,6 +1029,25 @@ impl Client {
         params: P,
         chunk_size: usize,
     ) -> Result<super::prepared_stream::PreparedQueryStream<'a>> {
+        self.execute_streaming_with_formats(statement, params, &[], chunk_size)
+    }
+
+    /// Executes a prepared statement with streaming results, choosing the
+    /// wire format per parameter.
+    ///
+    /// `param_formats` must be the same length as `params`, or empty to mean
+    /// "every parameter is binary". See [`ParamFormat`].
+    ///
+    /// # Errors
+    ///
+    /// Same failure modes as [`Self::execute_streaming`].
+    pub fn execute_streaming_with_formats<'a, P: AsRef<[Option<Vec<u8>>]>>(
+        &'a self,
+        statement: &prepare::OwnedPreparedStatement,
+        params: P,
+        param_formats: &[ParamFormat],
+        chunk_size: usize,
+    ) -> Result<super::prepared_stream::PreparedQueryStream<'a>> {
         let params_ref: Vec<Option<&[u8]>> = params
             .as_ref()
             .iter()
@@ -1012,7 +1055,16 @@ impl Client {
             .collect();
 
         let mut conn = self.lock_connection()?;
-        conn.start_execute_prepared(statement.name(), &params_ref, statement.columns().len())?;
+        if param_formats.is_empty() {
+            conn.start_execute_prepared(statement.name(), &params_ref, statement.columns().len())?;
+        } else {
+            conn.start_execute_prepared_with_formats(
+                statement.name(),
+                &params_ref,
+                param_formats,
+                statement.columns().len(),
+            )?;
+        }
 
         let columns = std::sync::Arc::new(statement.columns().to_vec());
         Ok(super::prepared_stream::PreparedQueryStream::new(

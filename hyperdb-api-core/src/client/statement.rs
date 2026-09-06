@@ -3,7 +3,106 @@
 
 //! Prepared statement handling.
 
+use super::error::{Error, Result};
 use crate::types::Oid;
+use std::borrow::Cow;
+
+/// Wire format for a *bound parameter* in the `Bind` message.
+///
+/// Distinct from [`ColumnFormat`], which describes *result* columns and
+/// carries a third `HyperBinary` variant. Parameters only ever travel as
+/// PostgreSQL text or PostgreSQL binary — Hyper has no `HyperBinary` input
+/// decoder for bound parameters.
+///
+/// Binary is the default and the fast path. Text exists because Hyper has
+/// no PG-binary *input* function for a couple of types:
+///
+/// - **scaled `NUMERIC`** — a binary NUMERIC whose `dscale` exceeds the
+///   parameter's resolved scale is rejected with SQLSTATE `0A000`
+///   ("cannot handle truncation when reading numerics").
+/// - **`geography`** — rejected with `42883`, "no pg binary input function
+///   available for type geography".
+///
+/// The `Bind` message carries a *per-parameter* format-code array, so a
+/// single statement can mix both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ParamFormat {
+    /// PostgreSQL text format (format code `0`) — the value's SQL literal
+    /// representation, sent as UTF-8 without surrounding quotes.
+    Text,
+    /// Standard PostgreSQL binary format (format code `1`, big-endian).
+    #[default]
+    Binary,
+}
+
+impl ParamFormat {
+    /// Wire format code for [`ParamFormat::Binary`].
+    pub const BINARY_CODE: i16 = 1;
+    /// Wire format code for [`ParamFormat::Text`].
+    pub const TEXT_CODE: i16 = 0;
+
+    /// Returns the wire protocol format code (`0` = text, `1` = binary).
+    #[must_use]
+    pub fn to_code(self) -> i16 {
+        match self {
+            ParamFormat::Text => Self::TEXT_CODE,
+            ParamFormat::Binary => Self::BINARY_CODE,
+        }
+    }
+
+    /// Returns true if this is the binary format.
+    #[must_use]
+    pub fn is_binary(self) -> bool {
+        matches!(self, ParamFormat::Binary)
+    }
+}
+
+/// A single binary format code, which `Bind` broadcasts to every parameter.
+const BROADCAST_BINARY: &[i16] = &[ParamFormat::BINARY_CODE];
+
+/// Builds the `Bind` parameter-format-code array for `param_count`
+/// parameters described by `formats`.
+///
+/// **An empty `formats` means "every parameter is binary"** — the crate-wide
+/// shorthand, and deliberately *not* the wire meaning. The PostgreSQL
+/// protocol reads a zero-length format array as "every parameter is text",
+/// so emitting `formats` straight through would reinterpret every binary
+/// parameter as text: silent corruption rather than an error. This is the
+/// single place that translation happens, which is why the function needs
+/// `param_count` — it is the only way to tell "no parameters" (where a
+/// zero-length array is correct) from "no format overrides".
+///
+/// The protocol also lets the array hold `1` code that applies to *all*
+/// parameters. The all-binary case — every parameterized query that doesn't
+/// bind a scaled `NUMERIC` or a `geography` — therefore ships one code
+/// instead of `n` and borrows a `const`, so the hot path performs no
+/// allocation at all.
+///
+/// # Errors
+///
+/// Returns a protocol error if `formats` is non-empty and its length differs
+/// from `param_count`. Broadcasting a mismatched array would bind parameters
+/// under a format the caller never chose.
+pub(crate) fn bind_format_codes(
+    formats: &[ParamFormat],
+    param_count: usize,
+) -> Result<Cow<'static, [i16]>> {
+    if !formats.is_empty() && formats.len() != param_count {
+        return Err(Error::protocol(format!(
+            "parameter format count ({}) does not match parameter count ({param_count})",
+            formats.len()
+        )));
+    }
+    if param_count == 0 {
+        return Ok(Cow::Borrowed(&[]));
+    }
+    if formats.is_empty() || formats.iter().copied().all(ParamFormat::is_binary) {
+        return Ok(Cow::Borrowed(BROADCAST_BINARY));
+    }
+    Ok(Cow::Owned(
+        formats.iter().copied().map(ParamFormat::to_code).collect(),
+    ))
+}
 
 /// Format code for column data.
 ///
@@ -149,5 +248,95 @@ impl Column {
     #[must_use]
     pub fn format(&self) -> ColumnFormat {
         self.format
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ParamFormat, bind_format_codes};
+
+    #[test]
+    fn all_binary_collapses_to_one_broadcast_code() {
+        // PG applies a lone format code to every parameter, so N binary
+        // parameters need exactly one code on the wire.
+        for n in 1..=8 {
+            let formats = vec![ParamFormat::Binary; n];
+            assert_eq!(
+                &*bind_format_codes(&formats, n).unwrap(),
+                &[1_i16],
+                "{n} binary params should ship one broadcast code"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_formats_mean_all_binary_not_all_text() {
+        // Regression: the helper used to hand an empty slice straight back,
+        // and PG reads a zero-length format array as "every parameter is
+        // text". Every caller in the crate means "all binary" by `&[]`, so
+        // passing it through silently reinterpreted binary bytes as text.
+        for n in 1..=8 {
+            assert_eq!(
+                &*bind_format_codes(&[], n).unwrap(),
+                &[1_i16],
+                "empty formats with {n} params must broadcast binary"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_parameters_send_no_format_codes() {
+        // A broadcast code with no parameters would be a malformed Bind.
+        // This is the *only* case where a zero-length array is correct.
+        assert!(bind_format_codes(&[], 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn format_count_must_match_parameter_count() {
+        // Silently broadcasting a one-element array over three parameters, or
+        // truncating a three-element array to two parameters, binds values
+        // under a format the caller never chose.
+        for (formats, param_count) in [
+            (vec![ParamFormat::Text], 3),
+            (vec![ParamFormat::Text, ParamFormat::Binary], 3),
+            (vec![ParamFormat::Binary; 3], 2),
+            (vec![ParamFormat::Binary], 0),
+        ] {
+            let err = bind_format_codes(&formats, param_count)
+                .expect_err("length mismatch must be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("does not match parameter count"),
+                "unexpected error for {}/{param_count}: {msg}",
+                formats.len()
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_formats_expand_to_one_code_per_parameter() {
+        assert_eq!(
+            &*bind_format_codes(&[ParamFormat::Binary, ParamFormat::Text], 2).unwrap(),
+            &[1_i16, 0]
+        );
+        assert_eq!(
+            &*bind_format_codes(&[ParamFormat::Text, ParamFormat::Binary], 2).unwrap(),
+            &[0_i16, 1]
+        );
+        // All-text is still a per-parameter array, never an empty one — an
+        // empty array means "all binary" to this helper, and all-text to PG.
+        assert_eq!(
+            &*bind_format_codes(&[ParamFormat::Text, ParamFormat::Text], 2).unwrap(),
+            &[0_i16, 0]
+        );
+    }
+
+    #[test]
+    fn param_format_codes_match_the_protocol() {
+        assert_eq!(ParamFormat::Text.to_code(), 0);
+        assert_eq!(ParamFormat::Binary.to_code(), 1);
+        assert!(ParamFormat::Binary.is_binary());
+        assert!(!ParamFormat::Text.is_binary());
+        assert_eq!(ParamFormat::default(), ParamFormat::Binary);
     }
 }

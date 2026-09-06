@@ -1136,11 +1136,22 @@ impl Connection {
     ///
     /// This is safe to use with untrusted user input: parameters travel
     /// through the extended query protocol (Parse/Bind/Execute) as
-    /// binary `HyperBinary` values and are never interpolated into the
-    /// SQL string. For repeated executions of the same SQL with different
-    /// values, prefer the explicit [`prepare`](Self::prepare) API — it
-    /// returns a reusable [`PreparedStatement`](crate::PreparedStatement)
-    /// that skips the Parse round-trip on every call.
+    /// length-prefixed values and are never interpolated into the SQL
+    /// string. Most bind as PostgreSQL binary (format `1`); a scaled
+    /// [`Numeric`](crate::Numeric) and a [`Geography`](crate::Geography)
+    /// bind as PostgreSQL text (format `0`), because Hyper has no binary
+    /// input function for either — see
+    /// [`ToSqlParam::param_format`](crate::ToSqlParam::param_format).
+    /// (`HyperBinary`, format `2`, is a *result* encoding only; it is never
+    /// used for parameters.)
+    ///
+    /// For repeated executions of the same SQL with different values, prefer
+    /// the explicit [`prepare_typed`](Self::prepare_typed) API — it returns a
+    /// reusable [`PreparedStatement`](crate::PreparedStatement) that skips
+    /// the Parse round-trip on every call. Note that a prepared statement
+    /// fixes its parameter OIDs up front, so it cannot accept both whole and
+    /// scaled `NUMERIC` values; `query_params` re-parses per call and can.
+    /// See [`Numeric::sql_oid`](crate::ToSqlParam::sql_oid) for the detail.
     ///
     /// Under the hood, `query_params` is a one-shot
     /// prepare+execute+close: it prepares an unnamed statement, binds
@@ -1209,9 +1220,10 @@ impl Connection {
         params: &[&dyn crate::params::ToSqlParam],
     ) -> Result<Rowset<'_>> {
         // Implementation note: routes through the extended query protocol
-        // via Parse/Bind/Execute so parameters travel in HyperBinary
-        // format — no SQL escaping, full SQL-injection safety regardless of
-        // parameter content. The statement handle is stashed inside the
+        // via Parse/Bind/Execute so parameters travel as length-prefixed
+        // Bind values (PG binary, or PG text for the types Hyper has no
+        // binary input function for) — no SQL escaping, full SQL-injection
+        // safety regardless of parameter content. The statement handle is stashed inside the
         // returned Rowset so its Drop-time close_statement fires *after*
         // the rowset releases its connection lock (otherwise the close
         // would deadlock on the still-held mutex).
@@ -1225,9 +1237,13 @@ impl Connection {
         };
         let oids: Vec<crate::Oid> = params.iter().map(|p| p.sql_oid()).collect();
         let stmt = client.prepare_typed(query, &oids)?;
-        let encoded: Vec<Option<Vec<u8>>> = params.iter().map(|p| p.encode_param()).collect();
-        let stream =
-            client.execute_streaming(&stmt, encoded, crate::result::DEFAULT_BINARY_CHUNK_SIZE)?;
+        let (encoded, formats) = crate::prepared::encode_params(params);
+        let stream = client.execute_streaming_with_formats(
+            &stmt,
+            encoded,
+            &formats,
+            crate::result::DEFAULT_BINARY_CHUNK_SIZE,
+        )?;
         Ok(Rowset::from_prepared(stream).with_statement_guard(stmt))
     }
 
@@ -1273,8 +1289,8 @@ impl Connection {
         };
         let oids: Vec<crate::Oid> = params.iter().map(|p| p.sql_oid()).collect();
         let stmt = client.prepare_typed(query, &oids)?;
-        let encoded: Vec<Option<Vec<u8>>> = params.iter().map(|p| p.encode_param()).collect();
-        Ok(client.execute_no_result(&stmt, encoded)?)
+        let (encoded, formats) = crate::prepared::encode_params(params);
+        Ok(client.execute_no_result_with_formats(&stmt, encoded, &formats)?)
     }
 
     /// Executes multiple SQL statements in a single call.
@@ -1730,6 +1746,23 @@ impl Connection {
     /// SQL alone (e.g. a bare `$1` in a `WHERE v > $1` clause with no
     /// other context). Constants for common types live in
     /// [`hyperdb_api_core::types::oids`].
+    ///
+    /// In practice this is the *only* way to prepare a statement that binds
+    /// parameters: [`prepare`](Self::prepare) passes an empty OID list, and
+    /// Hyper then rejects any `$N` in the SQL with `42601` ("unexpected
+    /// parameter '$1', expected to have 0 parameter(s)") — it does not infer
+    /// parameter types at Parse time.
+    ///
+    /// # Scaled `NUMERIC` parameters
+    ///
+    /// Parameter OIDs are fixed here, before any value exists, so a single
+    /// prepared statement cannot accept both whole and scaled
+    /// [`Numeric`](crate::Numeric) values: `oids::NUMERIC` rejects scaled
+    /// values with `22003`, and `Oid::new(0)` rejects whole numbers with
+    /// `0A000`. Use [`query_params`](Self::query_params) when the scale
+    /// varies across calls — it re-parses per statement and picks the OID
+    /// from the value. [`Geography`](crate::Geography) is unaffected and
+    /// works normally here.
     ///
     /// # Errors
     ///
