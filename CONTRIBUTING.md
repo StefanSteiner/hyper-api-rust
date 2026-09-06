@@ -245,11 +245,13 @@ Summary:
    manage them, so nothing else will — see
    [`docs/GITHUB_OPERATIONS.md`](docs/GITHUB_OPERATIONS.md#rolling-over-the-per-crate-changelogs).
 
-For pre-releases (`-rc.N`, `-alpha.N`, `-beta.N`), a `Release-As:` footer on a
-commit on `main` is **required, not optional** — without one release-please
-computes a wrong-but-publishable version. Recent PRs are squash-merged, so the
-footer has to be in the squash commit body. See
-[`docs/GITHUB_OPERATIONS.md`](docs/GITHUB_OPERATIONS.md#every-rc-needs-its-own-footer).
+For pre-releases (`-rc.N`, `-alpha.N`, `-beta.N`), release-please increments the
+rc counter on its own: `release-please-config.json` carries prerelease keys, so
+any conventional commit on `main` produces the next `-rc.N` with no footer. A
+`Release-As:` footer remains available to pin one specific version, and when
+used it has to sit in the squash commit body. Those keys must be removed when
+the final release ships, or the release after it computes another rc. See
+[`docs/GITHUB_OPERATIONS.md`](docs/GITHUB_OPERATIONS.md#pre-releases).
 
 ### Published Crates
 

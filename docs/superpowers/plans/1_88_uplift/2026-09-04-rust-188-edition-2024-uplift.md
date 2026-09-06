@@ -1101,11 +1101,13 @@ gh workflow run npm-build-publish.yml -f tag=v1.0.0
 ```
 
 - [ ] Confirm the npm `latest` dist-tag moves to `1.0.0`.
-- [ ] **Remove `bump-minor-pre-major` from
+- [x] **Remove `bump-minor-pre-major` from
       [`release-please-config.json`](../../../../release-please-config.json)**
       (it appears twice, at the root and under the `"."` package). The flag
       only affects `0.x` and is a no-op once at 1.0.0; leaving it in place
       misleads the next reader into thinking breaking changes still bump minor.
+      Done ahead of 1.0.0, alongside the prerelease-keys change that automates
+      the rc line — one config edit, one dry run.
 - [ ] Note the permanent consequence in the release notes: from 1.0.0 onward a
       `feat!:` commit means **2.0.0**. The `0.x` era of cheap breaking changes
       is over, which is the point of stabilizing.
