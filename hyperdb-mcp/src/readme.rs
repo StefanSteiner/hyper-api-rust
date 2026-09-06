@@ -307,18 +307,25 @@ differences from standard PostgreSQL:
   table. Usable in the FROM clause.
 - **Physical `NullType` Parquet columns are unreadable** — what a writer
   emits for an all-null optional column in one partition. Hyper rejects
-  the *whole file* with `42804` (\"hinting at a corrupted file\" — it
-  isn't); selecting only the other columns doesn't help, and a `schema`
-  override can't fix it. Re-type the column at the writer (e.g. cast to
-  DOUBLE) and regenerate. `inspect_file` reports it as `NULL`; the
-  load/query tools fail fast and name it.
-- **`to_char` is date/time only.** `to_char(DATE '2020-01-02', 'YYYY')`
-  → `2020` works; there is no numeric overload — `to_char(123.456,
-  'FM990.00')` fails `42601 unsupported data types in call to 'to_char'`.
-  The function exists; one Hyper truly lacks gives `42883` (`format()`).
-- **`expr::TEXT` formats numbers, preserving scale:**
-  `CAST(9.5 AS NUMERIC(8,2))::TEXT` → `9.50`. Use instead of `to_char`
-  on a number, and for exact decimal output.
+  the *whole file* with `42804` (\"a data type that cannot be read by
+  Hyper ... hinting at a corrupted file\"); the file is not corrupt, and
+  selecting only the other columns does not help. A `schema` override
+  cannot fix it either: the override becomes a cast in the projection,
+  which the engine never evaluates. Re-type the column at the writer
+  (e.g. cast it to DOUBLE) and regenerate. `inspect_file` reports such a
+  column as type `NULL`; `load_file`, `load_files`, and `query_file`
+  fail fast and name it.
+- **`to_char` is date/time only.** `to_char(TIMESTAMP '2020-01-02
+  03:04:05', 'YYYY-MM-DD')` → `2020-01-02` and `to_char(DATE
+  '2020-01-02', 'YYYY')` → `2020` both work. There is **no numeric
+  overload** — integer and NUMERIC arguments alike fail with `42601
+  unsupported data types in call to 'to_char'`, e.g.
+  `to_char(123.456, 'FM990.00')`. That is an argument-type error, not a
+  missing function: a function Hyper genuinely lacks returns `42883`, as
+  `format()` does.
+- **`expr::TEXT` is the numeric-formatting idiom** and preserves scale:
+  `CAST(9.5 AS NUMERIC(8,2))::TEXT` → `9.50`. Reach for this instead of
+  `to_char` on a number, and whenever you need exact decimal output.
 - **`APPROX_COUNT_DISTINCT(expr)`** — approximate cardinality, 5-100x
   faster than `COUNT(DISTINCT ...)` at high cardinality, on TEXT as well
   as numeric keys. It accelerates the distinct step only, so a per-row

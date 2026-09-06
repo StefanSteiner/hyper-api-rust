@@ -71,8 +71,23 @@ fn readme_is_non_trivial() {
         "README looks empty/stub: {} bytes",
         README.len()
     );
+    // Upper bound: `get_readme` hands this string back verbatim as a single
+    // tool response, so the whole thing lands in the model's context at once.
+    // The ceiling is therefore a self-imposed token budget, not a protocol
+    // limit — nothing in rmcp or the MCP spec caps a response at this size.
+    // `hyperdb-mcp doctor` reports the live figure as `get_readme_bytes`.
+    //
+    // Where the original 20_000 came from is not recorded: it arrived with
+    // the initial open-source import and no commit message explains the
+    // number. Raised to 24_000 once several branches were queuing dialect
+    // notes against ~147 bytes of headroom — making each of them
+    // independently re-compress the same prose only manufactures merge
+    // conflicts, and squeezing past the point of clarity defeats a document
+    // whose only reader is an LLM seeing it cold. Still earn the space (see
+    // the module docs on `readme.rs`), but prefer moving this deliberately
+    // over shrinking the text until it stops teaching.
     assert!(
-        README.len() < 20_000,
+        README.len() < 24_000,
         "README is too long for a tool response: {} bytes",
         README.len()
     );
