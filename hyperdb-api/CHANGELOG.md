@@ -89,6 +89,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   units depending on which platform produced the row — a 4.86% discrepancy.
   All `MB`-labelled output is now decimal (10^6). Installed-RAM reporting stays
   binary, since RAM is conventionally quoted that way.
+- **The async pool's default recycle probe now discharges a transaction
+  left open by a panicked or cancelled task.** Rust has no async `Drop`, so
+  `AsyncTransaction::drop` cannot issue a `ROLLBACK` when dropped without an
+  explicit `commit()`/`rollback()` — it only warns, leaving the transaction
+  open on the connection. `ConnectionManager::recycle`'s default
+  `RecycleStrategy::SelectOne` probe previously ran `SELECT 1`, which
+  succeeds even inside an open transaction (confirmed against the real
+  engine) and so never detected the leak; the next checkout silently
+  inherited a connection mid-transaction. `SelectOne` now issues an
+  unconditional `ROLLBACK` instead — a no-op when nothing is open, confirmed
+  empirically — at the same one-round-trip cost as the probe it replaces.
+  `RecycleStrategy::Ping`, `::None` and `::Custom` are unchanged and do not
+  discharge a leaked transaction; see their doc comments. The sync pool's
+  `SyncRecycleStrategy::SelectOne` is unaffected — `Transaction`'s `Drop` can
+  and does roll back synchronously, so the sync pool never leaks one of
+  these. Fixes [issue #263](https://github.com/tableau/hyper-api-rust/issues/263).
+- **Corrected the documented behavior of `RecycleStrategy::None`.** Its doc
+  comment claimed the pool "still drops connections that fail the passive
+  `AsyncConnection::is_alive` check". The async connection manager never calls
+  `is_alive` — `None` is a genuine no-op, so a connection is handed out in
+  whatever state the previous borrower left it, and a dead one surfaces on
+  first use. (Only the *sync* pool performs an `is_alive` check.) Behavior is
+  unchanged; the documentation was wrong, and misleadingly reassuring for the
+  caller most exposed to it — one combining `None` with `AsyncTransaction`.
 
 ### Changed
 

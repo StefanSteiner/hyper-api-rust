@@ -67,9 +67,14 @@
 //! # Tuning knobs (shared by both pools)
 //!
 //! - **Recycle strategy** ([`PoolConfig::recycle`] / [`SyncPoolConfig::recycle`])
-//!   controls the per-checkout health probe. Defaults to `SelectOne` (a
-//!   `SELECT 1` round-trip). Use `Ping` for the connection's native ping,
-//!   `None` to skip the probe on hot paths, or `Custom(..)` for a bespoke check.
+//!   controls the per-checkout health probe. Defaults to `SelectOne` — on the
+//!   async pool this is an unconditional `ROLLBACK` round-trip, which both
+//!   probes liveness and discharges any transaction a panicked or cancelled
+//!   `AsyncTransaction` guard left open (see [`RecycleStrategy::SelectOne`]);
+//!   on the sync pool (which has no such leak — `Transaction`'s `Drop` rolls
+//!   back synchronously) it stays a plain `SELECT 1`. Use `Ping` for the
+//!   connection's native ping, `None` to skip the probe on hot paths, or
+//!   `Custom(..)` for a bespoke check.
 //! - **`max_lifetime`** caps how long a physical connection may live before it
 //!   is retired at checkout, regardless of health.
 //! - **`idle_timeout`** retires connections that have sat idle too long (down to
@@ -172,18 +177,42 @@ pub type RecycleCheck = Arc<dyn Fn(&AsyncConnection) -> HookFuture<'_> + Send + 
 /// evicts the connection and the pool transparently builds a fresh one.
 #[derive(Clone, Default)]
 pub enum RecycleStrategy {
-    /// Run a `SELECT 1` round-trip on every checkout. The default — catches a
-    /// half-dead connection at acquire time at the cost of one round-trip.
+    /// Run an unconditional `ROLLBACK` round-trip on every checkout. The
+    /// default — catches a half-dead connection at acquire time at the cost
+    /// of one round-trip, **and** discharges any transaction left open by a
+    /// panicked or cancelled [`AsyncTransaction`](crate::AsyncTransaction)
+    /// guard (issue #263: Rust has no async `Drop`, so that guard cannot
+    /// roll back itself and can only warn). `ROLLBACK` on a connection with
+    /// no open transaction is a harmless, zero-row no-op — confirmed against
+    /// the real engine — so this costs exactly the same one round-trip that
+    /// the prior `SELECT 1` probe did; it does not add a second round-trip.
     #[default]
     SelectOne,
     /// Call [`AsyncConnection::ping`] on every checkout (equivalent round-trip,
     /// expressed via the connection's own health primitive).
+    ///
+    /// Unlike [`SelectOne`](Self::SelectOne), this does **not** discharge a
+    /// transaction left open by a panicked or cancelled `AsyncTransaction`
+    /// guard — `ping` only reads. Prefer `SelectOne` (the default) if your
+    /// workload uses `AsyncTransaction`.
     Ping,
-    /// Skip the active probe entirely. The pool still drops connections that
-    /// fail the passive [`AsyncConnection::is_alive`] check. Use on hot paths
-    /// where the round-trip cost outweighs detecting a dead connection early.
+    /// Skip connection validation entirely: no round-trip, and no passive
+    /// check either — recycling is a genuine no-op, so a connection is
+    /// handed out in whatever state the previous borrower left it. Use on
+    /// hot paths where the round-trip cost outweighs detecting a dead
+    /// connection early, and expect the failure to surface on first use
+    /// instead.
+    ///
+    /// Does not discharge a transaction left open by a panicked or cancelled
+    /// `AsyncTransaction` guard — there is no round-trip at all to piggyback
+    /// on. Avoid combining with `AsyncTransaction` unless you independently
+    /// guarantee every transaction is committed or rolled back.
     None,
     /// Run a user-supplied async check on every checkout.
+    ///
+    /// Like [`Ping`](Self::Ping), does not itself discharge a transaction
+    /// left open by a panicked or cancelled `AsyncTransaction` guard; add an
+    /// unconditional `ROLLBACK` to your check if your workload needs that.
     Custom(RecycleCheck),
 }
 
@@ -538,7 +567,14 @@ impl Manager for ConnectionManager {
         // Active health probe per the configured strategy.
         match &self.config.recycle {
             RecycleStrategy::SelectOne => {
-                conn.execute_command("SELECT 1")
+                // Issue #263: an unconditional `ROLLBACK` replaces the
+                // former `SELECT 1` probe at the same one-round-trip cost.
+                // It doubles as the liveness check (a dead connection fails
+                // `ROLLBACK` exactly as it would fail `SELECT 1`) while also
+                // discharging any transaction a panicked or cancelled
+                // `AsyncTransaction` guard left open — see the type doc on
+                // `RecycleStrategy::SelectOne` for why this is safe.
+                conn.execute_command("ROLLBACK")
                     .await
                     .map_err(RecycleError::Backend)?;
             }
