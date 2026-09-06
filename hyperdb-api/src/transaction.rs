@@ -163,9 +163,22 @@ impl<'conn> Transaction<'conn> {
 impl Drop for Transaction<'_> {
     fn drop(&mut self) {
         if !self.completed {
-            // Best-effort rollback; ignore errors during drop.
+            // Best-effort rollback: a `Drop` cannot report failure, so log
+            // instead of swallowing silently. This is the only trace of an
+            // implicit rollback — on the panic path there is no `Err` for the
+            // caller to inspect.
             // Hyper produces a WARNING (not error) if no active transaction.
-            let _ = self.connection.rollback_unguarded();
+            if let Err(e) = self.connection.rollback_unguarded() {
+                tracing::warn!(
+                    error = %e,
+                    "Transaction dropped without commit/rollback and the implicit ROLLBACK failed \
+                     — the transaction may still be open on this connection"
+                );
+            } else {
+                tracing::debug!(
+                    "Transaction dropped without commit/rollback — issued implicit ROLLBACK"
+                );
+            }
         }
     }
 }

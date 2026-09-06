@@ -3,7 +3,7 @@
 
 #![allow(
     missing_docs,
-    reason = "MCP server binary crate; not published to crates.io. Tool-level docs are surfaced via the MCP protocol, not rustdoc."
+    reason = "Primarily an MCP server binary; the library target exists to support it and is not a documented API surface. Tool-level docs are surfaced via the MCP protocol, not rustdoc."
 )]
 
 //! MCP (Model Context Protocol) server that exposes the Hyper columnar database

@@ -30,14 +30,14 @@ fn query_resilient(engine: &Engine, sql: &str) -> Vec<Value> {
 #[test]
 fn execute_in_transaction_rolls_back_on_error() {
     use hyperdb_mcp::error::{ErrorCode, McpError};
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     te.engine
         .execute_command("CREATE TABLE direct (v INT)")
         .unwrap();
 
-    let result: Result<(), McpError> = te.engine.execute_in_transaction(|engine| {
-        engine.execute_command("INSERT INTO direct VALUES (1)")?;
-        engine.execute_command("INSERT INTO direct VALUES (2)")?;
+    let result: Result<(), McpError> = te.engine.execute_in_transaction(|txn| {
+        txn.execute_command("INSERT INTO direct VALUES (1)")?;
+        txn.execute_command("INSERT INTO direct VALUES (2)")?;
         Err(McpError::new(ErrorCode::InternalError, "simulated failure"))
     });
     assert!(result.is_err());
@@ -53,15 +53,15 @@ fn execute_in_transaction_rolls_back_on_error() {
 /// Sanity check: successful commits stick.
 #[test]
 fn execute_in_transaction_commits_on_success() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     te.engine
         .execute_command("CREATE TABLE direct (v INT)")
         .unwrap();
 
     te.engine
-        .execute_in_transaction(|engine| {
-            engine.execute_command("INSERT INTO direct VALUES (10)")?;
-            engine.execute_command("INSERT INTO direct VALUES (20)")?;
+        .execute_in_transaction(|txn| {
+            txn.execute_command("INSERT INTO direct VALUES (10)")?;
+            txn.execute_command("INSERT INTO direct VALUES (20)")?;
             Ok(())
         })
         .unwrap();
@@ -74,14 +74,102 @@ fn execute_in_transaction_commits_on_success() {
     assert_eq!(count, 2);
 }
 
+/// The regression test for the RAII migration: an `Ok` closure must
+/// **commit**, not silently roll back when the guard drops.
+///
+/// `execute_in_transaction_commits_on_success` reads the rows back on the
+/// same session that wrote them, which an uncommitted-but-still-open
+/// transaction would also satisfy. This test closes that hole by forcing
+/// the write to be durable past the end of its own transaction: a second,
+/// independent transaction rolls back, and the first batch must survive.
+/// Swap the `txn.commit()?` in `execute_in_transaction` for a bare drop and
+/// this fails while the simpler test still passes.
+#[test]
+fn execute_in_transaction_commit_outlives_its_transaction() {
+    use hyperdb_mcp::error::{ErrorCode, McpError};
+    let mut te = TestEngine::new_ephemeral();
+    te.engine
+        .execute_command("CREATE TABLE direct (v INT)")
+        .unwrap();
+
+    te.engine
+        .execute_in_transaction(|txn| txn.execute_command("INSERT INTO direct VALUES (10)"))
+        .unwrap();
+
+    // A second transaction that aborts. If the first one had never
+    // committed, its row would be discarded here along with this one.
+    let result: Result<(), McpError> = te.engine.execute_in_transaction(|txn| {
+        txn.execute_command("INSERT INTO direct VALUES (20)")?;
+        Err(McpError::new(ErrorCode::InternalError, "simulated failure"))
+    });
+    assert!(result.is_err());
+
+    let rows = query_resilient(&te.engine, "SELECT v FROM direct ORDER BY v");
+    assert_eq!(rows.len(), 1, "committed row must survive a later rollback");
+    assert_eq!(rows[0]["v"].as_i64().unwrap(), 10);
+}
+
+/// Every exit path must leave the session with no transaction open.
+///
+/// The guard's whole job is discharging the `BEGIN`/`COMMIT`-or-`ROLLBACK`
+/// pairing obligation. If any path leaked one, the *next* `BEGIN` would
+/// fail with "transaction already in progress" on a connection that is
+/// otherwise healthy — and the server's `ConnectionLost` auto-reconnect
+/// would not rescue it, because the connection is live. This walks
+/// commit → error → panic → commit on one engine and asserts each
+/// subsequent transaction still opens.
+#[test]
+fn execute_in_transaction_never_leaks_an_open_transaction() {
+    use hyperdb_mcp::error::{ErrorCode, McpError};
+    let mut te = TestEngine::new_ephemeral();
+    te.engine
+        .execute_command("CREATE TABLE direct (v INT)")
+        .unwrap();
+
+    // 1. Commit path.
+    te.engine
+        .execute_in_transaction(|txn| txn.execute_command("INSERT INTO direct VALUES (1)"))
+        .expect("commit path");
+
+    // 2. Error path — must not wedge the session for the next BEGIN.
+    let err: Result<(), McpError> = te.engine.execute_in_transaction(|txn| {
+        txn.execute_command("INSERT INTO direct VALUES (2)")?;
+        Err(McpError::new(ErrorCode::InternalError, "simulated failure"))
+    });
+    assert!(err.is_err());
+
+    // 3. Panic path — rollback happens in `Drop` as the unwind passes.
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        te.engine.execute_in_transaction::<_, ()>(|txn| {
+            txn.execute_command("INSERT INTO direct VALUES (3)")?;
+            panic!("simulated closure bug");
+        })
+    }));
+    assert!(outcome.is_err(), "panic should propagate out");
+
+    // 4. If any of the three leaked a `BEGIN`, this one fails.
+    te.engine
+        .execute_in_transaction(|txn| txn.execute_command("INSERT INTO direct VALUES (4)"))
+        .expect("session must still accept BEGIN after commit/error/panic");
+
+    let rows = query_resilient(&te.engine, "SELECT v FROM direct ORDER BY v");
+    let values: Vec<i64> = rows.iter().map(|r| r["v"].as_i64().unwrap()).collect();
+    assert_eq!(
+        values,
+        vec![1, 4],
+        "only the two committed rows survive; the error and panic paths rolled back"
+    );
+}
+
 /// A panic inside the transaction closure (e.g. an unwrap on None, array
 /// indexing OOB, arithmetic overflow) must not leave an open transaction
-/// on the connection. Without the `catch_unwind` guard in
-/// `execute_in_transaction`, the next operation would hit "transaction
-/// already in progress" and the engine would be wedged until restart.
+/// on the connection. The RAII guard rolls back from its `Drop` as the
+/// unwind passes through `execute_in_transaction`; without that, the next
+/// operation would hit "transaction already in progress" and the engine
+/// would be wedged until restart.
 #[test]
 fn execute_in_transaction_rolls_back_on_panic() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     te.engine
         .execute_command("CREATE TABLE direct (v INT)")
         .unwrap();
@@ -90,8 +178,8 @@ fn execute_in_transaction_rolls_back_on_panic() {
     // std::panic boundary lets the test assert the engine is still
     // usable afterwards without aborting the whole test binary.
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        te.engine.execute_in_transaction::<_, ()>(|engine| {
-            engine.execute_command("INSERT INTO direct VALUES (1)")?;
+        te.engine.execute_in_transaction::<_, ()>(|txn| {
+            txn.execute_command("INSERT INTO direct VALUES (1)")?;
             // Simulate a programmer error mid-transaction — any panic
             // will do. Using `panic!` directly keeps clippy from
             // second-guessing a synthetic `.unwrap()` on a literal.
@@ -117,7 +205,7 @@ fn execute_in_transaction_rolls_back_on_panic() {
 /// (missing the non-null key, which our INSERT emits as NULL).
 #[test]
 fn failed_json_ingest_rolls_back_partial_inserts() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
 
     te.engine
         .execute_command("CREATE TABLE t (id INT NOT NULL, name TEXT)")
@@ -137,7 +225,7 @@ fn failed_json_ingest_rolls_back_partial_inserts() {
         target_db: None,
     };
 
-    let result = ingest_json(&te.engine, data, &opts);
+    let result = ingest_json(&mut te.engine, data, &opts);
     assert!(result.is_err(), "ingest should fail on NOT NULL violation");
 
     // Crucially: the first two rows must have been rolled back. If
@@ -154,7 +242,7 @@ fn failed_json_ingest_rolls_back_partial_inserts() {
 /// INSERTs atomically — no observable intermediate state.
 #[test]
 fn successful_replace_commits_atomically() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
 
     // Pre-populate the table with data that a replace-mode ingest should overwrite.
     te.engine
@@ -175,7 +263,7 @@ fn successful_replace_commits_atomically() {
         merge_key: None,
         target_db: None,
     };
-    let result = ingest_json(&te.engine, data, &opts).unwrap();
+    let result = ingest_json(&mut te.engine, data, &opts).unwrap();
     assert_eq!(result.rows, 2);
 
     let rows = query_resilient(&te.engine, "SELECT COUNT(*) as cnt FROM t");
@@ -196,15 +284,15 @@ fn successful_replace_commits_atomically() {
 /// at the engine level — the MCP handler is a thin wrapper around this.
 #[test]
 fn batched_upsert_inserts_when_row_missing() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     te.engine
         .execute_command("CREATE TABLE settings (key TEXT NOT NULL, value TEXT NOT NULL)")
         .unwrap();
 
     te.engine
-        .execute_in_transaction(|engine| {
-            engine.execute_command("UPDATE settings SET value = 'dark' WHERE key = 'theme'")?;
-            engine.execute_command(
+        .execute_in_transaction(|txn| {
+            txn.execute_command("UPDATE settings SET value = 'dark' WHERE key = 'theme'")?;
+            txn.execute_command(
                 "INSERT INTO settings (key, value) SELECT 'theme', 'dark' \
                  WHERE NOT EXISTS (SELECT 1 FROM settings WHERE key = 'theme')",
             )?;
@@ -219,7 +307,7 @@ fn batched_upsert_inserts_when_row_missing() {
 
 #[test]
 fn batched_upsert_updates_when_row_exists() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     te.engine
         .execute_command("CREATE TABLE settings (key TEXT NOT NULL, value TEXT NOT NULL)")
         .unwrap();
@@ -228,9 +316,9 @@ fn batched_upsert_updates_when_row_exists() {
         .unwrap();
 
     te.engine
-        .execute_in_transaction(|engine| {
-            engine.execute_command("UPDATE settings SET value = 'dark' WHERE key = 'theme'")?;
-            engine.execute_command(
+        .execute_in_transaction(|txn| {
+            txn.execute_command("UPDATE settings SET value = 'dark' WHERE key = 'theme'")?;
+            txn.execute_command(
                 "INSERT INTO settings (key, value) SELECT 'theme', 'dark' \
                  WHERE NOT EXISTS (SELECT 1 FROM settings WHERE key = 'theme')",
             )?;
@@ -255,7 +343,7 @@ fn batched_upsert_updates_when_row_exists() {
 /// one fails — leaving the table in a state the user never asked for.
 #[test]
 fn batched_multi_table_mutation_rolls_back_on_second_failure() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     te.engine
         .execute_command("CREATE TABLE orders (id INT NOT NULL, customer_id INT)")
         .unwrap();
@@ -267,14 +355,12 @@ fn batched_multi_table_mutation_rolls_back_on_second_failure() {
         .unwrap();
 
     use hyperdb_mcp::error::McpError;
-    let result: Result<(), McpError> = te.engine.execute_in_transaction(|engine| {
-        engine.execute_command("INSERT INTO orders (id, customer_id) VALUES (1001, 42)")?;
+    let result: Result<(), McpError> = te.engine.execute_in_transaction(|txn| {
+        txn.execute_command("INSERT INTO orders (id, customer_id) VALUES (1001, 42)")?;
         // This second statement violates NOT NULL on `id` because we
         // omit it — the entire batch must roll back.
-        engine.execute_command("INSERT INTO orders (customer_id) VALUES (42)")?;
-        engine.execute_command(
-            "UPDATE customers SET total_orders = total_orders + 2 WHERE id = 42",
-        )?;
+        txn.execute_command("INSERT INTO orders (customer_id) VALUES (42)")?;
+        txn.execute_command("UPDATE customers SET total_orders = total_orders + 2 WHERE id = 42")?;
         Ok(())
     });
     assert!(result.is_err(), "batch should fail on NOT NULL violation");
@@ -305,7 +391,7 @@ fn batched_multi_table_mutation_rolls_back_on_second_failure() {
 /// partially populated.
 #[test]
 fn failed_replace_leaves_empty_table_not_partial() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
 
     te.engine
         .execute_command("CREATE TABLE t (id INT, name TEXT)")
@@ -331,7 +417,7 @@ fn failed_replace_leaves_empty_table_not_partial() {
         target_db: None,
     };
 
-    let result = ingest_json(&te.engine, data, &opts);
+    let result = ingest_json(&mut te.engine, data, &opts);
     assert!(result.is_err(), "ingest should fail on type cast error");
 
     // The pre-failure INSERT was rolled back — the table exists but has

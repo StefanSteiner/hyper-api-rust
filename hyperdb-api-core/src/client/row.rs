@@ -42,7 +42,7 @@ use std::sync::Arc;
 use crate::protocol::message::backend::DataRowBody;
 use crate::types::FromHyperBinary;
 
-use super::error::{Error, ErrorKind, Result};
+use super::error::{Error, Result};
 use super::statement::Column;
 
 // =============================================================================
@@ -292,13 +292,13 @@ impl Row {
     ///
     /// # Errors
     ///
-    /// Returns [`ErrorKind::Query`] with the column name in the message
+    /// Returns [`Error::Query`] with the column name in the message
     /// if no column matches.
     pub fn column_index(&self, name: &str) -> Result<usize> {
         self.columns
             .iter()
             .position(|c| c.name() == name)
-            .ok_or_else(|| Error::new(ErrorKind::Query, format!("column not found: {name}")))
+            .ok_or_else(|| Error::query(format!("column not found: {name}")))
     }
 }
 

@@ -117,7 +117,7 @@ fn resolve_target_db_persistent_errors_in_ephemeral_only() {
 /// into the persistent attachment, not the primary.
 #[test]
 fn ingest_json_with_persistent_target_lands_in_persistent() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     let opts = IngestOptions {
         table: "persisted_data".into(),
         mode: "replace".into(),
@@ -126,7 +126,7 @@ fn ingest_json_with_persistent_target_lands_in_persistent() {
         target_db: Some("persistent".into()),
     };
     let data = r#"[{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]"#;
-    let result = ingest_json(&te.engine, data, &opts).unwrap();
+    let result = ingest_json(&mut te.engine, data, &opts).unwrap();
     assert_eq!(result.rows, 2);
 
     // Visible via fully-qualified SQL pointing at persistent.
@@ -153,7 +153,7 @@ fn ingest_json_with_persistent_target_lands_in_persistent() {
 /// FROM target table into the persistent attachment.
 #[test]
 fn ingest_csv_with_persistent_target_lands_in_persistent() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     let opts = IngestOptions {
         table: "csv_target".into(),
         mode: "replace".into(),
@@ -162,7 +162,7 @@ fn ingest_csv_with_persistent_target_lands_in_persistent() {
         target_db: Some("persistent".into()),
     };
     let data = "id,name\n1,Alice\n2,Bob\n";
-    let result = ingest_csv(&te.engine, data, &opts).unwrap();
+    let result = ingest_csv(&mut te.engine, data, &opts).unwrap();
     assert_eq!(result.rows, 2);
 
     let rows = te
@@ -181,7 +181,7 @@ fn ingest_to_persistent_survives_engine_recreate() {
     let path_str = path.to_str().unwrap().to_string();
 
     {
-        let engine = Engine::new_no_daemon(Some(path_str.clone())).unwrap();
+        let mut engine = Engine::new_no_daemon(Some(path_str.clone())).unwrap();
         let opts = IngestOptions {
             table: "library".into(),
             mode: "replace".into(),
@@ -190,7 +190,7 @@ fn ingest_to_persistent_survives_engine_recreate() {
             target_db: Some("persistent".into()),
         };
         let data = r#"[{"id": 1, "title": "Dune"}]"#;
-        ingest_json(&engine, data, &opts).unwrap();
+        ingest_json(&mut engine, data, &opts).unwrap();
     }
 
     // Reopen and verify the table is still there.
@@ -206,7 +206,7 @@ fn ingest_to_persistent_survives_engine_recreate() {
 /// (ephemeral) database — backward-compat invariant.
 #[test]
 fn ingest_with_no_target_db_lands_in_primary() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     let opts = IngestOptions {
         table: "scratch".into(),
         mode: "replace".into(),
@@ -215,7 +215,7 @@ fn ingest_with_no_target_db_lands_in_primary() {
         target_db: None,
     };
     let data = r#"[{"x": 1}]"#;
-    ingest_json(&te.engine, data, &opts).unwrap();
+    ingest_json(&mut te.engine, data, &opts).unwrap();
 
     // Visible as unqualified table in the primary.
     let rows = te
@@ -295,7 +295,7 @@ fn describe_table_in_unknown_returns_table_not_found() {
 /// persistent table.
 #[test]
 fn sample_table_in_persistent_returns_rows() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     let opts = IngestOptions {
         table: "samples".into(),
         mode: "replace".into(),
@@ -303,7 +303,12 @@ fn sample_table_in_persistent_returns_rows() {
         merge_key: None,
         target_db: Some("persistent".into()),
     };
-    ingest_json(&te.engine, r#"[{"id": 1}, {"id": 2}, {"id": 3}]"#, &opts).unwrap();
+    ingest_json(
+        &mut te.engine,
+        r#"[{"id": 1}, {"id": 2}, {"id": 3}]"#,
+        &opts,
+    )
+    .unwrap();
 
     let sample = te
         .engine
@@ -363,6 +368,110 @@ fn scoped_search_path_redirects_and_restores() {
     assert_eq!(rows.len(), 2, "search path restored to primary (2 rows)");
 }
 
+/// Builds the same two-database fixture `scoped_search_path_redirects_and_restores`
+/// uses: `persistent.public.t` holds one row, primary `t` holds two.
+fn two_db_fixture() -> TestEngine {
+    let te = TestEngine::new_ephemeral();
+    te.engine
+        .execute_command("CREATE TABLE \"persistent\".\"public\".\"t\" (x INT)")
+        .unwrap();
+    te.engine
+        .execute_command("INSERT INTO \"persistent\".\"public\".\"t\" VALUES (42)")
+        .unwrap();
+    te.engine.execute_command("CREATE TABLE t (x INT)").unwrap();
+    te.engine
+        .execute_command("INSERT INTO t VALUES (1), (2)")
+        .unwrap();
+    te
+}
+
+fn unqualified_t_row_count(te: &TestEngine) -> usize {
+    te.engine
+        .execute_query_to_json("SELECT * FROM t ORDER BY x")
+        .unwrap()
+        .len()
+}
+
+/// `with_search_path` is the closure form used by the transactional paths,
+/// where `ScopedSearchPath`'s immutable borrow of the engine would block
+/// the transaction guard. It must redirect and restore exactly like the
+/// guard does — including when the closure fails or panics, which is the
+/// part a plain "set, call, restore" sequence would get wrong.
+#[test]
+fn with_search_path_redirects_and_restores_on_success() {
+    let mut te = two_db_fixture();
+
+    let seen = te
+        .engine
+        .with_search_path(Some("persistent"), |engine| {
+            Ok(engine
+                .execute_query_to_json("SELECT * FROM t ORDER BY x")
+                .unwrap()
+                .len())
+        })
+        .unwrap();
+
+    assert_eq!(seen, 1, "inside the scope, `t` resolves to persistent");
+    assert_eq!(
+        unqualified_t_row_count(&te),
+        2,
+        "search path restored to primary"
+    );
+}
+
+#[test]
+fn with_search_path_restores_after_closure_error() {
+    use hyperdb_mcp::error::{ErrorCode, McpError};
+    let mut te = two_db_fixture();
+
+    let result: Result<(), McpError> = te.engine.with_search_path(Some("persistent"), |_| {
+        Err(McpError::new(ErrorCode::InternalError, "simulated failure"))
+    });
+    assert!(result.is_err());
+
+    assert_eq!(
+        unqualified_t_row_count(&te),
+        2,
+        "search path restored even though the closure failed"
+    );
+}
+
+#[test]
+fn with_search_path_restores_after_closure_panic() {
+    let mut te = two_db_fixture();
+
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        te.engine
+            .with_search_path::<_, ()>(Some("persistent"), |_| panic!("simulated closure bug"))
+    }));
+    assert!(outcome.is_err(), "panic should propagate out");
+
+    assert_eq!(
+        unqualified_t_row_count(&te),
+        2,
+        "search path restored while unwinding from the panic"
+    );
+}
+
+/// `None` is the no-routing case every unqualified tool call takes: the
+/// closure runs with the primary still selected and no `SET` is issued.
+#[test]
+fn with_search_path_none_leaves_primary_selected() {
+    let mut te = two_db_fixture();
+
+    let seen = te
+        .engine
+        .with_search_path(None, |engine| {
+            Ok(engine
+                .execute_query_to_json("SELECT * FROM t ORDER BY x")
+                .unwrap()
+                .len())
+        })
+        .unwrap();
+
+    assert_eq!(seen, 2, "no alias means the primary stays selected");
+}
+
 // --- Case-insensitive PERSISTENT_ALIAS matching ----------------------------
 
 /// `"Persistent"`, `"PERSISTENT"`, `"persistent"` all resolve to the
@@ -402,7 +511,7 @@ fn resolve_target_db_persistent_uppercase_errors_in_ephemeral_only() {
 /// works against a non-primary database.
 #[test]
 fn merge_into_persistent_creates_table_when_missing() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     let opts = IngestOptions {
         table: "merged_persist".into(),
         mode: "merge".into(),
@@ -411,7 +520,7 @@ fn merge_into_persistent_creates_table_when_missing() {
         target_db: Some("persistent".into()),
     };
     let data = r#"[{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]"#;
-    let result = ingest_json(&te.engine, data, &opts).unwrap();
+    let result = ingest_json(&mut te.engine, data, &opts).unwrap();
     assert_eq!(result.rows, 2);
     assert!(
         result.stats.schema_changed,
@@ -432,7 +541,7 @@ fn merge_into_persistent_creates_table_when_missing() {
 /// matching rows are replaced, unmatched rows are appended.
 #[test]
 fn merge_into_persistent_replaces_matching_and_appends_new() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     // Seed target with two rows.
     let seed_opts = IngestOptions {
         table: "merge_target".into(),
@@ -442,7 +551,7 @@ fn merge_into_persistent_replaces_matching_and_appends_new() {
         target_db: Some("persistent".into()),
     };
     ingest_json(
-        &te.engine,
+        &mut te.engine,
         r#"[{"id": 1, "name": "old1"}, {"id": 2, "name": "old2"}]"#,
         &seed_opts,
     )
@@ -457,7 +566,7 @@ fn merge_into_persistent_replaces_matching_and_appends_new() {
         target_db: Some("persistent".into()),
     };
     let result = ingest_json(
-        &te.engine,
+        &mut te.engine,
         r#"[{"id": 1, "name": "new1"}, {"id": 3, "name": "new3"}]"#,
         &merge_opts,
     )
@@ -481,7 +590,7 @@ fn merge_into_persistent_replaces_matching_and_appends_new() {
 /// shows up in the post-merge schema with NULL for pre-existing rows.
 #[test]
 fn merge_into_persistent_alters_when_incoming_has_new_column() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     let seed_opts = IngestOptions {
         table: "widens".into(),
         mode: "replace".into(),
@@ -489,7 +598,12 @@ fn merge_into_persistent_alters_when_incoming_has_new_column() {
         merge_key: None,
         target_db: Some("persistent".into()),
     };
-    ingest_json(&te.engine, r#"[{"id": 1, "name": "Alice"}]"#, &seed_opts).unwrap();
+    ingest_json(
+        &mut te.engine,
+        r#"[{"id": 1, "name": "Alice"}]"#,
+        &seed_opts,
+    )
+    .unwrap();
 
     let merge_opts = IngestOptions {
         table: "widens".into(),
@@ -499,7 +613,7 @@ fn merge_into_persistent_alters_when_incoming_has_new_column() {
         target_db: Some("persistent".into()),
     };
     let result = ingest_json(
-        &te.engine,
+        &mut te.engine,
         r#"[{"id": 2, "name": "Bob", "email": "bob@x.com"}]"#,
         &merge_opts,
     )

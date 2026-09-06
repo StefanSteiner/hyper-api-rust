@@ -29,6 +29,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **BREAKING:** `client::Error` is now a flat enum — one
+  variant per failure mode, matched directly — rather than a struct with a
+  `kind` discriminator and a `Box<dyn StdError>` cause channel
+  ([#75](https://github.com/tableau/hyper-api-rust/issues/75)). This applies
+  the shape `hyperdb_api::Error` already adopted in
+  [#70](https://github.com/tableau/hyper-api-rust/issues/70) per the
+  [Microsoft Pragmatic Rust Guidelines](https://microsoft.github.io/rust-guidelines/)
+  (M-ERRORS-CANONICAL-STRUCTS, M-ERRORS-AVOID-WRAPPING-AND-AS-DYN).
+
+  **No effect on `hyperdb-api`'s public API** — `client::Error` and
+  `client::ErrorKind` were never re-exported from it, and this crate is
+  documented above as internal.
+
+  - `client::ErrorKind` is **removed**, along with `Error::kind()`,
+    `Error::new()`, `Error::with_cause()`, and `Error::new_with_details()`.
+  - Every variant has a snake_case constructor taking `impl Into<String>`:
+    `connection`, `authentication`, `query`, `protocol`, `io`, `config`,
+    `timeout`, `cancelled`, `closed`, `conversion`, `feature_not_supported`,
+    `other`. `Error::closed()` and `Error::timeout()` previously took no
+    arguments and supplied a canned message; they now take one.
+  - `Error::io(err: io::Error)` became `Error::from_io(err: io::Error)`, so
+    the name `io` could be the message-taking constructor like its peers.
+    `impl From<io::Error>` is unchanged.
+  - `Connection`, `Cancelled`, and `Closed` carry `{ message, sqlstate }`;
+    `Query` carries `{ message, sqlstate, detail, hint }`. Those are exactly
+    the variants that could hold a SQLSTATE before, so `sqlstate()`,
+    `detail()`, `hint()`, and `message()` return what they used to **on
+    those variants**.
+  - The enum is deliberately **not** `#[non_exhaustive]`, unlike the public
+    `hyperdb_api::Error`. This type is internal with a single in-workspace
+    consumer, so it gains nothing from forward-compatible matching, while
+    staying exhaustive keeps the compile-time check on
+    `From<client::Error> for hyperdb_api::Error` — a new variant must be
+    given a deliberate public mapping instead of silently degrading to
+    `Error::Internal`.
+  - **Narrower diagnostics on four variants.** `Authentication`,
+    `FeatureNotSupported`, `Timeout`, and `Other` are single-string, so the
+    gRPC error path folds any server `detail` into the message and
+    **discards `hint` and `sqlstate`** on those four; the old
+    `new_with_details` stored all three regardless of kind. No caller
+    observes the loss — the public `hyperdb_api::Error` mapping already
+    discarded `hint` and `sqlstate` on the arms these feed — but the stored
+    data is genuinely narrower, not merely reshaped.
+  - `Error::with_cause` had no call sites, so dropping the `Box<dyn>` channel
+    loses no information. `source()` now returns `None` for I/O errors; the
+    public `hyperdb_api::Error` mapping already discarded that cause.
 - The all-binary `Bind` path now sends a **single** parameter format code
   rather than one per parameter. The PostgreSQL protocol broadcasts a lone
   format code across every parameter, so this is wire-compatible and drops the
@@ -55,6 +101,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   direct dependencies.
 
 ### Fixed
+
+- An `Error` built from an `io::Error` no longer renders its message twice.
+  `Error::io` stored the same text as both `message` and `cause`, and
+  `Display` printed both, so an I/O failure surfaced as `"refused: refused"`.
+  Dropping the cause channel removed the duplication.
+
+  This **changes the `Display` text** of I/O-origin connection errors, and
+  those reach the public `hyperdb_api::Error` (its `Connection` variant is
+  built from this message). The new text is the intended one, but anything
+  matching on the error *string* rather than the variant will see
+  `"refused"` where it saw `"refused: refused"`.
 
 - **`AuthenticatedGrpcClient::get_table_labels` and `get_column_labels` now
   report Arrow failures instead of returning a partial map.** Both iterated

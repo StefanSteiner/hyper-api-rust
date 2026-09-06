@@ -102,8 +102,7 @@ where
     /// connection before any bytes hit the wire.
     pub(crate) fn ensure_healthy(&self) -> Result<()> {
         if self.desynchronized {
-            return Err(Error::new(
-                super::error::ErrorKind::Connection,
+            return Err(Error::connection(
                 "connection is desynchronized from the server and cannot be reused; \
                  discard it and open a new one",
             ));
@@ -526,7 +525,7 @@ where
     ///   (server closed the connection).
     pub async fn read_message(&mut self) -> Result<Message> {
         loop {
-            if let Some(msg) = Message::parse(&mut self.read_buf).map_err(Error::io)? {
+            if let Some(msg) = Message::parse(&mut self.read_buf).map_err(Error::from_io)? {
                 return Ok(msg);
             }
 
@@ -542,7 +541,7 @@ where
             if n == 0 {
                 self.read_buf.truncate(prev_len);
                 warn!(target: "hyperdb_api", "connection-closed");
-                return Err(Error::closed());
+                return Err(Error::closed("connection closed"));
             }
             self.read_buf.truncate(prev_len + n);
         }

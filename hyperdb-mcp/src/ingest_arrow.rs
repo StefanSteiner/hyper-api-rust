@@ -351,12 +351,12 @@ async fn count_rows_async(conn: &AsyncConnection, table: &str) -> Result<u64, Mc
 /// - Propagates any error from the post-ingest `COUNT(*)` in
 ///   `count_rows_sync` when running in replace mode.
 pub fn ingest_parquet_file(
-    engine: &Engine,
+    engine: &mut Engine,
     path: &str,
     opts: &IngestOptions,
 ) -> Result<IngestResult, McpError> {
     if opts.mode == "merge" {
-        return crate::ingest::merge_via_temp_table(engine, opts, |tmp_opts| {
+        return crate::ingest::merge_via_temp_table(engine, opts, |engine, tmp_opts| {
             ingest_parquet_file(engine, path, tmp_opts)
         });
     }
@@ -383,12 +383,12 @@ pub fn ingest_parquet_file(
     // (Hyper treats all DDL that way), so wrapping it in `execute_in_transaction`
     // no longer buys us rollback — but it still gives us a clean error
     // path that runs the transaction prelude + drops if needed.
-    let affected = engine.execute_in_transaction(|engine| {
+    let affected = engine.execute_in_transaction(|txn| {
         if is_replace {
             let qualified = crate::ingest::qualified_table(opts);
-            engine.execute_command(&format!("DROP TABLE IF EXISTS {qualified}"))?;
+            txn.execute_command(&format!("DROP TABLE IF EXISTS {qualified}"))?;
         }
-        engine.execute_command(&sql)
+        txn.execute_command(&sql)
     })?;
 
     // Row count: `CREATE TABLE AS` reports 0 affected, so for replace mode
@@ -653,12 +653,12 @@ fn read_arrow_ipc_file(path: &str) -> Result<(Vec<ColumnSchema>, Vec<RecordBatch
 ///   from [`hyperdb_api::ArrowInserter`] operations (COPY setup, batch
 ///   insert, or execute).
 pub fn ingest_arrow_ipc_file(
-    engine: &Engine,
+    engine: &mut Engine,
     path: &str,
     opts: &IngestOptions,
 ) -> Result<IngestResult, McpError> {
     if opts.mode == "merge" {
-        return crate::ingest::merge_via_temp_table(engine, opts, |tmp_opts| {
+        return crate::ingest::merge_via_temp_table(engine, opts, |engine, tmp_opts| {
             ingest_arrow_ipc_file(engine, path, tmp_opts)
         });
     }
@@ -679,25 +679,25 @@ pub fn ingest_arrow_ipc_file(
     let is_replace = opts.mode != "append";
     // Arrow IPC uses the binary COPY protocol which resolves table names via
     // the search path. When targeting a non-primary database, temporarily
-    // redirect the search path for the duration of the transaction.
-    let _search_guard = if let Some(ref db) = opts.target_db {
-        Some(engine.scoped_search_path(db)?)
-    } else {
-        None
-    };
-    let row_count = engine.execute_in_transaction(|engine| {
-        engine.create_table_in(&opts.table, &columns, is_replace, opts.target_db.as_deref())?;
+    // redirect the search path for the duration of the transaction. The
+    // closure form rather than the `ScopedSearchPath` guard because the
+    // transaction below needs `&mut Engine`, which the guard's immutable
+    // borrow would block.
+    let row_count = engine.with_search_path(opts.target_db.as_deref(), |engine| {
+        engine.execute_in_transaction(|txn| {
+            txn.create_table_in(&opts.table, &columns, is_replace, opts.target_db.as_deref())?;
 
-        // Stream RecordBatches through the binary COPY protocol. Each
-        // batch is written to an IPC Stream segment internally — no
-        // text encoding, no per-row SQL.
-        let mut inserter =
-            hyperdb_api::ArrowInserter::from_table(engine.connection(), opts.table.as_str())
+            // Stream RecordBatches through the binary COPY protocol. Each
+            // batch is written to an IPC Stream segment internally — no
+            // text encoding, no per-row SQL.
+            let mut inserter =
+                hyperdb_api::ArrowInserter::from_table(txn.connection(), opts.table.as_str())
+                    .map_err(McpError::from)?;
+            inserter
+                .insert_batches(batches.iter())
                 .map_err(McpError::from)?;
-        inserter
-            .insert_batches(batches.iter())
-            .map_err(McpError::from)?;
-        inserter.execute().map_err(McpError::from)
+            inserter.execute().map_err(McpError::from)
+        })
     })?;
 
     let elapsed = timer.elapsed_ms();

@@ -19,7 +19,7 @@ The public `hyperdb_api::Error` type was redesigned into a flat enum per the [Mi
 | `Error::new(msg)`                    | Constructor deleted. Use a specific variant or `Error::internal(msg)` (see below). |
 | `Error::with_cause(msg, e)`          | Constructor deleted. For an `io::Error` cause use `Error::connection_with_io(msg, e)`; otherwise fold the cause into a message string. |
 | `Error::kind() -> Option<ErrorKind>` | Method deleted. Match directly on the enum. |
-| `pub use ... ErrorKind` from `hyperdb_api`              | Re-export removed. The `ErrorKind` type is internal to `hyperdb-api-core` and not part of `hyperdb-api`'s public surface. |
+| `pub use ... ErrorKind` from `hyperdb_api`              | Re-export removed, and the type itself is gone: `hyperdb-api-core`'s internal `client::Error` was later flattened the same way, so there is no `ErrorKind` anywhere in the workspace. |
 
 ### What's new
 
@@ -184,7 +184,8 @@ if let Error::Server { sqlstate: Some(code), detail, hint, .. } = &err {
 
 ### Notes for downstream crate authors
 
-- The `From<hyperdb_api_core::client::Error> for hyperdb_api::Error` impl is exhaustive over `client::ErrorKind`. Adding a kind to `client::Error` will break this build until a mapping is added. This is intended.
+- The `From<hyperdb_api_core::client::Error> for hyperdb_api::Error` impl is a variant-to-variant match: `client::Error` is a flat enum too ([#75](https://github.com/tableau/hyper-api-rust/issues/75)). Unlike the public enum it feeds, `client::Error` is deliberately **not** `#[non_exhaustive]`, so that match has no wildcard arm and stays exhaustive.
+  A variant added upstream therefore breaks this build until it is given a deliberate public mapping, rather than silently degrading to `Error::Internal`. That check is the reason for the asymmetry: `client::Error` is internal and has exactly one consumer, shipped from the same workspace, so it gains nothing from forward-compatibility and would lose the compiler's help where it matters most.
 - `Error::Connection { source }` carries an `Option<std::io::Error>`. The wire-protocol layer in `hyperdb-api-core` does not preserve typed causes through its boundary, so `source` is `None` for errors that originated there. Direct callers in `hyperdb-api` who construct `Error::connection_with_io` *do* preserve the typed source.
 - The `Error::Internal { .. }` variant is a deliberate catch-all for invariant violations. New code should reach for a domain variant first.
 
@@ -252,7 +253,13 @@ Callers that hold a pooled connection (`deadpool::managed::Object<ConnectionMana
 
 ### MCP follow-up
 
-The MCP server's `Engine::execute_in_transaction` helper takes `&self` and so cannot use the RAII guard. It retains the deprecated raw methods with a function-level `#[allow(deprecated, reason = "...")]` annotation. Migrating it requires reshaping `Engine`'s locking model. Two structural paths and an acceptance-criteria checklist are written up in [issue #72](https://github.com/tableau/hyper-api-rust/issues/72).
+The MCP server's `Engine::execute_in_transaction` helper originally took `&self` and so could not use the RAII guard. [Issue #72](https://github.com/tableau/hyper-api-rust/issues/72) closed that gap: the helper now takes `&mut self`, holds a `Transaction`, and hands its closure an `EngineTransaction` view instead of `&Engine`.
+
+Two in-tree holdouts remain, both by design rather than oversight — they are the `&self` helpers the `*_unguarded` methods were added for:
+
+- **`KvStore`** (`kv_store.rs`, in `pop`, `set_batch`, `set_batch_if_absent`) holds `connection: &'conn Connection`, a *shared* reference. `Connection::transaction()` needs `&mut self`, so adopting the guard would mean threading `&mut` out through `Connection::kv_store()` — a public breaking change that would also stop callers from opening two stores at once.
+  These paths do pair every begin with a commit or a best-effort rollback, so the obligation is discharged on the `Ok` and `Err` paths; a **panic** between them would leak an open transaction.
+- **`AsyncKvStore`** (`async_kv_store.rs`, same three operations) has the same shape and additionally cannot be rescued by a guard at all: Rust has no async `Drop`, which is why `AsyncTransaction`'s own `Drop` only warns. A future cancelled between the begin and the commit leaves the transaction open until the next command on that connection — the cancellation hazard described above, unmitigated.
 
 ---
 

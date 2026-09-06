@@ -287,7 +287,7 @@ impl From<hyperdb_api::Error> for McpError {
 ///    `POST_ERROR_DRAIN_CAP` budget without reaching `ReadyForQuery` or
 ///    hits an I/O error mid-drain. Subsequent operations on that
 ///    connection fast-fail with an
-///    `ErrorKind::Connection` whose message contains `"desynchronized"`.
+///    `Error::Connection` whose message contains `"desynchronized"`.
 ///    The socket is technically still open but the wire state is corrupt
 ///    and the only valid recovery is the same as #1: discard the
 ///    connection and reconnect. Recognizing the signal here is what

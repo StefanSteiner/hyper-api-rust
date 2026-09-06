@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 
 use bytes::{Bytes, BytesMut};
 
-use crate::client::error::{Error, ErrorKind, Result};
+use crate::client::error::{Error, Result};
 
 use super::proto::{QueryResultSchema, SqlType};
 
@@ -304,18 +304,14 @@ pub(super) fn sql_type_to_hyper_type(sql_type: &SqlType) -> Result<crate::types:
     use super::proto::hyper_service::sql_type::{Modifier, TypeTag};
     use crate::types::SqlType as HyperSqlType;
 
-    let tag = TypeTag::try_from(sql_type.tag).map_err(|_| {
-        Error::new(
-            ErrorKind::Conversion,
-            format!("Unknown SQL type tag: {}", sql_type.tag),
-        )
-    })?;
+    let tag = TypeTag::try_from(sql_type.tag)
+        .map_err(|_| Error::conversion(format!("Unknown SQL type tag: {}", sql_type.tag)))?;
 
     // Extract modifier for types that need it
     let modifier = &sql_type.modifier;
 
     match tag {
-        TypeTag::HyperUnspecified => Err(Error::new(ErrorKind::Conversion, "Unspecified SQL type")),
+        TypeTag::HyperUnspecified => Err(Error::conversion("Unspecified SQL type")),
         TypeTag::HyperBool => Ok(HyperSqlType::Bool),
         TypeTag::HyperSmallInt => Ok(HyperSqlType::SmallInt),
         TypeTag::HyperInt => Ok(HyperSqlType::Int),
@@ -356,10 +352,7 @@ pub(super) fn sql_type_to_hyper_type(sql_type: &SqlType) -> Result<crate::types:
         TypeTag::HyperGeography => Ok(HyperSqlType::Geography),
         TypeTag::HyperArrayOfFloat => {
             // Array types are not directly supported in crate::types::SqlType
-            Err(Error::new(
-                ErrorKind::Conversion,
-                "Array types not yet supported",
-            ))
+            Err(Error::conversion("Array types not yet supported"))
         }
     }
 }
