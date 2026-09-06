@@ -232,6 +232,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `daemon status --port` now probes that exact health port, discovered-daemon
   error reports target the effective health port, and best-effort health I/O
   no longer retains the engine mutex.
+- **Health-listener connections could be torn down before the client sent its
+  first byte, on macOS and other BSD-derived kernels.** `HealthListener::bind`
+  puts the listening socket in non-blocking mode so its accept loop can poll
+  for shutdown; on BSD kernels (unlike Linux) `accept()` propagates that
+  `O_NONBLOCK` flag to the accepted socket, so the connection handler's first
+  `read_line` returned `WouldBlock` in microseconds and closed the connection
+  before a client had a chance to write a command. Liveness checks, restart
+  reporting, and heartbeats all depend on this connection surviving long
+  enough to receive one line, so accepted connections are now explicitly
+  forced back into blocking mode.
 - **Attachment contention is actionable for persistent *and* user attaches.**
   A lock conflict (SQLSTATE `55006`, or a legacy "already attached" / "file is
   locked" phrase from older hyperd) now returns `RESOURCE_BUSY` with the
@@ -345,6 +355,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   from an integer cast. No behavior change; `#[expect]` (vs `#[allow]`) also
   means the suppression itself is now checked for staying necessary. Part of
   [issue #277](https://github.com/tableau/hyper-api-rust/issues/277).
+- **A panicking tool call no longer bricks the server for the rest of the
+  process's lifetime.** `with_engine` holds a `std::sync::MutexGuard` across
+  the tool closure it invokes; a panic propagating out of that closure dropped
+  the guard mid-unwind and poisoned the engine mutex, and every subsequent
+  tool call then failed with `InternalError "Lock poisoned"` until the process
+  restarted. The engine lock now recovers from poisoning the same way it
+  already recovers from `ConnectionLost`: it discards the (possibly
+  mid-mutation) `Engine` behind the poisoned guard, clears the poison flag,
+  and rebuilds a fresh engine on the next call — never reusing a value a panic
+  may have left in a broken state.
+
+  Recovery runs at every site that locks the engine, not just the one the
+  panic came through, because the server hands the same handle to background
+  watchers via `engine_handle()`. A watcher's connection-lost pool rebuild
+  previously failed with `InternalError "Engine lock poisoned"` and its
+  `_table_catalog` bookkeeping was silently skipped until some unrelated tool
+  call happened to clear the flag — indefinitely, for an unattended ingest
+  where no tool call may arrive. A watcher now sees the recovered (empty)
+  engine slot and returns its transient, retryable "Engine not initialized"
+  error instead. The engine-construction single-flight lock recovers too, so a
+  panic during `Engine::new`, attachment replay, or the internal
+  `debug_assert!` cannot re-brick the server through a second mutex.
+
+  `status`, which reads the engine with `try_lock` so it never waits behind a
+  slow data-plane call, no longer reports a poisoned mutex as contention. It
+  previously answered `engine_busy: true` — whose description tells the client
+  to retry later — permanently after a panic, with no call in flight and no
+  way for the flag to clear itself. It now recovers and reports the empty
+  engine as degraded, which is the same shape of answer but an honest one.
+
+  **Recovery destroys the session's ephemeral tables.** Discarding the
+  `Engine` runs its `Drop`, which deletes the temp directory holding the
+  ephemeral primary database, so every table loaded without `persist: true` is
+  lost and the rebuilt engine starts empty. Attached databases survive —
+  they are replayed onto the new engine and `persistent` is re-attached. This
+  is a deliberate trade rather than an oversight: an `Engine` a panic caught
+  mid-mutation cannot be trusted, and handing it back out silently is worse
+  than losing scratch tables. Load with `persist: true` if data must survive a
+  panicking tool call. Fixes
+  [issue #266](https://github.com/tableau/hyper-api-rust/issues/266).
 
 ## [0.5.0] - 2026-06-07
 

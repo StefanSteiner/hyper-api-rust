@@ -132,9 +132,12 @@ fn build_watcher_pool(
     target_db: Option<&str>,
     concurrency: usize,
 ) -> Result<Arc<Pool>, McpError> {
-    let guard = engine
-        .lock()
-        .map_err(|_| McpError::new(ErrorCode::InternalError, "Engine lock poisoned"))?;
+    // Recover a mutex poisoned by a panicking tool call instead of failing
+    // permanently: this `Arc` is shared with the server, so a panic there
+    // would otherwise wedge every watcher rebuild until an unrelated tool
+    // call happened to clear the flag (#266). Recovery empties the slot, so
+    // we fall into the transient, retryable "not initialized" error below.
+    let guard = crate::engine::lock_engine_recovering_poison(engine);
     let eng = guard.as_ref().ok_or_else(|| {
         McpError::new(
             ErrorCode::InternalError,
@@ -870,25 +873,34 @@ async fn process_ready_with_recovery(
                 "database": target_db.unwrap_or("local"),
             }))
             .ok();
-            if let Ok(guard) = engine.lock()
-                && let Some(eng) = guard.as_ref()
-                && let Err(e) = crate::table_catalog::upsert_stub_in(
-                    eng,
-                    table,
-                    "watch_directory",
-                    load_params.as_deref(),
-                    Some(row_count_i64),
-                    true,
-                    target_db,
-                    None,
-                )
+            // Recover a poisoned mutex here too (see `build_watcher_pool`):
+            // the pre-#266 `if let Ok(guard)` silently skipped this
+            // bookkeeping for every subsequent file once a tool call
+            // panicked. A recovered slot is `None`, which falls through to
+            // the same best-effort warn as any other upsert failure. The
+            // block keeps the engine lock held only for the upsert, not for
+            // the subscription notifications below.
             {
-                tracing::warn!(
-                    table = %table,
-                    target_db = ?target_db,
-                    err = %e.message,
-                    "watcher: failed to update _table_catalog after ingest"
-                );
+                let guard = crate::engine::lock_engine_recovering_poison(engine);
+                if let Some(eng) = guard.as_ref()
+                    && let Err(e) = crate::table_catalog::upsert_stub_in(
+                        eng,
+                        table,
+                        "watch_directory",
+                        load_params.as_deref(),
+                        Some(row_count_i64),
+                        true,
+                        target_db,
+                        None,
+                    )
+                {
+                    tracing::warn!(
+                        table = %table,
+                        target_db = ?target_db,
+                        err = %e.message,
+                        "watcher: failed to update _table_catalog after ingest"
+                    );
+                }
             }
             if let Some(subs) = subscriptions {
                 for uri in uris_for_table_change(table) {
@@ -961,6 +973,53 @@ mod tests {
             }
             .resolved_concurrency(),
             MAX_CONCURRENT_LIMIT
+        );
+    }
+
+    /// Regression test for the watcher half of
+    /// [issue #266](https://github.com/tableau/hyper-api-rust/issues/266):
+    /// the watcher shares the server's engine `Arc` via
+    /// `HyperMcpServer::engine_handle`, so a panic in a *tool call* poisons
+    /// the very mutex the watcher locks. Mapping that to `InternalError
+    /// "Engine lock poisoned"` left a watcher's connection-lost pool rebuild
+    /// permanently broken until some unrelated tool call happened to clear
+    /// the flag — and unattended ingest is exactly the scenario where no
+    /// tool call may arrive for a long time.
+    ///
+    /// Recovery empties the slot, so the caller gets the pre-existing
+    /// "not initialized" error instead, which is transient and retryable.
+    ///
+    /// Poisoning a slot that is already `None` is sufficient and keeps this
+    /// a unit test: recovery discards the `Engine` either way, so the branch
+    /// under test is identical, and no live `hyperd` is needed.
+    #[test]
+    fn build_watcher_pool_recovers_from_a_poisoned_engine_mutex() {
+        let engine: Arc<Mutex<Option<Engine>>> = Arc::new(Mutex::new(None));
+
+        let outcome = std::panic::catch_unwind({
+            let engine = Arc::clone(&engine);
+            move || {
+                let _guard = engine.lock().expect("engine mutex is fresh");
+                panic!("simulated tool handler bug while holding the engine lock");
+            }
+        });
+        assert!(outcome.is_err(), "panic should propagate");
+        assert!(
+            engine.is_poisoned(),
+            "the panic must have poisoned the shared engine mutex, otherwise \
+             this test is not exercising the defect at all"
+        );
+
+        let err = build_watcher_pool(&engine, None, None, 1)
+            .expect_err("an empty engine slot cannot yield a pool");
+        assert_eq!(
+            err.message, "Engine not initialized when watcher pool requested",
+            "a poisoned mutex must surface the transient, retryable \
+             'not initialized' error, never a permanent poison error"
+        );
+        assert!(
+            !engine.is_poisoned(),
+            "recovery must clear the poison flag so later locks succeed"
         );
     }
 }

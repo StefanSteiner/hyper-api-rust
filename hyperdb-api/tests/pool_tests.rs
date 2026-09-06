@@ -9,8 +9,8 @@
 
 mod common;
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::{test_hyper_params, test_result_path};
@@ -214,6 +214,198 @@ async fn async_pool_idle_timeout_retires_connection() {
         sid1,
         async_session_id(&conn2).await,
         "connection past idle_timeout must be replaced"
+    );
+}
+
+/// Regression test for [issue #263](https://github.com/tableau/hyper-api-rust/issues/263):
+/// a connection returned to the pool with an open transaction (left by a
+/// panicked or cancelled task holding an `AsyncTransaction`) must not be
+/// handed to the next borrower still mid-transaction.
+///
+/// `AsyncTransaction::drop` cannot issue an async `ROLLBACK` (Rust has no
+/// async `Drop`), so it only warns when dropped without an explicit
+/// `commit()`/`rollback()` — exactly what happens when the task holding the
+/// guard panics, mirroring the real call sites in `ingest.rs` /
+/// `ingest_arrow.rs`, which already catch the `tokio::spawn` join error and
+/// continue rather than propagating a panic.
+///
+/// `max_size(1)` caps the pool at one physical connection at a time, but it
+/// does **not** by itself prove the fix: deadpool evicts and builds a
+/// replacement on any `RecycleError`, and a fresh session cannot see another
+/// session's uncommitted row, so the `count == 0` assertion below would pass
+/// even if the connection had merely been replaced. The
+/// [`async_session_id`] comparison is what pins the causal mechanism —
+/// identical session ids mean the *same physical connection* was recycled,
+/// so `ConnectionManager::recycle` is what discharged the transaction.
+///
+/// That comparison also covers the cost premise of the fix, which nothing
+/// else in this file does: it is the only assertion that `ROLLBACK` *itself
+/// succeeds* on a recycled connection. (`async_pool_recycle_ping_strategy_works`
+/// uses `Ping`, `async_pool_custom_recycle_failure_replaces_connection` uses
+/// `Custom`, and the `max_lifetime` / `idle_timeout` tests return early from
+/// `recycle` before the probe runs.) If the probe ever began erroring on an
+/// idle connection, the pool would silently rebuild on *every* checkout — a
+/// throughput cliff — and `assert_eq!` on the session id is what fails.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn async_pool_recycle_discharges_transaction_left_open_by_panicked_task() {
+    let (_hyper, endpoint) = fresh_server("pool_async_txn_leak").unwrap();
+    let config = PoolConfig::new(&endpoint, db_path("pool_async_txn_leak"))
+        .create_mode(CreateMode::CreateAndReplace)
+        .max_size(1);
+    let pool = create_pool(config).unwrap();
+
+    {
+        let conn = pool.get().await.expect("setup checkout");
+        conn.execute_command("CREATE TABLE leaked (v INT)")
+            .await
+            .unwrap();
+    }
+
+    // Simulate the defect: BEGIN, write a row, then panic before
+    // commit/rollback. The `AsyncTransaction` guard's `Drop` only warns; the
+    // transaction is still open on the physical connection when the pooled
+    // guard (`conn`) is itself dropped during the same unwind and returns
+    // that connection to deadpool's idle set.
+    //
+    // The `leaked_sid` slot publishes the panicking task's session id so the
+    // assertion below can prove the next checkout got that same physical
+    // connection back.
+    let leaked_sid = Arc::new(Mutex::new(None));
+    let pool_for_task = pool.clone();
+    let sid_slot = Arc::clone(&leaked_sid);
+    let join_result = tokio::spawn(async move {
+        let mut conn = pool_for_task.get().await.expect("panic-task checkout");
+        let sid = async_session_id(&conn).await;
+        *sid_slot.lock().expect("session-id slot") = Some(sid);
+        let txn = conn.transaction().await.expect("begin txn");
+        txn.execute_command("INSERT INTO leaked VALUES (999)")
+            .await
+            .expect("insert inside txn");
+        panic!("simulated tool handler bug mid-transaction");
+    })
+    .await;
+    assert!(
+        join_result.is_err(),
+        "spawned task should have panicked, mirroring the real join-error \
+         handling in load_files"
+    );
+    let leaked_sid = leaked_sid
+        .lock()
+        .expect("session-id slot")
+        .clone()
+        .expect("panicking task must have recorded its session id before the panic");
+
+    // This checkout runs the leaked connection through
+    // `ConnectionManager::recycle`. Without the fix, the old `SELECT 1` probe
+    // succeeds despite the open transaction and this borrower silently
+    // inherits it; with the fix, `recycle` issues an unconditional
+    // `ROLLBACK` first.
+    let conn2 = pool.get().await.expect("checkout after panicking task");
+
+    // The load-bearing assertion: same session id means `recycle` succeeded
+    // and returned this exact connection to service. A `ROLLBACK` that
+    // errored would instead have evicted it, and deadpool would have handed
+    // us a replacement with a different id — which would still satisfy the
+    // `count == 0` check below, silently hiding both a broken probe and the
+    // per-checkout rebuild cliff it would cause.
+    assert_eq!(
+        leaked_sid,
+        async_session_id(&conn2).await,
+        "recycle must ROLLBACK and reuse the same physical connection, not \
+         evict it and build a replacement"
+    );
+
+    // Prove the leaked row did NOT survive — i.e. `recycle` genuinely rolled
+    // it back, rather than merely succeeding without touching the
+    // transaction.
+    let count: i64 = conn2
+        .query_count("SELECT COUNT(*) FROM leaked WHERE v = 999")
+        .await
+        .expect("query after recycle");
+    assert_eq!(
+        count, 0,
+        "recycle must roll back a transaction leaked by a panicked task \
+         before handing the connection to the next borrower"
+    );
+
+    // And the connection must be immediately usable for ordinary work, not
+    // stuck mid-transaction from the next borrower's perspective.
+    conn2
+        .execute_command("INSERT INTO leaked VALUES (1)")
+        .await
+        .expect("connection must be usable, not wedged mid-transaction");
+    let total: i64 = conn2
+        .query_count("SELECT COUNT(*) FROM leaked")
+        .await
+        .unwrap();
+    assert_eq!(total, 1, "only the post-recycle insert should be present");
+}
+
+/// The cancellation half of [issue #263](https://github.com/tableau/hyper-api-rust/issues/263),
+/// which names "panic and cancellation" — the sibling test above covers only
+/// the panic.
+///
+/// The fix covers cancellation by construction: dropping a pending future
+/// drops `AsyncTransaction` and then `PooledConnection` in the same order an
+/// unwind does, so it reaches the same `ConnectionManager::recycle`. This
+/// test exists so that equivalence is asserted rather than assumed, and so
+/// the changelog's "panicked or cancelled" claim is test-backed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn async_pool_recycle_discharges_transaction_left_open_by_cancelled_task() {
+    let (_hyper, endpoint) = fresh_server("pool_async_txn_cancel").unwrap();
+    let config = PoolConfig::new(&endpoint, db_path("pool_async_txn_cancel"))
+        .create_mode(CreateMode::CreateAndReplace)
+        .max_size(1);
+    let pool = create_pool(config).unwrap();
+
+    {
+        let conn = pool.get().await.expect("setup checkout");
+        conn.execute_command("CREATE TABLE leaked (v INT)")
+            .await
+            .unwrap();
+    }
+
+    // Cancel the task by timing it out mid-transaction: `tokio::time::timeout`
+    // drops the inner future once the deadline passes, which drops the
+    // `AsyncTransaction` (BEGIN still open) and then the pooled connection.
+    let leaked_sid = Arc::new(Mutex::new(None));
+    let sid_slot = Arc::clone(&leaked_sid);
+    let cancelled = tokio::time::timeout(Duration::from_millis(150), async {
+        let mut conn = pool.get().await.expect("cancel-task checkout");
+        let sid = async_session_id(&conn).await;
+        *sid_slot.lock().expect("session-id slot") = Some(sid);
+        let txn = conn.transaction().await.expect("begin txn");
+        txn.execute_command("INSERT INTO leaked VALUES (999)")
+            .await
+            .expect("insert inside txn");
+        // Outlive the deadline so the future is dropped right here, with the
+        // transaction open and never committed or rolled back.
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        unreachable!("the timeout must fire first");
+    })
+    .await;
+    assert!(cancelled.is_err(), "the task must have been cancelled");
+    let leaked_sid = leaked_sid
+        .lock()
+        .expect("session-id slot")
+        .clone()
+        .expect("cancelled task must have recorded its session id");
+
+    let conn2 = pool.get().await.expect("checkout after cancelled task");
+    assert_eq!(
+        leaked_sid,
+        async_session_id(&conn2).await,
+        "recycle must ROLLBACK and reuse the same physical connection the \
+         cancelled task left mid-transaction"
+    );
+    let count: i64 = conn2
+        .query_count("SELECT COUNT(*) FROM leaked WHERE v = 999")
+        .await
+        .expect("query after recycle");
+    assert_eq!(
+        count, 0,
+        "recycle must roll back a transaction leaked by a cancelled task, \
+         exactly as it does for a panicked one"
     );
 }
 

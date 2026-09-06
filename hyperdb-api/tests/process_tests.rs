@@ -72,22 +72,69 @@ fn callback_connection_shutdowns_hyperd_after_parent_kill() {
 
 fn wait_for_reported_pid(pid_file: &std::path::Path, timeout: Duration) -> Result<u32, String> {
     let deadline = std::time::Instant::now() + timeout;
+    let mut last_unparseable: Option<String> = None;
     loop {
         match fs::read_to_string(pid_file) {
-            Ok(contents) => {
-                return contents
-                    .trim()
-                    .parse()
-                    .map_err(|error| format!("invalid PID report {contents:?}: {error}"));
-            }
+            Ok(contents) => match contents.trim().parse::<u32>() {
+                Ok(pid) => return Ok(pid),
+                Err(_) => {
+                    // The child reports its PID with `fs::write`, which is
+                    // `File::create` (truncates/creates) then `write_all` —
+                    // not atomic. A poll can land in the window where the
+                    // file exists but is still empty or partially written;
+                    // treat that the same as "not created yet" rather than a
+                    // fatal parse error, and keep polling to the deadline.
+                    last_unparseable = Some(contents);
+                }
+            },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(format!("could not read PID report: {error}")),
         }
         if std::time::Instant::now() >= deadline {
-            return Err(format!("no PID report appeared at {}", pid_file.display()));
+            return Err(match last_unparseable {
+                Some(contents) => format!(
+                    "PID report at {} never became parseable before the deadline; last read {contents:?}",
+                    pid_file.display()
+                ),
+                None => format!("no PID report appeared at {}", pid_file.display()),
+            });
         }
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// The parent's `fs::write` of the PID report is `File::create` (truncates or
+/// creates, leaving an empty file momentarily) followed by `write_all` — not
+/// atomic. A poll landing in that window used to make `"".parse::<u32>()`
+/// panic the whole test; it must instead be treated as "not ready yet" and
+/// retried to the deadline.
+#[test]
+fn wait_for_reported_pid_retries_past_a_torn_write() {
+    let temp_dir = tempfile::tempdir().expect("create temp dir for torn-write simulation");
+    let pid_file = temp_dir.path().join("hyperd-pid");
+
+    let writer_pid_file = pid_file.clone();
+    let writer = thread::spawn(move || {
+        // Reproduces the exact non-atomic sequence: create (truncate) first,
+        // leaving the file present-but-empty for a deliberate window, then
+        // write the real content — same as the production `fs::write` call
+        // this helper polls for, just with the empty window stretched out
+        // long enough that a fast poller is guaranteed to observe it.
+        fs::File::create(&writer_pid_file).expect("create pid file (torn-write simulation)");
+        thread::sleep(Duration::from_millis(150));
+        fs::write(&writer_pid_file, "4242").expect("finish torn-write simulation");
+    });
+
+    let result = wait_for_reported_pid(&pid_file, Duration::from_secs(5));
+    writer
+        .join()
+        .expect("torn-write simulation thread must not panic");
+
+    assert_eq!(
+        result,
+        Ok(4242),
+        "a read landing in the create/write_all gap must be retried, not treated as a fatal parse error"
+    );
 }
 
 fn bounded_process_exit_poll(pid: u32, timeout: Duration) -> bool {

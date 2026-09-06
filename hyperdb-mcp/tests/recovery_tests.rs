@@ -11,6 +11,7 @@ use std::io::{BufRead as _, BufReader, Write as _};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, TryLockError, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -439,6 +440,13 @@ type EngineHandle = Arc<Mutex<Option<hyperdb_mcp::engine::Engine>>>;
 struct ReportObservation {
     sequence: usize,
     engine_mutex_available: bool,
+    /// False when the calling worker's `resource_body_for_uri` had already
+    /// returned before the peer read `worker_finished` (see `worker_finished`
+    /// below). A probe taken after the worker returns observes nothing about
+    /// mutex-holding *during* the pending report — it would trivially see the
+    /// mutex free regardless of production behavior. Callers must treat such
+    /// an observation as inconclusive, not as a pass.
+    probe_valid: bool,
 }
 
 fn run_slow_health_mutex_child() {
@@ -472,8 +480,13 @@ fn run_slow_health_mutex_child() {
     let engine_probe = Arc::new(OnceLock::<EngineHandle>::new());
     let (report_seen_tx, report_seen_rx) = mpsc::channel();
     let (report_release_tx, report_release_rx) = mpsc::channel();
+    // Set by each worker closure the instant its `resource_body_for_uri` call
+    // returns, and read by the peer *before* it probes the engine mutex (see
+    // `ReportObservation::probe_valid`). Reset before each worker starts.
+    let worker_finished = Arc::new(AtomicBool::new(false));
     let peer_info = daemon_info.clone();
     let peer_engine_probe = Arc::clone(&engine_probe);
+    let peer_worker_finished = Arc::clone(&worker_finished);
     let peer = thread::spawn(move || {
         run_controlled_health_peer(
             &listener,
@@ -481,6 +494,7 @@ fn run_slow_health_mutex_child() {
             &peer_engine_probe,
             &report_seen_tx,
             &report_release_rx,
+            &peer_worker_finished,
         )
     });
 
@@ -527,8 +541,13 @@ fn run_slow_health_mutex_child() {
 
     let mut failures = Vec::new();
     let worker_server = Arc::clone(&server);
+    let loss_worker_finished = Arc::clone(&worker_finished);
     let loss_worker = thread::spawn(move || -> Result<ErrorCode, String> {
-        match worker_server.resource_body_for_uri("hyper://workspace") {
+        let result = worker_server.resource_body_for_uri("hyper://workspace");
+        // Must be set the instant the call returns, before the peer's
+        // REPORT_HYPERD_ERROR handler reads it — see `ReportObservation::probe_valid`.
+        loss_worker_finished.store(true, Ordering::Release);
+        match result {
             Err(error) => Ok(error.code),
             Ok(value) => Err(format!(
                 "dead Hyper connection unexpectedly returned resource {value:?}"
@@ -539,10 +558,18 @@ fn run_slow_health_mutex_child() {
     let first_report =
         receive_and_release_report(&report_seen_rx, &report_release_tx, 1, &mut failures);
     let loss_worker_result = loss_worker.join();
-    if let Some(observation) = first_report
-        && !observation.engine_mutex_available
-    {
-        failures.push("engine mutex was unavailable at the first slow loss report".to_string());
+    if let Some(observation) = first_report {
+        if !observation.probe_valid {
+            failures.push(
+                "first report probe is inconclusive: the loss worker's call returned before \
+                 the peer could observe the engine mutex, so the mutex-availability check below \
+                 proves nothing (likely a scheduler flake — rerun)"
+                    .to_string(),
+            );
+        }
+        if !observation.engine_mutex_available {
+            failures.push("engine mutex was unavailable at the first slow loss report".to_string());
+        }
     }
     match loss_worker_result {
         Ok(Ok(ErrorCode::ConnectionLost)) => {}
@@ -565,13 +592,18 @@ fn run_slow_health_mutex_child() {
 
     // A second public call now takes the post-loss initialization path. The
     // dead endpoint makes Engine::try_daemon_mode emit another slow report.
-    // The peer probes `try_lock` synchronously before releasing that response,
-    // so this cannot pass merely because a scheduler slept past the 200 ms I/O
-    // budget. Current production is red here because ensure_engine holds the
-    // engine mutex throughout Engine::new.
+    // The peer reads `worker_finished` and probes `try_lock` synchronously
+    // before releasing that response, so this cannot pass merely because a
+    // scheduler slept past the 200 ms I/O budget: if the worker's call had
+    // already returned by the time the peer checked, `probe_valid` is false
+    // and the observation is treated as inconclusive rather than a pass.
+    worker_finished.store(false, Ordering::Release);
     let reinit_server = Arc::clone(&server);
+    let reinit_worker_finished = Arc::clone(&worker_finished);
     let reinit_worker = thread::spawn(move || -> Result<ErrorCode, String> {
-        match reinit_server.resource_body_for_uri("hyper://workspace") {
+        let result = reinit_server.resource_body_for_uri("hyper://workspace");
+        reinit_worker_finished.store(true, Ordering::Release);
+        match result {
             Err(error) => Ok(error.code),
             Ok(value) => Err(format!(
                 "dead daemon endpoint unexpectedly reinitialized to resource {value:?}"
@@ -581,13 +613,21 @@ fn run_slow_health_mutex_child() {
     let second_report =
         receive_and_release_report(&report_seen_rx, &report_release_tx, 2, &mut failures);
     let reinit_worker_result = reinit_worker.join();
-    if let Some(observation) = second_report
-        && !observation.engine_mutex_available
-    {
-        failures.push(
+    if let Some(observation) = second_report {
+        if !observation.probe_valid {
+            failures.push(
+                "second report probe is inconclusive: the reinit worker's call returned before \
+                 the peer could observe the engine mutex, so the mutex-availability check below \
+                 proves nothing (likely a scheduler flake — rerun)"
+                    .to_string(),
+            );
+        }
+        if !observation.engine_mutex_available {
+            failures.push(
                 "engine mutex was held while post-loss Engine initialization waited on REPORT_HYPERD_ERROR"
                     .to_string(),
             );
+        }
     }
     match reinit_worker_result {
         Ok(Ok(ErrorCode::InternalError)) => {}
@@ -672,6 +712,7 @@ fn run_controlled_health_peer(
     engine_probe: &OnceLock<EngineHandle>,
     report_seen_tx: &mpsc::Sender<ReportObservation>,
     report_release_rx: &mpsc::Receiver<usize>,
+    worker_finished: &AtomicBool,
 ) -> Result<Vec<String>, String> {
     let mut commands = Vec::new();
     let mut report_sequence = 0_usize;
@@ -717,6 +758,12 @@ fn run_controlled_health_peer(
                 let engine_handle = engine_probe
                     .get()
                     .ok_or_else(|| "engine probe was not installed before report".to_string())?;
+                // Read BEFORE probing the mutex. If the calling worker's
+                // public call had already returned, it already released
+                // (and would trivially show as released regardless of
+                // whether production ever held it during the pending
+                // report) — the probe below cannot then prove anything.
+                let probe_valid = !worker_finished.load(Ordering::Acquire);
                 let engine_mutex_available = match engine_handle.try_lock() {
                     Ok(guard) => {
                         drop(guard);
@@ -731,6 +778,7 @@ fn run_controlled_health_peer(
                     .send(ReportObservation {
                         sequence: report_sequence,
                         engine_mutex_available,
+                        probe_valid,
                     })
                     .map_err(|error| format!("signal observed REPORT_HYPERD_ERROR: {error}"))?;
                 let released_sequence = report_release_rx
