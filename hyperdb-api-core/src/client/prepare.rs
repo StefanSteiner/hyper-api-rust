@@ -26,10 +26,8 @@ use tracing::{trace, warn};
 use super::connection::RawConnection;
 use super::error::{Error, Result};
 use super::row::Row;
-use super::statement::{Column, ParamFormat, all_binary_format_codes, bind_format_codes};
+use super::statement::{Column, ParamFormat, bind_format_codes};
 use super::sync_stream::SyncStream;
-use std::borrow::Cow;
-
 // =============================================================================
 // SqlParam trait - Zero-cost parameter encoding
 // =============================================================================
@@ -425,7 +423,16 @@ pub fn prepare(
     })
 }
 
-/// Executes a prepared statement with parameters.
+/// Executes a prepared statement with parameters, collecting all rows.
+///
+/// **Every parameter is bound as PostgreSQL binary.** Values whose
+/// [`ParamFormat`] is [`ParamFormat::Text`] — a scaled `NUMERIC`, a
+/// `geography` — will be rejected by the server, because the bytes
+/// `ToSqlParam::encode_param` produced for them are text. That combination is
+/// unreachable from `hyperdb-api`, which streams through
+/// [`RawConnection::start_execute_prepared_with_formats`] instead; if you are
+/// calling this directly and need mixed formats, use
+/// [`execute_prepared_no_result_with_formats`] or the streaming path.
 ///
 /// # Errors
 ///
@@ -441,13 +448,13 @@ pub fn execute_prepared(
     statement: &PreparedStatement,
     params: &[Option<&[u8]>],
 ) -> Result<Vec<Row>> {
+    // `&[]` means all-binary; see `bind_format_codes`. Infallible here.
+    let param_formats = bind_format_codes(&[], params.len())?;
+    let result_formats: Vec<i16> = vec![1; statement.columns.len()]; // 1 = binary
+
     let mut conn = connection
         .lock()
         .map_err(|_| Error::connection("connection mutex poisoned"))?;
-
-    // Bind parameters (all in binary format)
-    let param_formats: Vec<i16> = vec![1; params.len()]; // 1 = binary
-    let result_formats: Vec<i16> = vec![1; statement.columns.len()]; // 1 = binary
 
     frontend::bind(
         "", // unnamed portal
@@ -519,22 +526,21 @@ pub fn execute_prepared_no_result(
 ///
 /// # Errors
 ///
-/// Same failure modes as [`execute_prepared_no_result`].
+/// - Returns [`Error`] (protocol) if `param_formats` is non-empty and its
+///   length differs from `params`.
+/// - Otherwise the same failure modes as [`execute_prepared_no_result`].
 pub fn execute_prepared_no_result_with_formats(
     connection: &Arc<Mutex<RawConnection<SyncStream>>>,
     statement: &PreparedStatement,
     params: &[Option<&[u8]>],
     param_formats: &[ParamFormat],
 ) -> Result<u64> {
+    let param_format_codes = bind_format_codes(param_formats, params.len())?;
+
     let mut conn = connection
         .lock()
         .map_err(|_| Error::connection("connection mutex poisoned"))?;
 
-    let param_format_codes = if param_formats.is_empty() {
-        Cow::Borrowed(all_binary_format_codes(params.len()))
-    } else {
-        bind_format_codes(param_formats)
-    };
     let result_formats: Vec<i16> = vec![];
 
     frontend::bind(

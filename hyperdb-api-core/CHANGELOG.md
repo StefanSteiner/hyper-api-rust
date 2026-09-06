@@ -34,6 +34,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   format code across every parameter, so this is wire-compatible and drops the
   per-execute `Vec<i16>` allocation from the hot path.
 
+- **An empty `param_formats` slice now means "every parameter is binary" on
+  every `*_with_formats` method, and a length mismatch is an error.**
+  `RawConnection::start_execute_prepared_with_formats` and its async twin
+  previously forwarded an empty slice to `Bind` unchanged, and the PostgreSQL
+  protocol reads a zero-length format array as *all text* — the opposite of
+  what the sibling methods and every in-crate caller meant by `&[]`. Both
+  meanings now resolve in one place, which also rejects a non-empty slice
+  whose length differs from the parameter count instead of silently
+  broadcasting it. The zero-parameter case still sends a zero-length array,
+  which is the only context where that is correct.
+
 - **BREAKING:** the optional `arrow` dependency moved from **58** to **59**,
   matching `hyperdb-api`. Only relevant with the `salesforce-auth` feature.
 
@@ -78,6 +89,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the integer part, which is `0` for sub-unit magnitudes. The sign is now
   computed explicitly and the magnitude formatted via `unsigned_abs`, which
   also removes a latent `i128::MIN` overflow panic.
+
+- **`Numeric`'s `Display` no longer panics for a `scale` of 39 or more.** It
+  divided the value by `10u128.pow(scale)`; that divisor overflows `u128` at
+  scale 39 (a panic in debug, a garbage divisor in release) and wraps to
+  exactly zero at scale 128, dividing by zero. `Numeric::new` is an
+  unvalidated `const fn` and `try_from_f64` checks only the value, so such a
+  scale is constructible — and it is now reachable at runtime, because
+  `hyperdb-api` binds a scaled `NUMERIC` parameter by way of `Display`. The
+  decimal point is now inserted into the digit string instead, which is total
+  over every `u8` scale; out-of-range values reach the server and are
+  rejected cleanly rather than panicking in the client. Rendering is
+  unchanged for every scale that previously worked.
 
 ## [0.1.1] - 2026-05-13
 

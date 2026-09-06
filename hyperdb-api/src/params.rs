@@ -499,9 +499,25 @@ impl ToSqlParam for Vec<u8> {
 // Numeric implementation
 // =============================================================================
 
-/// An `i128` magnitude spans at most 39 decimal digits, hence at most 10
-/// base-10000 groups.
-const MAX_NUMERIC_GROUPS: usize = 10;
+/// The integer type behind [`Numeric::unscaled_value`], and the only input to
+/// [`pg_numeric_encode_unscaled`].
+///
+/// Naming it lets [`MAX_NUMERIC_GROUPS`] be *derived* from its width. If
+/// `Numeric` ever widens past `i128`, the call site stops compiling (a
+/// mismatched argument type) instead of silently overflowing a stack buffer,
+/// and the fix — widening this alias — resizes the buffer automatically.
+type UnscaledValue = i128;
+
+/// Base-10000 groups needed for the widest [`UnscaledValue`] magnitude.
+///
+/// The bound is exact, not generous: an `i128` magnitude spans at most 39
+/// decimal digits, so both `i128::MAX` and `i128::MIN` decompose to precisely
+/// 10 groups with no slack.
+const MAX_NUMERIC_GROUPS: usize = {
+    let decimal_digits = UnscaledValue::MAX.ilog10() as usize + 1;
+    // Each base-10000 group holds 4 decimal digits.
+    decimal_digits.div_ceil(4)
+};
 
 /// Encode a whole-number (`scale == 0`) `Numeric` as PostgreSQL binary NUMERIC.
 ///
@@ -514,7 +530,7 @@ const MAX_NUMERIC_GROUPS: usize = 10;
 /// This handles ONLY `scale == 0` — a scaled `Numeric` binds as text instead
 /// (see [`ToSqlParam for Numeric`]), so there is no scaled binary encoder.
 /// The caller is responsible for only invoking this with `scale == 0`.
-fn pg_numeric_encode_unscaled(unscaled: i128) -> Vec<u8> {
+fn pg_numeric_encode_unscaled(unscaled: UnscaledValue) -> Vec<u8> {
     let sign_neg = unscaled < 0;
     let mut mag = unscaled.unsigned_abs();
 
@@ -589,9 +605,38 @@ impl ToSqlParam for Numeric {
     /// and `WHERE col = $1` work against a real `NUMERIC(p,s)` column.
     ///
     /// The trade-off: with no context to infer from, `SELECT $1` returns the
-    /// parameter as `TEXT` rather than `NUMERIC`. Wrap it — `SELECT
-    /// CAST($1 AS NUMERIC(10,2))` — when the result type matters. Whole
-    /// numbers keep the concrete OID and are unaffected.
+    /// parameter as `TEXT` rather than `NUMERIC`. That means
+    /// [`Row::get::<Numeric>`](crate::Row::get) returns `None` — the column
+    /// really is text — while `get::<String>` yields `"1234.56"`. Wrap it —
+    /// `SELECT CAST($1 AS NUMERIC(10,2))` — when the result type matters.
+    /// Two other bare-`$1` contexts reject a scaled value outright with
+    /// `42601` ("unable to deduce parameter type"): `WHERE n IN ($1)` and
+    /// `COALESCE($1, 0)`. And in `WHERE textcol = $1` the inference resolves
+    /// `$1` to text, so the comparison is a *string* comparison: `1234.56`
+    /// matches the literal `'1234.56'` but not `'1234.560'`. Whole numbers
+    /// keep the concrete OID and are unaffected by all of this.
+    ///
+    /// # Prepared statements
+    ///
+    /// `sql_oid` is consulted only on the one-shot
+    /// [`query_params`](crate::Connection::query_params) /
+    /// [`command_params`](crate::Connection::command_params) path, which
+    /// re-parses per call. A [`PreparedStatement`](crate::PreparedStatement)
+    /// fixes its parameter OIDs at
+    /// [`prepare_typed`](crate::Connection::prepare_typed) time, before any
+    /// value exists, so **one prepared statement cannot accept both whole and
+    /// scaled `NUMERIC` values**:
+    ///
+    /// - `prepare_typed(sql, &[oids::NUMERIC])` — whole numbers work; a
+    ///   scaled value fails `22003` (numeric overflow).
+    /// - `prepare_typed(sql, &[Oid::new(0)])` — scaled values work; a whole
+    ///   number fails `0A000` (cannot handle truncation when reading
+    ///   numerics).
+    ///
+    /// Use `query_params` when the scale varies across calls, or pick the OID
+    /// that matches the one class you bind. `Geography` has no such split —
+    /// it declares a concrete OID and always binds as text, so it works on
+    /// both paths.
     fn sql_oid(&self) -> Oid {
         if self.scale() == 0 {
             oids::NUMERIC
@@ -629,6 +674,15 @@ impl ToSqlParam for Geography {
     /// [`Geography::binary_format`] first, or construct the value with
     /// [`Geography::from_wkt`] / [`Geography::from_wkb`], whose results
     /// always bind correctly.
+    ///
+    /// # Empty points
+    ///
+    /// `Geography::from_wkt("POINT EMPTY")` re-renders as `MULTIPOINT EMPTY`
+    /// — the underlying WKT writer has no representation for an empty point
+    /// and widens it. That has always been true of [`Geography::to_wkt`];
+    /// binding is the first path where it reaches *stored* data, so a
+    /// round-trip through a parameter returns the widened type. No other
+    /// geometry is affected.
     fn encode_param(&self) -> Option<Vec<u8>> {
         match self.to_wkt() {
             Ok(wkt) => Some(wkt.into_bytes()),
@@ -646,14 +700,23 @@ impl ToSqlParam for Geography {
         oids::GEOGRAPHY
     }
 
+    /// Renders `CAST('<wkt>' AS TABLEAU.TABGEOGRAPHY)`.
+    ///
+    /// Hyper-legacy bytes have no WKT rendering, and this signature has no
+    /// error channel. Rather than substitute `NULL` — which would silently
+    /// erase the value — the literal carries the lossily-decoded bytes, so
+    /// the server rejects it with `22P02` exactly as
+    /// [`Self::encode_param`] does. Single quotes are doubled in both
+    /// branches, so neither can break out of the literal.
     fn to_sql_literal(&self) -> String {
-        match self.to_wkt() {
-            Ok(wkt) => format!(
-                "CAST('{}' AS TABLEAU.TABGEOGRAPHY)",
-                wkt.replace('\'', "''")
-            ),
-            Err(_) => "NULL".to_string(),
-        }
+        let text = match self.to_wkt() {
+            Ok(wkt) => wkt,
+            Err(_) => String::from_utf8_lossy(self.as_bytes()).into_owned(),
+        };
+        format!(
+            "CAST('{}' AS TABLEAU.TABGEOGRAPHY)",
+            text.replace('\'', "''")
+        )
     }
 }
 

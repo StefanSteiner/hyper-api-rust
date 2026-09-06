@@ -44,7 +44,7 @@ use crate::protocol::message::{backend::Message, frontend};
 
 use super::auth::{self, AuthState};
 use super::error::{Error, Result};
-use super::statement::{ParamFormat, all_binary_format_codes, bind_format_codes};
+use super::statement::{ParamFormat, bind_format_codes};
 
 /// Maximum number of messages [`RawConnection::consume_error`] (and its
 /// async sibling) will read while draining the tail of a failed request.
@@ -513,26 +513,25 @@ where
         params: &[Option<&[u8]>],
         column_count: usize,
     ) -> Result<()> {
-        self.bind_execute_sync(
-            statement_name,
-            params,
-            all_binary_format_codes(params.len()),
-            column_count,
-        )
+        self.start_execute_prepared_with_formats(statement_name, params, &[], column_count)
     }
 
     /// Same as [`Self::start_execute_prepared`], but with a caller-chosen
     /// wire format per parameter.
     ///
-    /// `param_formats` must be the same length as `params`. Hyper accepts a
-    /// mixed format-code array, so binary stays the fast path and only the
-    /// parameters that need it — scaled `NUMERIC`, `geography` — degrade to
-    /// text. See [`ParamFormat`] for why those two types have no binary
-    /// input function.
+    /// `param_formats` is either empty — meaning **every parameter is
+    /// binary**, exactly like [`Self::start_execute_prepared`] — or the same
+    /// length as `params`. Hyper accepts a mixed format-code array, so binary
+    /// stays the fast path and only the parameters that need it — scaled
+    /// `NUMERIC`, `geography` — degrade to text. See [`ParamFormat`] for why
+    /// those two types have no binary input function.
     ///
     /// # Errors
     ///
-    /// Same failure modes as [`Self::start_execute_prepared`].
+    /// - Returns [`Error`] (protocol) if `param_formats` is non-empty and its
+    ///   length differs from `params`.
+    /// - Otherwise the same failure modes as
+    ///   [`Self::start_execute_prepared`].
     pub fn start_execute_prepared_with_formats(
         &mut self,
         statement_name: &str,
@@ -540,7 +539,7 @@ where
         param_formats: &[ParamFormat],
         column_count: usize,
     ) -> Result<()> {
-        let codes = bind_format_codes(param_formats);
+        let codes = bind_format_codes(param_formats, params.len())?;
         self.bind_execute_sync(statement_name, params, &codes, column_count)
     }
 
