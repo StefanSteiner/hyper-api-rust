@@ -90,13 +90,19 @@ pub(crate) enum ChartMeasureValue {
     NonNumeric,
 }
 
-/// JSON rows plus a row-aligned typed sidecar for the chart's measure column.
-/// This remains crate-private so ordinary query results keep their established
-/// JSON shapes.
+/// JSON rows plus row-aligned typed sidecars for the chart's measure
+/// column and (for line/scatter) its x column. This remains crate-private
+/// so ordinary query results keep their established JSON shapes.
+///
+/// `x_measures` is `None` for chart types whose x axis is never a typed
+/// numeric coordinate (bar's x is always categorical; histogram has no
+/// separate x column) — only line/scatter request it. When present, it
+/// is row-aligned with `rows` exactly like `measures` is.
 #[derive(Debug)]
 pub(crate) struct ChartQueryRows {
     pub(crate) rows: Vec<Value>,
     pub(crate) measures: Vec<ChartMeasureValue>,
+    pub(crate) x_measures: Option<Vec<ChartMeasureValue>>,
 }
 
 /// Attach the persistent database under the reserved `"persistent"`
@@ -1142,18 +1148,25 @@ impl Engine {
         Ok(rows_json)
     }
 
-    /// Execute a chart query while retaining the selected measure's typed
-    /// state alongside the ordinary JSON rows. The sidecar is row-aligned and
-    /// is consumed only by the MCP chart renderer.
+    /// Execute a chart query while retaining the selected measure's (and,
+    /// for line/scatter, the x column's) typed state alongside the ordinary
+    /// JSON rows. Both sidecars are row-aligned and are consumed only by the
+    /// MCP chart renderer.
+    ///
+    /// `x_measure_column` is `None` for chart types that never treat x as a
+    /// typed numeric coordinate (bar, histogram); in that case
+    /// `ChartQueryRows::x_measures` is `None` too.
     pub(crate) fn execute_chart_query_to_json(
         &self,
         sql: &str,
         measure_column: Option<&str>,
+        x_measure_column: Option<&str>,
     ) -> Result<ChartQueryRows, McpError> {
         let mut result = self.connection.execute_query(sql).map_err(McpError::from)?;
 
         let mut rows_json = Vec::new();
         let mut measures = Vec::new();
+        let mut x_measures = x_measure_column.map(|_| Vec::new());
         let mut schema_opt = None;
         while let Some(chunk) = result.next_chunk().map_err(McpError::from)? {
             if schema_opt.is_none() {
@@ -1165,10 +1178,14 @@ impl Engine {
                 // so select the same occurrence for the typed sidecar.
                 let measure = measure_column
                     .and_then(|name| columns.iter().rev().find(|column| column.name() == name));
+                let x_measure = x_measure_column
+                    .and_then(|name| columns.iter().rev().find(|column| column.name() == name));
                 for row in &chunk {
                     let measure_value = measure.map_or(ChartMeasureValue::NonNumeric, |column| {
                         chart_measure_value(row, column.index(), &column.sql_type())
                     });
+                    let x_measure_value = x_measure
+                        .map(|column| chart_measure_value(row, column.index(), &column.sql_type()));
                     let mut obj = serde_json::Map::new();
                     for col in columns {
                         let val = row_value_to_json(row, col.index(), &col.sql_type());
@@ -1176,12 +1193,16 @@ impl Engine {
                     }
                     rows_json.push(Value::Object(obj));
                     measures.push(measure_value);
+                    if let Some(ref mut x_measures) = x_measures {
+                        x_measures.push(x_measure_value.unwrap_or(ChartMeasureValue::NonNumeric));
+                    }
                 }
             }
         }
         Ok(ChartQueryRows {
             rows: rows_json,
             measures,
+            x_measures,
         })
     }
 
@@ -2717,6 +2738,59 @@ mod tests {
         assert!(
             guidance.to_lowercase().contains("doctor"),
             "guidance must direct callers to doctor: {guidance}"
+        );
+    }
+
+    /// `is_attach_lock_conflict` has two independent triggers, and the real
+    /// engine message carries *both* — `server error (55006): ... The
+    /// database file is locked by another process` matches the SQLSTATE
+    /// check and the phrase fallback at once. Deleting either one alone is
+    /// therefore invisible to every test that uses a realistic message.
+    /// These two tests isolate the branches so each stays load-bearing.
+    ///
+    /// The SQLSTATE branch on its own: a `55006` with no lock wording must
+    /// still classify, which is what makes the classification independent
+    /// of hyperd's English.
+    #[test]
+    fn attach_lock_conflict_detects_sqlstate_without_lock_phrase() {
+        let upstream = hyperdb_api::Error::server(
+            Some("55006".to_string()),
+            "object cannot be modified in this state",
+            None,
+            None,
+        );
+        assert!(
+            !crate::error::is_resource_busy(&upstream.to_string()),
+            "the fixture must not also trip the phrase fallback, or it \
+             wouldn't isolate the SQLSTATE branch: {upstream}"
+        );
+
+        assert!(
+            is_attach_lock_conflict(&upstream),
+            "SQLSTATE 55006 alone must classify as an attach lock conflict"
+        );
+    }
+
+    /// The phrase branch on its own: older hyperd versions report attach
+    /// contention only in prose, with no structured SQLSTATE at all.
+    #[test]
+    fn attach_lock_conflict_detects_lock_phrase_without_sqlstate() {
+        let upstream = hyperdb_api::Error::server(
+            None,
+            "The database file is locked by another process",
+            None,
+            None,
+        );
+        assert_eq!(
+            upstream.sqlstate(),
+            None,
+            "the fixture must carry no SQLSTATE, or it wouldn't isolate the \
+             phrase branch"
+        );
+
+        assert!(
+            is_attach_lock_conflict(&upstream),
+            "a legacy lock phrase with no SQLSTATE must still classify"
         );
     }
 

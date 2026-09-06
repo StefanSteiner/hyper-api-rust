@@ -13,7 +13,8 @@
 
 use crate::attach::{self, AttachRegistry, AttachRequest, AttachSource, LOCAL_ALIAS};
 use crate::chart::{
-    ChartFormat, ChartOptions, ChartPresentation, ChartType, render_chart_with_measure_metadata,
+    ChartFormat, ChartOptions, ChartPresentation, ChartType, MAX_HISTOGRAM_BINS,
+    render_chart_with_measure_metadata,
 };
 use crate::engine::{
     Engine, StatementKind, classify_statement, is_read_only_sql, lock_engine_recovering_poison,
@@ -2985,8 +2986,19 @@ impl HyperMcpServer {
                 ChartType::Histogram => params.x.as_deref().or(params.y.as_deref()),
                 ChartType::Bar | ChartType::Line | ChartType::Scatter => params.y.as_deref(),
             };
-            let chart_rows =
-                engine.execute_chart_query_to_json(&params.sql, measure_column)?;
+            // Only line/scatter ever treat x as a typed numeric coordinate
+            // (bar's x is always categorical; histogram has no separate x
+            // column) — requesting the sidecar for the other types would
+            // just be dead weight.
+            let x_measure_column = match chart_type {
+                ChartType::Line | ChartType::Scatter => params.x.as_deref(),
+                ChartType::Bar | ChartType::Histogram => None,
+            };
+            let chart_rows = engine.execute_chart_query_to_json(
+                &params.sql,
+                measure_column,
+                x_measure_column,
+            )?;
 
             // Parse color_map: skip entries whose hex string is malformed,
             // logging them via the description rather than hard-failing.
@@ -3012,7 +3024,7 @@ impl HyperMcpServer {
                 format,
                 width: params.width.unwrap_or(800).clamp(200, 4096),
                 height: params.height.unwrap_or(480).clamp(150, 4096),
-                bins: params.bins.unwrap_or(20).clamp(1, 500),
+                bins: params.bins.unwrap_or(20).clamp(1, MAX_HISTOGRAM_BINS),
                 x_as_category: params.x_as_category,
                 x_range: params.x_range,
                 y_range: params.y_range,
@@ -3025,6 +3037,7 @@ impl HyperMcpServer {
                 &opts,
                 presentation,
                 &chart_rows.measures,
+                chart_rows.x_measures.as_deref(),
             )?;
 
             // Decide disk vs inline vs both. Write to disk *before*
@@ -3056,6 +3069,15 @@ impl HyperMcpServer {
                 let mut stats = serde_json::Map::new();
                 stats.insert("operation".into(), json!("chart"));
                 stats.insert("rows_plotted".into(), json!(chart.rows_plotted));
+                // Only a histogram with an explicit `x_range` can drop
+                // values. Reported so a caller sees the exclusion instead
+                // of reading a short `rows_plotted` as a query artifact.
+                if chart.excluded_out_of_range > 0 {
+                    stats.insert(
+                        "excluded_out_of_range".into(),
+                        json!(chart.excluded_out_of_range),
+                    );
+                }
                 stats.insert("elapsed_ms".into(), json!(elapsed_ms));
                 stats.insert("format".into(), json!(format_str));
                 stats.insert("bytes".into(), json!(chart.bytes.len()));

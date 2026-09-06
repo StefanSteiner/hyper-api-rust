@@ -451,6 +451,26 @@ fn walk_dir_size(dir: &std::path::Path) -> std::io::Result<u64> {
 /// could not be reproduced comes back in
 /// [`ExportResult::schema_fidelity`] so the caller can say so out loud
 /// instead of handing back a quietly degraded backup.
+/// True when a filesystem error means "another process is holding this file
+/// open" rather than "you lack permission to touch it".
+///
+/// This is effectively a Windows condition. Windows refuses to unlink a file
+/// another process holds without `FILE_SHARE_DELETE`, reporting
+/// `ERROR_SHARING_VIOLATION` (32) or `ERROR_LOCK_VIOLATION` (33); Unix
+/// unlinks regardless of open handles, so a contended export target never
+/// fails there. `ErrorKind::ResourceBusy` is checked on every platform
+/// because `EBUSY` can arise for other reasons (e.g. the target is a
+/// mountpoint).
+///
+/// The raw-code comparison is gated on `cfg!(windows)` deliberately: those
+/// two numbers are `EPIPE` and `EDOM` as Unix errnos, and while
+/// `remove_file` cannot return either, matching on them unguarded would be
+/// a latent misclassification.
+fn is_file_in_use(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::ResourceBusy
+        || (cfg!(windows) && matches!(err.raw_os_error(), Some(32 | 33)))
+}
+
 fn export_hyper(
     engine: &Engine,
     path: &str,
@@ -464,10 +484,27 @@ fn export_hyper(
     // attach to the stale contents.
     if std::path::Path::new(path).exists() {
         std::fs::remove_file(path).map_err(|e| {
-            McpError::new(
-                ErrorCode::PermissionDenied,
-                format!("Cannot remove existing target '{path}': {e}"),
-            )
+            // A file another process is holding open is not a permissions
+            // problem, and "Check file permissions on the source or target
+            // path" — `PermissionDenied`'s guidance — sends the caller
+            // somewhere there is nothing to find. `ResourceBusy` carries
+            // the guidance that actually resolves it (close the holder, or
+            // copy the file), and this is the *only* place a contended
+            // export target can surface: on Windows the unlink below is
+            // what fails, and on Unix it succeeds regardless of holders.
+            if is_file_in_use(&e) {
+                McpError::new(
+                    ErrorCode::ResourceBusy,
+                    format!(
+                        "Cannot replace export target '{path}': the file is open in another process: {e}"
+                    ),
+                )
+            } else {
+                McpError::new(
+                    ErrorCode::PermissionDenied,
+                    format!("Cannot remove existing target '{path}': {e}"),
+                )
+            }
         })?;
     }
 
@@ -480,12 +517,24 @@ fn export_hyper(
         timer.elapsed_ms(),
     );
 
-    engine.execute_command(&format!("CREATE DATABASE {}", escape_sql_path(path)))?;
-    engine.execute_command(&format!(
-        "ATTACH DATABASE {} AS \"{}\"",
-        escape_sql_path(path),
-        alias.replace('"', "\"\""),
-    ))?;
+    // Route both statements through the same attach-context error
+    // mapper `attach.rs` uses so a lock conflict on the export target
+    // (another MCP server or hyperd process holds it) surfaces as
+    // `RESOURCE_BUSY` with recovery guidance instead of a generic
+    // `SqlError` — see `Engine::execute_attach_command`.
+    let target_path = std::path::Path::new(path);
+    engine.execute_attach_command(
+        &format!("CREATE DATABASE {}", escape_sql_path(path)),
+        target_path,
+    )?;
+    engine.execute_attach_command(
+        &format!(
+            "ATTACH DATABASE {} AS \"{}\"",
+            escape_sql_path(path),
+            alias.replace('"', "\"\""),
+        ),
+        target_path,
+    )?;
 
     let result = populate_export_target(engine, source_db, &alias);
 
@@ -610,7 +659,7 @@ fn list_user_tables(
 
 #[cfg(test)]
 mod tests {
-    use super::{render_copy_with_clause, validate_option_key};
+    use super::{is_file_in_use, render_copy_with_clause, validate_option_key};
     use serde_json::{Map, Value, json};
 
     #[test]
@@ -697,6 +746,38 @@ mod tests {
             assert!(
                 validate_option_key(bad).is_err(),
                 "{bad:?} should be rejected"
+            );
+        }
+    }
+
+    /// The Windows sharing-violation branch can't be provoked on Unix, so
+    /// pin the classifier directly from raw OS codes. Windows CI observed
+    /// `os error 32` from the export pre-delete against a target `hyperd`
+    /// held open, which is what this distinguishes from a real
+    /// permissions failure.
+    #[test]
+    fn file_in_use_is_distinguished_from_permission_denied() {
+        assert!(
+            is_file_in_use(&std::io::Error::from(std::io::ErrorKind::ResourceBusy)),
+            "EBUSY means the file is in use on every platform"
+        );
+        assert!(
+            !is_file_in_use(&std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            "a genuine permissions failure must keep PERMISSION_DENIED"
+        );
+        assert!(
+            !is_file_in_use(&std::io::Error::from(std::io::ErrorKind::NotFound)),
+            "a missing file is not a holder conflict"
+        );
+
+        // ERROR_SHARING_VIOLATION (32) / ERROR_LOCK_VIOLATION (33) are
+        // Win32 codes, and 32/33 are EPIPE/EDOM as Unix errnos — so this
+        // must classify on Windows only.
+        for raw in [32, 33] {
+            assert_eq!(
+                is_file_in_use(&std::io::Error::from_raw_os_error(raw)),
+                cfg!(windows),
+                "raw OS error {raw} must be a holder conflict on Windows only"
             );
         }
     }

@@ -103,6 +103,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Histograms now honor an explicit `x_range`, and exclude the values that
+  fall outside it.** `x_range` was validated for every chart type but read
+  by line/scatter only. Bar charts are documented as ignoring it
+  (unchanged); the undocumented case was histogram, whose doc promised "all
+  frames/charts share the same x extent" while the renderer silently binned
+  the data's own min/max regardless. `draw_histogram` now uses an explicit
+  `x_range` as the bin extent.
+
+  **This changes the rendered image for a caller already passing `x_range`
+  to a histogram** — previously that argument had no effect at all, so any
+  such call now produces a different chart. Values outside the range are
+  dropped from the bins rather than folded into the first/last bin: folding
+  would credit a bin with observations that don't belong to it (100 uniform
+  values over 0..9 with `x_range = [4, 6]` and `bins: 2` would give bin
+  `[4, 5)` 50 observations against a true 10, a 5× overstatement that reads
+  as a real cluster). This is *not* the same as line/scatter, deliberately —
+  their `apply_ranges` only sets axis bounds, so plotters clips
+  out-of-range geometry in place and a clipped point becomes invisible
+  rather than being relocated. Excluding is the histogram equivalent.
+
+  `rows_plotted` therefore counts only the values actually binned, so it no
+  longer implies more in-window observations than the chart shows, and the
+  `chart` tool reports `excluded_out_of_range` in its stats block when any
+  value was dropped (`ChartResult::excluded_out_of_range` on the Rust side).
+  A range containing no data renders an empty histogram at the requested
+  extent rather than erroring, so a per-window animation frame stays
+  renderable. `ChartOptions::x_range`'s rustdoc and the `get_readme` payload
+  now both document the per-chart-type behavior; previously neither
+  mentioned histograms. Part of
+  [issue #277](https://github.com/tableau/hyper-api-rust/issues/277).
 - The LLM-facing SQL-dialect notes — the `get_readme` payload and the MCP
   server instructions — document three verified engine behaviors that were
   previously absent. `to_char` accepts DATE / TIMESTAMP (`to_char(DATE
@@ -300,6 +330,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   of failing fast and reconnecting. This is most visible since the daemon
   became resident-by-default in 0.5.0, which made long-lived idle connections
   the norm. (Fixed in `hyperdb-api-core` for both the sync and async clients.)
+- **A leading `NULL` x no longer downgrades a whole chart's axis, and no
+  longer breaks it either.** Two separate defects on the line/scatter x
+  axis. First, a NUMERIC value too large for `f64` to round-trip serializes
+  as an exact-text JSON *string* (see the NUMERIC entry above); the y axis
+  handles that through a typed sidecar, but the x axis read the raw JSON, so
+  `detect_line_x_mode` saw a non-numeric, non-temporal string and
+  misclassified a quantitative axis as categorical — flattening it to
+  evenly-spaced ordinal positions with no warning. Second, detection sampled
+  row 0 only, so one blank x on an otherwise numeric or temporal column
+  flipped the entire chart's interpretation and plotted the `NULL` row as a
+  real point with a blank label. `execute_chart_query_to_json` now builds
+  the same typed `ChartMeasureValue` sidecar for line/scatter's x column
+  that it already built for the measure column, and `detect_line_x_mode`
+  prefers that sidecar, falling back to raw-JSON sampling only when none was
+  requested (e.g. the public `render_chart` API).
+
+  Detection now looks past `NULL` x values to classify the column, and
+  `group_chart_series` **skips those same rows** when the axis is numeric or
+  temporal, so a `NULL` x is dropped from the plot rather than positioned.
+  Both halves are required: `chart_measure_coordinate_and_label` maps a
+  `NULL` x to `SCHEMA_MISMATCH`, so teaching detection alone to look past a
+  blank x would have made the row detection ignores the row grouping fails
+  on — turning a chart that previously rendered (as categorical) into a hard
+  error. `rows_plotted` counts only the rows actually plotted, and an
+  all-`NULL` x column under numeric mode reports `EMPTY_DATA`. Categorical
+  axes are unchanged: there a `NULL` remains a legitimate blank-labelled
+  category. Part of
+  [issue #277](https://github.com/tableau/hyper-api-rust/issues/277).
+- **Exporting over a `.hyper` file another process holds open reported a
+  permissions failure instead of a busy resource (Windows).** `export`
+  deletes an existing target before recreating it, and Windows refuses to
+  unlink a file another process holds open — so a contended export target
+  failed with `PERMISSION_DENIED "Cannot remove existing target … (os error
+  32)"` and the guidance *"Check file permissions on the source or target
+  path"*, which points at something the user will find nothing wrong with.
+  That delete is now classified: a sharing violation
+  (`ERROR_SHARING_VIOLATION` / `ERROR_LOCK_VIOLATION`, or `EBUSY` anywhere)
+  surfaces as `RESOURCE_BUSY`, whose guidance names the actual remedy —
+  close the holding process or copy the file. A genuine permissions failure
+  still reports `PERMISSION_DENIED`. Unix is unaffected: `unlink` succeeds
+  regardless of open handles, which is why this only ever appeared on
+  Windows.
+
+  The related routing of `export`'s `CREATE DATABASE` / `ATTACH DATABASE`
+  through the same attach-context error mapper `attach_database` uses (and
+  the same for the `CREATE DATABASE IF NOT EXISTS` before `attach`'s already
+  mapped `ATTACH`) is kept, but is a **defensive consistency change rather
+  than a fixed user-visible regression**: because the delete above runs
+  first, those statements never see a contended target — on Unix the path is
+  always freed, and on Windows the delete fails before them. The earlier
+  claim that 0.7.2 returned `RESOURCE_BUSY` from those statements for a
+  contended export was never substantiated and is withdrawn; the real
+  failure was one step earlier, at the delete. Part of
+  [issue #277](https://github.com/tableau/hyper-api-rust/issues/277).
+- **Corrected the justification on chart.rs's `cast_precision_loss`
+  suppression.** The file-wide `#![allow]` claimed values approaching 2^53
+  "would saturate to Infinity in the chart anyway" — they don't; `f64`
+  represents them finitely and merely stops distinguishing adjacent
+  integers, which is exactly why `ChartMeasureValue` (and this PR's x-axis
+  sidecar) exists. Replaced with `#[expect(clippy::cast_precision_loss)]` on
+  each of the eight functions that actually cast an integer to `f64`, each
+  with the true, function-specific reason. Every one of those casts is a
+  bounded count, index, or calendar timestamp — categories, series, bin
+  counts and indices, epoch seconds — and every one is exact at the
+  magnitudes reachable here, which is the property that matters. Two of them
+  *are* plotted geometry rather than pure layout: `parse_temporal`'s
+  timestamp is the plotted x coordinate, and a histogram bin's count is the
+  plotted bar height. Both are lossless (a row tally is bounded by the
+  50,000-row chart limit, and epoch seconds are nowhere near 2^53), so the
+  suppression is still sound — the previous blanket phrasing "never a
+  plotted data value" simply claimed more than was true. Measure values
+  proper still flow through `ChartMeasureValue`/`ChartPoint::y_label` as an
+  already-typed `f64` with exact display text alongside, never reconstructed
+  from an integer cast. `#[expect]` (vs `#[allow]`) also means the
+  suppression is now checked for staying necessary. Part of
+  [issue #277](https://github.com/tableau/hyper-api-rust/issues/277).
+- **`render_chart` no longer trusts its caller to bound `ChartOptions::bins`.**
+  `bins` is a bare `pub u32` and `draw_histogram` allocates one counter per
+  bin, so a caller passing `u32::MAX` through the public Rust API would have
+  attempted a ~34 GB allocation. The MCP `chart` tool clamped its own `bins`
+  parameter to `1..=500`, but the renderer did not, applying only `.max(1)`.
+  The cap now lives in `chart.rs` as `MAX_HISTOGRAM_BINS` and is enforced by
+  the renderer, with the MCP tool clamping to the same constant.
 - **A panicking tool call no longer bricks the server for the rest of the
   process's lifetime.** `with_engine` holds a `std::sync::MutexGuard` across
   the tool closure it invokes; a panic propagating out of that closure dropped

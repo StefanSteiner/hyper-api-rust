@@ -88,6 +88,83 @@ fn run_real_persistent_lock_child(workspace: &Path) {
     drop(owner);
 }
 
+/// Regression test for #277: `Engine::execute_attach_command` is the
+/// mapper `export.rs`'s `CREATE DATABASE`/`ATTACH DATABASE` pair now
+/// shares with `attach.rs`'s ATTACH statement. It must classify a REAL
+/// lock conflict from a live `hyperd` as `RESOURCE_BUSY` with the
+/// SQLSTATE preserved, not fall through to a generic `SqlError` the way
+/// the plain `execute_command` path does since the `0.7.3` narrowing of
+/// the generic mapper (`error.rs`'s `sqlstate().is_none()` guard).
+///
+/// Reproduces the conflict against the live, pinned `hyperd` binary: an
+/// owner engine holds `workspace` open as its own persistent database
+/// (its own separate `hyperd` process), and a second, independent
+/// engine issues a raw `ATTACH DATABASE` against that same path through
+/// `execute_attach_command` — the exact statement shape `export.rs` and
+/// `attach.rs` both issue. Run in a contained child for the same timeout
+/// safety reasons as `real_persistent_lock_reproduces_resource_busy`.
+#[test]
+fn execute_attach_command_maps_real_lock_conflict_to_resource_busy() {
+    if let Some(workspace) = std::env::var_os(EXPORT_ATTACH_LOCK_CHILD_ENV) {
+        run_execute_attach_command_lock_child(Path::new(&workspace));
+        return;
+    }
+
+    let temp_dir = TempDir::new().expect("parent must own RAII workspace directory");
+    let workspace = temp_dir.path().join("contended-attach-target.hyper");
+    run_contained_child(
+        "execute_attach_command_maps_real_lock_conflict_to_resource_busy",
+        EXPORT_ATTACH_LOCK_CHILD_ENV,
+        &workspace,
+    );
+}
+
+const EXPORT_ATTACH_LOCK_CHILD_ENV: &str = "HYPERDB_MCP_EXPORT_ATTACH_LOCK_CHILD";
+
+fn run_execute_attach_command_lock_child(target: &Path) {
+    // Owner: a separate hyperd process holds `target` as its own
+    // persistent workspace for the whole duration of this check.
+    let owner = Engine::new_no_daemon(Some(target.to_string_lossy().into_owned()))
+        .expect("owner engine must attach the target as its own persistent workspace");
+    assert!(target.exists(), "owner must have created the file");
+
+    // A second, independent engine (its own hyperd process) is the one
+    // issuing the contended statement — standing in for either
+    // `export.rs`'s export-target ATTACH or `attach.rs`'s user attach.
+    let temp_dir = TempDir::new().expect("child must own its own temp dir");
+    let exporter_path = temp_dir.path().join("exporter_primary.hyper");
+    let exporter = Engine::new_no_daemon(Some(exporter_path.to_string_lossy().into_owned()))
+        .expect("exporter engine must start on its own workspace");
+
+    let sql = format!(
+        "ATTACH DATABASE {} AS \"probe\"",
+        hyperdb_api::escape_sql_path(&target.to_string_lossy())
+    );
+    let err = exporter
+        .execute_attach_command(&sql, target)
+        .expect_err("attach against an externally-locked file must fail");
+
+    assert_eq!(
+        err.code,
+        ErrorCode::ResourceBusy,
+        "expected RESOURCE_BUSY, got {err:?}"
+    );
+    assert!(
+        err.message.contains("55006"),
+        "must retain the lock SQLSTATE: {}",
+        err.message
+    );
+    let guidance = err
+        .suggestion
+        .expect("RESOURCE_BUSY must carry recovery guidance");
+    assert!(
+        guidance.to_lowercase().contains("doctor"),
+        "guidance must point to doctor: {guidance}"
+    );
+
+    drop(owner);
+}
+
 fn run_contained_child(test_name: &str, child_env: &str, workspace: &Path) {
     let mut child =
         Command::new(std::env::current_exe().expect("integration test executable path"))

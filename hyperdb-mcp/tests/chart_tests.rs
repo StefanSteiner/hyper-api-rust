@@ -149,6 +149,114 @@ fn line_chart_categorical_x() {
     assert_eq!(result2.rows_plotted, 5);
 }
 
+/// Regression (issue #277, fix 2): a leading `NULL` x on an otherwise
+/// numeric column must still produce a chart.
+///
+/// `detect_line_x_mode` skips leading `NULL`s so one blank x can't flip the
+/// whole axis to evenly-spaced categorical. Grouping has to skip the same
+/// rows, or the row detection deliberately ignored becomes the row grouping
+/// hard-errors on — `chart_measure_coordinate_and_label` maps both
+/// `ChartMeasureValue::Null` and a raw `Value::Null` to `SchemaMismatch`.
+/// That would be strictly worse than the pre-fix behavior, which at least
+/// rendered something.
+///
+/// Deliberately driven through the public `render_chart` entry point rather
+/// than `detect_line_x_mode`: testing detection in isolation is exactly what
+/// let the grouping half of this go unnoticed.
+#[test]
+fn line_chart_numeric_x_skips_null_rows() {
+    let rows = vec![
+        json!({"x": null, "y": 1}),
+        json!({"x": 42, "y": 2}),
+        json!({"x": 43, "y": 3}),
+    ];
+    let opts = ChartOptions {
+        chart_type: ChartType::Line,
+        x_column: Some("x".into()),
+        y_column: Some("y".into()),
+        ..ChartOptions::default()
+    };
+
+    let result =
+        render_chart(&rows, &opts).expect("a leading NULL x must not abort a numeric line chart");
+
+    assert_eq!(
+        result.rows_plotted, 2,
+        "the NULL-x row is skipped, not plotted with a blank label and not fatal"
+    );
+}
+
+/// An interior `NULL` x is skipped too, not just a leading one — the skip
+/// lives in the grouping loop, so position in the result set is irrelevant.
+#[test]
+fn line_chart_numeric_x_skips_interior_null_row() {
+    let rows = vec![
+        json!({"x": 1, "y": 1}),
+        json!({"x": null, "y": 2}),
+        json!({"x": 3, "y": 3}),
+    ];
+    let opts = ChartOptions {
+        chart_type: ChartType::Scatter,
+        x_column: Some("x".into()),
+        y_column: Some("y".into()),
+        ..ChartOptions::default()
+    };
+
+    let result = render_chart(&rows, &opts).expect("an interior NULL x must not abort the chart");
+
+    assert_eq!(result.rows_plotted, 2);
+}
+
+/// A `NULL` in a *temporal* x column is skipped on the same rule. Without
+/// the skip, `parse_temporal("")` rejects the empty string `as_string`
+/// produces for a JSON null and the whole chart fails.
+#[test]
+fn line_chart_temporal_x_skips_null_rows() {
+    let rows = vec![
+        json!({"d": null, "v": 1}),
+        json!({"d": "2026-01-01", "v": 2}),
+        json!({"d": "2026-01-02", "v": 3}),
+    ];
+    let opts = ChartOptions {
+        chart_type: ChartType::Line,
+        x_column: Some("d".into()),
+        y_column: Some("v".into()),
+        ..ChartOptions::default()
+    };
+
+    let result =
+        render_chart(&rows, &opts).expect("a NULL in a temporal x column must not abort the chart");
+
+    assert_eq!(
+        result.rows_plotted, 2,
+        "the NULL-date row is skipped; the two real dates still plot"
+    );
+}
+
+/// An entirely-`NULL` x column under forced numeric mode leaves nothing to
+/// plot. That must surface as `EMPTY_DATA` ("No valid data points after
+/// filtering") from the existing all-empty-groups guard, not as a silently
+/// blank chart — this pins that the guard really does cover the case where
+/// *every* row gets skipped, which leaves the group map empty rather than
+/// holding an empty series.
+#[test]
+fn line_chart_all_null_numeric_x_is_empty_data() {
+    let rows = vec![json!({"x": null, "y": 1}), json!({"x": null, "y": 2})];
+    let opts = ChartOptions {
+        chart_type: ChartType::Line,
+        x_column: Some("x".into()),
+        y_column: Some("y".into()),
+        // Force Numeric: auto-detection finds no non-NULL sample and would
+        // fall back to Categorical, which plots NULLs as one blank category.
+        x_as_category: Some(false),
+        ..ChartOptions::default()
+    };
+
+    let err = render_chart(&rows, &opts).expect_err("an all-NULL numeric x has nothing to plot");
+
+    assert_eq!(err.code, ErrorCode::EmptyData, "got: {}", err.message);
+}
+
 /// Scatter chart with no series column renders every row as one series.
 #[test]
 fn scatter_chart_single_series() {
@@ -177,6 +285,218 @@ fn histogram_chart_counts_values() {
     };
     let result = render_chart(&rows, &opts).unwrap();
     assert_eq!(result.rows_plotted, 100);
+}
+
+/// Regression (issue #277, fix 3): `x_range` is validated for every chart
+/// type (`render_chart_impl`) but, before this fix, was silently ignored by
+/// histograms — the render was byte-for-byte identical no matter what
+/// `x_range` said, even though `ChartOptions::x_range`'s doc promises "all
+/// frames/charts share the same x extent." That promise now holds for
+/// histograms too (previously true only for line/scatter).
+#[test]
+fn histogram_honors_x_range() {
+    let rows: Vec<_> = (0..50).map(|i| json!({"v": f64::from(i % 10)})).collect();
+    let base_opts = ChartOptions {
+        chart_type: ChartType::Histogram,
+        x_column: Some("v".into()),
+        bins: 10,
+        format: ChartFormat::Svg,
+        ..ChartOptions::default()
+    };
+    let default_range = render_chart(&rows, &base_opts).unwrap();
+
+    let wide_range_opts = ChartOptions {
+        x_range: Some([-50.0, 50.0]),
+        ..base_opts
+    };
+    let wide_range = render_chart(&rows, &wide_range_opts).unwrap();
+
+    assert_ne!(
+        default_range.bytes, wide_range.bytes,
+        "an explicit x_range must change the rendered histogram axis extent, \
+         not be silently ignored"
+    );
+}
+
+/// An explicit `x_range` narrower than the data's span must not be rejected
+/// for histograms, and must not *fold* the out-of-range values into the edge
+/// bins either.
+///
+/// Asserted on bin **contents**, not just on "it didn't error": the render
+/// over the full data set is compared byte-for-byte against a control render
+/// over only the in-range rows. Equality is the whole claim — an
+/// out-of-range value has to contribute nothing at all. A `rows_plotted`
+/// count alone can't distinguish exclusion from folding (folding also
+/// "counts" every row), which is exactly how the folding behavior slipped
+/// through review once already.
+#[test]
+fn histogram_x_range_excludes_out_of_range_values() {
+    let rows: Vec<_> = (0..50).map(|i| json!({"v": f64::from(i % 10)})).collect();
+    // 0..9 repeated 5x; only 2,3,4,5,6 are inside the range below.
+    let in_range_rows: Vec<_> = rows
+        .iter()
+        .filter(|row| {
+            let v = row["v"].as_f64().unwrap();
+            (2.0..=6.0).contains(&v)
+        })
+        .cloned()
+        .collect();
+    assert_eq!(
+        in_range_rows.len(),
+        25,
+        "5 distinct in-range values x 5 reps"
+    );
+
+    let opts = ChartOptions {
+        chart_type: ChartType::Histogram,
+        x_column: Some("v".into()),
+        bins: 5,
+        x_range: Some([2.0, 6.0]),
+        format: ChartFormat::Svg,
+        ..ChartOptions::default()
+    };
+
+    let full = render_chart(&rows, &opts).expect("a narrow x_range must not error");
+    let control = render_chart(&in_range_rows, &opts).expect("control render must succeed");
+
+    assert_eq!(
+        full.rows_plotted, 25,
+        "only the in-range values are plotted; folding would report all 50"
+    );
+    assert_eq!(
+        full.excluded_out_of_range, 25,
+        "the 25 out-of-range values must be reported as dropped, not hidden"
+    );
+    // `assert!` rather than `assert_eq!` so a failure prints the diagnosis
+    // instead of two full SVG documents.
+    assert!(
+        full.bytes == control.bytes,
+        "an out-of-range value must contribute nothing to any bin — the render \
+         over all 50 rows must be identical to the render over the 25 in-range \
+         rows. Differing bytes mean out-of-range values are still landing in \
+         the edge bins."
+    );
+}
+
+/// The edge bins specifically must not be inflated. With `bins: 2` over
+/// `x_range = [4, 6]` and 100 uniform values across 0..9, folding gave bin
+/// `[4, 5)` 50 observations against a true 10 — a 5x overstatement that
+/// reads as a real cluster. Pinned via the same control-render comparison
+/// plus the honest counts.
+#[test]
+fn histogram_edge_bins_are_not_inflated_by_folding() {
+    let rows: Vec<_> = (0..100).map(|i| json!({"v": f64::from(i % 10)})).collect();
+    let in_range_rows: Vec<_> = rows
+        .iter()
+        .filter(|row| (4.0..=6.0).contains(&row["v"].as_f64().unwrap()))
+        .cloned()
+        .collect();
+    assert_eq!(in_range_rows.len(), 30, "values 4, 5, 6 x 10 reps");
+
+    let opts = ChartOptions {
+        chart_type: ChartType::Histogram,
+        x_column: Some("v".into()),
+        bins: 2,
+        x_range: Some([4.0, 6.0]),
+        format: ChartFormat::Svg,
+        ..ChartOptions::default()
+    };
+
+    let full = render_chart(&rows, &opts).unwrap();
+    let control = render_chart(&in_range_rows, &opts).unwrap();
+
+    // Bin contents first, deliberately: this assertion is the one that is
+    // independently red under folding, without leaning on the counts.
+    assert!(
+        full.bytes == control.bytes,
+        "the two tall edge bins folding produced must be gone"
+    );
+    assert_eq!(full.rows_plotted, 30);
+    assert_eq!(full.excluded_out_of_range, 70);
+}
+
+/// An `x_range` window containing no data renders an empty histogram at the
+/// requested extent rather than erroring — a per-window animation frame
+/// stays renderable — and says so with `rows_plotted: 0`.
+#[test]
+fn histogram_x_range_with_no_data_in_window_renders_empty() {
+    let rows: Vec<_> = (0..10).map(|i| json!({"v": f64::from(i)})).collect();
+    let opts = ChartOptions {
+        chart_type: ChartType::Histogram,
+        x_column: Some("v".into()),
+        bins: 4,
+        x_range: Some([100.0, 200.0]),
+        ..ChartOptions::default()
+    };
+
+    let result = render_chart(&rows, &opts).expect("an empty window still renders");
+
+    assert_eq!(result.rows_plotted, 0);
+    assert_eq!(result.excluded_out_of_range, 10);
+}
+
+/// Without an `x_range` nothing is ever excluded: the bin extent is the
+/// data's own min/max, so every value lands in a bin — including the maximum,
+/// which belongs to the right-closed topmost bin.
+#[test]
+fn histogram_without_x_range_excludes_nothing() {
+    let rows: Vec<_> = (0..100).map(|i| json!({"v": f64::from(i % 10)})).collect();
+    let opts = ChartOptions {
+        chart_type: ChartType::Histogram,
+        x_column: Some("v".into()),
+        bins: 10,
+        ..ChartOptions::default()
+    };
+
+    let result = render_chart(&rows, &opts).unwrap();
+
+    assert_eq!(result.rows_plotted, 100);
+    assert_eq!(result.excluded_out_of_range, 0);
+}
+
+/// `ChartOptions::bins` is a bare `pub u32`, so the public `render_chart`
+/// API can hand the renderer any value at all. `draw_histogram` allocates
+/// one `u64` counter per bin, so an unclamped `u32::MAX` would ask for
+/// roughly 34 GB. The MCP tool clamps its own parameter, but the library
+/// API has to be safe on its own — the renderer re-applies the cap.
+///
+/// `0` is corrected upward the same way rather than dividing by zero.
+#[test]
+fn histogram_clamps_absurd_bin_counts() {
+    let rows: Vec<_> = (0..20).map(|i| json!({"v": f64::from(i)})).collect();
+
+    for bins in [0, 1, u32::MAX] {
+        let opts = ChartOptions {
+            chart_type: ChartType::Histogram,
+            x_column: Some("v".into()),
+            bins,
+            format: ChartFormat::Svg,
+            ..ChartOptions::default()
+        };
+
+        let result = render_chart(&rows, &opts)
+            .unwrap_or_else(|e| panic!("bins={bins} must render, got: {}", e.message));
+        assert_eq!(result.rows_plotted, 20, "bins={bins}");
+    }
+
+    // The cap is a real ceiling, not just a guard against overflow: asking
+    // for u32::MAX bins renders the same chart as asking for the cap.
+    let capped = ChartOptions {
+        chart_type: ChartType::Histogram,
+        x_column: Some("v".into()),
+        bins: 500,
+        format: ChartFormat::Svg,
+        ..ChartOptions::default()
+    };
+    let absurd = ChartOptions {
+        bins: u32::MAX,
+        ..capped.clone()
+    };
+
+    assert!(
+        render_chart(&rows, &capped).unwrap().bytes == render_chart(&rows, &absurd).unwrap().bytes,
+        "bins beyond the cap must render as the cap, not allocate unboundedly"
+    );
 }
 
 /// Missing required x column returns a schema-mismatch error with a helpful message.
