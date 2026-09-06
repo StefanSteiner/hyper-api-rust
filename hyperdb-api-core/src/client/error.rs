@@ -2,190 +2,278 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Error types for the Hyper client.
+//!
+//! [`Error`] is a flat enum: one variant per failure mode, matched
+//! directly, with no `kind()` discriminator and no `Box<dyn StdError>`
+//! cause channel. That is the shape the [Microsoft Pragmatic Rust
+//! Guidelines][msrg] call for (M-ERRORS-CANONICAL-STRUCTS,
+//! M-ERRORS-AVOID-WRAPPING-AND-AS-DYN), and it mirrors the public
+//! `hyperdb_api::Error` this type feeds.
+//!
+//! This type is **internal**. It is not re-exported from `hyperdb-api`;
+//! callers of the public API match on `hyperdb_api::Error` instead, which
+//! `From<client::Error>` produces.
+//!
+//! [msrg]: https://microsoft.github.io/rust-guidelines/
 
-use std::error::Error as StdError;
-use std::fmt;
 use std::io;
 
+use thiserror::Error as ThisError;
+
 /// The error type for Hyper client operations.
-#[derive(Debug)]
-pub struct Error {
-    kind: ErrorKind,
-    message: String,
-    cause: Option<Box<dyn StdError + Send + Sync>>,
-    /// SQLSTATE error code (for query errors)
-    sqlstate_code: Option<String>,
-    /// Additional detail about the error
-    detail: Option<String>,
-    /// Hint for resolving the error
-    hint: Option<String>,
+///
+/// Variants that can carry a server-supplied SQLSTATE expose it as a
+/// field, so callers match on it structurally rather than scraping the
+/// message. The remaining variants are single-string: whatever context
+/// exists is already rendered into that string by the constructor.
+///
+/// Deliberately **not** `#[non_exhaustive]`. That attribute buys
+/// forward-compatibility for downstream matches, which this type has no
+/// use for: it is internal, not re-exported, and `hyperdb-api` is its only
+/// consumer and ships from this same workspace in lockstep. What it would
+/// cost is the compile-time exhaustiveness check on
+/// `From<client::Error> for hyperdb_api::Error` — the one place a new
+/// variant must be given a public mapping. Better that adding a variant
+/// breaks that build than silently degrades to `Error::Internal`.
+#[derive(Debug, ThisError)]
+pub enum Error {
+    /// Connection failed.
+    #[error("{message}")]
+    Connection {
+        /// Human-readable description of the failure.
+        message: String,
+        /// SQLSTATE, when the failure arrived from the server (gRPC
+        /// reports connection-class SQLSTATEs in the `08xxx` family).
+        sqlstate: Option<String>,
+    },
+
+    /// Authentication failed.
+    #[error("{0}")]
+    Authentication(String),
+
+    /// Query execution failed.
+    ///
+    /// The one variant that carries the server's full diagnostic
+    /// payload — `DETAIL` and `HINT` are surfaced verbatim by the public
+    /// `hyperdb_api::Error::Server` variant this maps to.
+    #[error("{message}{}", render_detail(message, detail.as_deref()))]
+    Query {
+        /// The primary error message.
+        message: String,
+        /// SQLSTATE code, when the server supplied one.
+        sqlstate: Option<String>,
+        /// The server's `DETAIL` field.
+        detail: Option<String>,
+        /// The server's `HINT` field.
+        hint: Option<String>,
+    },
+
+    /// Invalid response from server.
+    #[error("{0}")]
+    Protocol(String),
+
+    /// I/O error.
+    #[error("{0}")]
+    Io(String),
+
+    /// Configuration error.
+    #[error("{0}")]
+    Config(String),
+
+    /// Operation timed out.
+    #[error("{0}")]
+    Timeout(String),
+
+    /// Operation was cancelled.
+    #[error("{message}")]
+    Cancelled {
+        /// Human-readable description of the cancellation.
+        message: String,
+        /// SQLSTATE, typically `57014` (`query_canceled`).
+        sqlstate: Option<String>,
+    },
+
+    /// The connection was closed.
+    #[error("{message}")]
+    Closed {
+        /// Human-readable description.
+        message: String,
+        /// SQLSTATE, when the server supplied one.
+        sqlstate: Option<String>,
+    },
+
+    /// Type conversion error.
+    #[error("{0}")]
+    Conversion(String),
+
+    /// Feature not supported by this connection type.
+    #[error("{0}")]
+    FeatureNotSupported(String),
+
+    /// Other error.
+    #[error("{0}")]
+    Other(String),
 }
 
-/// The kind of error that occurred.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ErrorKind {
-    /// Connection failed.
-    Connection,
-    /// Authentication failed.
-    Authentication,
-    /// Query execution failed.
-    Query,
-    /// Invalid response from server.
-    Protocol,
-    /// I/O error.
-    Io,
-    /// Configuration error.
-    Config,
-    /// Operation timed out.
-    Timeout,
-    /// Operation was cancelled.
-    Cancelled,
-    /// The connection was closed.
-    Closed,
-    /// Type conversion error.
-    Conversion,
-    /// Feature not supported by this connection type.
-    FeatureNotSupported,
-    /// Other error.
-    Other,
+/// Renders the `": {detail}"` suffix for [`Error::Query`]'s `Display`,
+/// suppressing it when `message` already contains the detail text.
+///
+/// gRPC's `decode_error_info` builds `"{primary}: {customer_detail}"` as
+/// the message and *also* reports `customer_detail` separately, so without
+/// this guard the detail would print twice.
+fn render_detail(message: &str, detail: Option<&str>) -> String {
+    match detail {
+        Some(detail) if !message.contains(detail) => format!(": {detail}"),
+        _ => String::new(),
+    }
 }
 
 impl Error {
-    /// Creates a new error with the given kind and message.
-    pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
-        Error {
-            kind,
-            message: message.into(),
-            cause: None,
-            sqlstate_code: None,
-            detail: None,
-            hint: None,
-        }
-    }
+    // Constructors. Every variant has one taking `impl Into<String>`;
+    // the variants with a SQLSTATE field default it to `None` here and
+    // are built with struct literals where a code is available.
 
-    /// Creates a new error with a cause.
-    pub fn with_cause<E>(kind: ErrorKind, message: impl Into<String>, cause: E) -> Self
-    where
-        E: Into<Box<dyn StdError + Send + Sync>>,
-    {
-        Error {
-            kind,
-            message: message.into(),
-            cause: Some(cause.into()),
-            sqlstate_code: None,
-            detail: None,
-            hint: None,
-        }
-    }
-
-    /// Creates a new error with additional details (SQLSTATE, detail, hint).
-    ///
-    /// This is primarily used for gRPC errors that carry structured error information.
-    pub fn new_with_details(
-        kind: ErrorKind,
-        message: impl Into<String>,
-        detail: Option<String>,
-        hint: Option<String>,
-        sqlstate: Option<String>,
-    ) -> Self {
-        Error {
-            kind,
-            message: message.into(),
-            cause: None,
-            sqlstate_code: sqlstate,
-            detail,
-            hint,
-        }
-    }
-
-    /// Returns the error kind.
-    #[must_use]
-    pub fn kind(&self) -> ErrorKind {
-        self.kind
-    }
-
-    /// Returns the error message.
-    #[must_use]
-    pub fn message(&self) -> &str {
-        &self.message
-    }
-
-    /// Returns the error detail, if available.
-    #[must_use]
-    pub fn detail(&self) -> Option<&str> {
-        self.detail.as_deref()
-    }
-
-    /// Returns the error hint, if available.
-    #[must_use]
-    pub fn hint(&self) -> Option<&str> {
-        self.hint.as_deref()
-    }
-
-    // Convenience constructors
-
-    /// Creates a connection error.
+    /// Creates a connection error with no SQLSTATE.
     pub fn connection(message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::Connection, message)
+        Error::Connection {
+            message: message.into(),
+            sqlstate: None,
+        }
     }
 
     /// Creates an authentication error.
     pub fn authentication(message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::Authentication, message)
+        Error::Authentication(message.into())
     }
 
-    /// Creates a query error.
+    /// Creates a query error with no SQLSTATE, detail, or hint.
     pub fn query(message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::Query, message)
+        Error::Query {
+            message: message.into(),
+            sqlstate: None,
+            detail: None,
+            hint: None,
+        }
     }
 
     /// Creates a protocol error.
     pub fn protocol(message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::Protocol, message)
+        Error::Protocol(message.into())
     }
 
-    /// Creates a closed connection error.
-    #[must_use]
-    pub fn closed() -> Self {
-        Self::new(ErrorKind::Closed, "connection closed")
+    /// Creates an I/O error from a message.
+    ///
+    /// Prefer [`Error::from_io`] when an [`io::Error`] is in hand.
+    pub fn io(message: impl Into<String>) -> Self {
+        Error::Io(message.into())
+    }
+
+    /// Creates a configuration error.
+    pub fn config(message: impl Into<String>) -> Self {
+        Error::Config(message.into())
     }
 
     /// Creates a timeout error.
-    #[must_use]
-    pub fn timeout() -> Self {
-        Self::new(ErrorKind::Timeout, "operation timed out")
+    pub fn timeout(message: impl Into<String>) -> Self {
+        Error::Timeout(message.into())
     }
 
-    /// Creates an error from an I/O error.
+    /// Creates a cancellation error with no SQLSTATE.
+    pub fn cancelled(message: impl Into<String>) -> Self {
+        Error::Cancelled {
+            message: message.into(),
+            sqlstate: None,
+        }
+    }
+
+    /// Creates a closed-connection error with no SQLSTATE.
+    pub fn closed(message: impl Into<String>) -> Self {
+        Error::Closed {
+            message: message.into(),
+            sqlstate: None,
+        }
+    }
+
+    /// Creates a type-conversion error.
+    pub fn conversion(message: impl Into<String>) -> Self {
+        Error::Conversion(message.into())
+    }
+
+    /// Creates a "feature not supported" error.
+    ///
+    /// Used when an operation is not available on a particular connection
+    /// type (e.g. write operations on gRPC connections).
+    pub fn feature_not_supported(message: impl Into<String>) -> Self {
+        Error::FeatureNotSupported(message.into())
+    }
+
+    /// Creates a generic "other" error.
+    pub fn other(message: impl Into<String>) -> Self {
+        Error::Other(message.into())
+    }
+
+    // Convenience constructors for the common shapes.
+
+    /// Creates an I/O error from an [`io::Error`].
+    ///
+    /// Takes the error by value so it can be used point-free as
+    /// `.map_err(Error::from_io)`.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "call-site ergonomics: consumed as a `map_err` function reference"
+    )]
     #[must_use]
-    pub fn io(err: io::Error) -> Self {
-        Self::with_cause(ErrorKind::Io, err.to_string(), err)
+    pub fn from_io(err: io::Error) -> Self {
+        Error::Io(err.to_string())
     }
 
     /// Creates an error from a database error response.
     #[must_use]
     pub fn db(severity: &str, code: &str, message: &str) -> Self {
-        Error {
-            kind: ErrorKind::Query,
+        Error::Query {
             message: format!("{severity}: {message} ({code})"),
-            cause: None,
-            sqlstate_code: Some(code.to_string()),
+            sqlstate: Some(code.to_string()),
             detail: None,
             hint: None,
         }
     }
 
-    /// Creates a "feature not supported" error.
-    ///
-    /// Used when an operation is not available on a particular connection type
-    /// (e.g., write operations on gRPC connections).
-    pub fn feature_not_supported(message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::FeatureNotSupported, message)
+    /// Returns the error message, without any `DETAIL` suffix that
+    /// `Display` would append.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        match self {
+            Error::Connection { message, .. }
+            | Error::Query { message, .. }
+            | Error::Cancelled { message, .. }
+            | Error::Closed { message, .. } => message,
+            Error::Authentication(message)
+            | Error::Protocol(message)
+            | Error::Io(message)
+            | Error::Config(message)
+            | Error::Timeout(message)
+            | Error::Conversion(message)
+            | Error::FeatureNotSupported(message)
+            | Error::Other(message) => message,
+        }
     }
 
-    /// Creates a generic "other" error.
-    pub fn other(message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::Other, message)
+    /// Returns the error detail, if available.
+    #[must_use]
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            Error::Query { detail, .. } => detail.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Returns the error hint, if available.
+    #[must_use]
+    pub fn hint(&self) -> Option<&str> {
+        match self {
+            Error::Query { hint, .. } => hint.as_deref(),
+            _ => None,
+        }
     }
 
     /// Extracts the `PostgreSQL` SQLSTATE code from the error, if present.
@@ -193,25 +281,32 @@ impl Error {
     /// SQLSTATE codes are 5-character codes that identify error conditions.
     /// See: <https://www.postgresql.org/docs/current/errcodes-appendix.html>
     ///
+    /// For [`Error::Query`] with no stored code, falls back to scraping the
+    /// trailing `(CODE)` that Hyper appends to wire error messages.
+    ///
     /// # Example
     ///
     /// ```
-    /// use hyperdb_api_core::client::{Error, ErrorKind};
+    /// use hyperdb_api_core::client::Error;
     ///
     /// let err = Error::db("ERROR", "42P04", "database already exists");
     /// assert_eq!(err.sqlstate(), Some("42P04"));
     /// ```
     #[must_use]
     pub fn sqlstate(&self) -> Option<&str> {
-        // First check if we have a stored SQLSTATE code
-        if let Some(ref code) = self.sqlstate_code {
-            return Some(code);
-        }
-        // Fall back to extracting from message for backwards compatibility
-        if self.kind == ErrorKind::Query {
-            extract_sqlstate(&self.message)
-        } else {
-            None
+        match self {
+            Error::Connection { sqlstate, .. }
+            | Error::Cancelled { sqlstate, .. }
+            | Error::Closed { sqlstate, .. } => sqlstate.as_deref(),
+            Error::Query {
+                sqlstate, message, ..
+            } => match sqlstate {
+                Some(code) => Some(code),
+                // Backwards compatibility: older paths encode the code in
+                // the message rather than storing it.
+                None => extract_sqlstate(message),
+            },
+            _ => None,
         }
     }
 }
@@ -235,30 +330,9 @@ fn extract_sqlstate(message: &str) -> Option<&str> {
     }
 }
 
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.message)?;
-        if let Some(ref detail) = self.detail
-            && !self.message.contains(detail)
-        {
-            write!(f, ": {detail}")?;
-        }
-        if let Some(ref cause) = self.cause {
-            write!(f, ": {cause}")?;
-        }
-        Ok(())
-    }
-}
-
-impl StdError for Error {
-    fn source(&self) -> Option<&(dyn StdError + 'static)> {
-        self.cause.as_ref().map(|e| &**e as &dyn std::error::Error)
-    }
-}
-
 impl From<io::Error> for Error {
     fn from(err: io::Error) -> Self {
-        Error::io(err)
+        Error::from_io(err)
     }
 }
 
@@ -290,12 +364,75 @@ mod tests {
 
     #[test]
     fn test_sqlstate_non_query_error() {
-        // Non-query errors should not have SQLSTATE
+        // Non-query errors carry no SQLSTATE unless one was supplied.
         let err = Error::connection("connection failed");
         assert_eq!(err.sqlstate(), None);
 
-        let err = Error::timeout();
+        let err = Error::timeout("operation timed out");
         assert_eq!(err.sqlstate(), None);
+    }
+
+    /// The gRPC path builds `Connection` / `Cancelled` / `Closed` with a
+    /// server-supplied SQLSTATE; `sqlstate()` must surface it, because the
+    /// public `hyperdb_api::Error` mapping forwards it to callers.
+    #[test]
+    fn test_sqlstate_on_non_query_variants() {
+        let err = Error::Cancelled {
+            message: "query canceled".to_string(),
+            sqlstate: Some("57014".to_string()),
+        };
+        assert_eq!(err.sqlstate(), Some("57014"));
+
+        let err = Error::Connection {
+            message: "connection failure".to_string(),
+            sqlstate: Some("08006".to_string()),
+        };
+        assert_eq!(err.sqlstate(), Some("08006"));
+
+        let err = Error::Closed {
+            message: "closed".to_string(),
+            sqlstate: Some("08003".to_string()),
+        };
+        assert_eq!(err.sqlstate(), Some("08003"));
+    }
+
+    /// `Display` appends `DETAIL` only when the message doesn't already
+    /// carry it — gRPC folds the detail into the message *and* reports it
+    /// separately, and printing it twice was the bug this guard prevents.
+    #[test]
+    fn test_display_detail_suffix() {
+        let err = Error::Query {
+            message: "column not found".to_string(),
+            sqlstate: None,
+            detail: Some("column \"foo\" does not exist".to_string()),
+            hint: None,
+        };
+        assert_eq!(
+            err.to_string(),
+            "column not found: column \"foo\" does not exist"
+        );
+
+        let err = Error::Query {
+            message: "column not found: column \"foo\" does not exist".to_string(),
+            sqlstate: None,
+            detail: Some("column \"foo\" does not exist".to_string()),
+            hint: None,
+        };
+        assert_eq!(
+            err.to_string(),
+            "column not found: column \"foo\" does not exist",
+            "detail already present in the message must not be repeated"
+        );
+    }
+
+    /// An `io::Error` renders exactly once. The previous struct-shaped
+    /// error stored the same text as both `message` and `cause`, so
+    /// `Display` emitted it twice.
+    #[test]
+    fn test_io_error_renders_once() {
+        let io_err = io::Error::new(io::ErrorKind::ConnectionRefused, "refused");
+        let err = Error::from(io_err);
+        assert_eq!(err.to_string(), "refused");
     }
 
     #[test]

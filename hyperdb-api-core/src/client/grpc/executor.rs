@@ -48,7 +48,7 @@ use bytes::Bytes;
 use tonic::Streaming;
 use tracing::{debug, trace, warn};
 
-use crate::client::error::{Error, ErrorKind, Result};
+use crate::client::error::{Error, Result};
 
 use super::error::from_grpc_status;
 use super::proto::hyper_service::query_param::TransferMode;
@@ -254,9 +254,10 @@ where
     /// instead of buffering the entire inline response.
     async fn read_initial_results(&mut self) -> Result<()> {
         let response = {
-            let stream = self.execute_stream.as_mut().ok_or_else(|| {
-                Error::new(ErrorKind::Protocol, "ExecuteQuery stream not initialized")
-            })?;
+            let stream = self
+                .execute_stream
+                .as_mut()
+                .ok_or_else(|| Error::protocol("ExecuteQuery stream not initialized"))?;
             stream.message().await.map_err(from_grpc_status)?
         };
 
@@ -428,7 +429,7 @@ where
         let query_id = self
             .query_id
             .clone()
-            .ok_or_else(|| Error::new(ErrorKind::Protocol, "No query ID for status request"))?;
+            .ok_or_else(|| Error::protocol("No query ID for status request"))?;
 
         debug!(query_id = %query_id, "Requesting query status");
 
@@ -470,7 +471,7 @@ where
         let stream = self
             .query_info_stream
             .as_mut()
-            .ok_or_else(|| Error::new(ErrorKind::Protocol, "QueryInfo stream not initialized"))?;
+            .ok_or_else(|| Error::protocol("QueryInfo stream not initialized"))?;
 
         if let Some(info) = stream.message().await.map_err(from_grpc_status)? {
             match info.content {
@@ -531,7 +532,7 @@ where
         let query_id = self
             .query_id
             .clone()
-            .ok_or_else(|| Error::new(ErrorKind::Protocol, "No query ID for result request"))?;
+            .ok_or_else(|| Error::protocol("No query ID for result request"))?;
 
         debug!(
             query_id = %query_id,
@@ -582,9 +583,10 @@ where
     async fn read_results(&mut self) -> Result<()> {
         loop {
             let result = {
-                let stream = self.query_result_stream.as_mut().ok_or_else(|| {
-                    Error::new(ErrorKind::Protocol, "QueryResult stream not initialized")
-                })?;
+                let stream = self
+                    .query_result_stream
+                    .as_mut()
+                    .ok_or_else(|| Error::protocol("QueryResult stream not initialized"))?;
                 stream.message().await.map_err(from_grpc_status)?
             };
 

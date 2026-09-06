@@ -184,13 +184,13 @@ pub mod rustls_impl {
     use tokio_rustls::TlsConnector;
     use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 
-    use crate::client::error::{Error, ErrorKind, Result};
+    use crate::client::error::{Error, Result};
 
     /// Creates a TLS connector from the configuration.
     ///
     /// # Errors
     ///
-    /// Returns [`ErrorKind::Config`] when:
+    /// Returns [`Error::Config`] when:
     /// - The CA cert path is set but cannot be opened or the PEM bytes
     ///   cannot be parsed / added to the root store.
     /// - The client cert / key path is set but cannot be opened, the
@@ -214,20 +214,20 @@ pub mod rustls_impl {
         // Add custom CA certificate if provided
         if let Some(ref ca_path) = config.ca_cert_path {
             let certs = CertificateDer::pem_file_iter(ca_path)
-                .map_err(|e| Error::new(ErrorKind::Config, format!("failed to read CA cert: {e}")))?
+                .map_err(|e| Error::config(format!("failed to read CA cert: {e}")))?
                 .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(|e| Error::new(ErrorKind::Config, format!("invalid CA cert: {e}")))?;
+                .map_err(|e| Error::config(format!("invalid CA cert: {e}")))?;
             for cert in certs {
-                root_store.add(cert).map_err(|e| {
-                    Error::new(ErrorKind::Config, format!("failed to add CA cert: {e}"))
-                })?;
+                root_store
+                    .add(cert)
+                    .map_err(|e| Error::config(format!("failed to add CA cert: {e}")))?;
             }
         }
 
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let builder = ClientConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
-            .map_err(|e| Error::new(ErrorKind::Config, format!("TLS protocol config error: {e}")))?
+            .map_err(|e| Error::config(format!("TLS protocol config error: {e}")))?
             .with_root_certificates(root_store);
 
         let client_config = if config.has_client_cert() {
@@ -236,24 +236,19 @@ pub mod rustls_impl {
             let key_path = config.client_key_path.as_ref().unwrap();
 
             let certs = CertificateDer::pem_file_iter(cert_path)
-                .map_err(|e| {
-                    Error::new(
-                        ErrorKind::Config,
-                        format!("failed to read client cert: {e}"),
-                    )
-                })?
+                .map_err(|e| Error::config(format!("failed to read client cert: {e}")))?
                 .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(|e| Error::new(ErrorKind::Config, format!("invalid client cert: {e}")))?;
+                .map_err(|e| Error::config(format!("invalid client cert: {e}")))?;
 
             // `from_pem_file` returns `Error::NoItemsFound` when the file is
             // syntactically valid PEM but contains no private-key section, so
             // we don't need a separate "no private key found" branch.
             let key = PrivateKeyDer::from_pem_file(key_path)
-                .map_err(|e| Error::new(ErrorKind::Config, format!("invalid client key: {e}")))?;
+                .map_err(|e| Error::config(format!("invalid client key: {e}")))?;
 
             builder
                 .with_client_auth_cert(certs, key)
-                .map_err(|e| Error::new(ErrorKind::Config, format!("invalid client auth: {e}")))?
+                .map_err(|e| Error::config(format!("invalid client auth: {e}")))?
         } else {
             builder.with_no_client_auth()
         };
@@ -268,9 +263,9 @@ pub mod rustls_impl {
     ///
     /// # Errors
     ///
-    /// - Returns [`ErrorKind::Config`] if `server_name` is not a
+    /// - Returns [`Error::Config`] if `server_name` is not a
     ///   valid DNS name or IP literal accepted by `rustls`.
-    /// - Returns [`ErrorKind::Connection`] if the TLS handshake with
+    /// - Returns [`Error::Connection`] if the TLS handshake with
     ///   the peer fails (certificate rejected, protocol error, I/O
     ///   failure).
     pub async fn wrap_stream(
@@ -279,12 +274,12 @@ pub mod rustls_impl {
         server_name: &str,
     ) -> Result<TlsStream> {
         let domain = rustls::pki_types::ServerName::try_from(server_name.to_string())
-            .map_err(|_| Error::new(ErrorKind::Config, "invalid server name"))?;
+            .map_err(|_| Error::config("invalid server name"))?;
 
         connector
             .connect(domain, stream)
             .await
-            .map_err(|e| Error::new(ErrorKind::Connection, format!("TLS handshake failed: {e}")))
+            .map_err(|e| Error::connection(format!("TLS handshake failed: {e}")))
     }
 }
 

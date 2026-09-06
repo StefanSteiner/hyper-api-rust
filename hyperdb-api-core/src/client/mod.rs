@@ -306,7 +306,7 @@ pub use cancel::Cancellable;
 pub use client::{Client, CopyInWriter, QueryStream};
 pub use config::Config;
 pub use endpoint::ConnectionEndpoint;
-pub use error::{Error, ErrorKind, Result};
+pub use error::{Error, Result};
 pub use notice::{Notice, NoticeReceiver};
 pub use prepare::{OwnedPreparedStatement, PreparedStatement, SqlParam};
 pub use row::{BatchRow, FromBinaryValue, Row, StreamRow};

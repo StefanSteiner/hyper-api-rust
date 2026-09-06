@@ -144,7 +144,7 @@ where
         !self.desynchronized
     }
 
-    /// Fast-fails with an explicit [`ErrorKind::Connection`] error if the
+    /// Fast-fails with an explicit [`Error::Connection`] error if the
     /// wire has fallen out of sync with the server, before any bytes are
     /// written to the stream. Called from the entry point of every public
     /// method that initiates a new server request — simple queries,
@@ -155,8 +155,7 @@ where
     /// *next* unrelated operation.
     pub(crate) fn ensure_healthy(&self) -> Result<()> {
         if self.desynchronized {
-            return Err(Error::new(
-                crate::client::error::ErrorKind::Connection,
+            return Err(Error::connection(
                 "connection is desynchronized from the server and cannot be reused; \
                  discard it and open a new one",
             ));
@@ -579,7 +578,7 @@ where
     ///   (server closed the connection).
     pub fn read_message(&mut self) -> Result<Message> {
         loop {
-            if let Some(msg) = Message::parse(&mut self.read_buf).map_err(Error::io)? {
+            if let Some(msg) = Message::parse(&mut self.read_buf).map_err(Error::from_io)? {
                 return Ok(msg);
             }
 
@@ -604,7 +603,7 @@ where
             if n == 0 {
                 self.read_buf.truncate(prev_len);
                 warn!(target: "hyperdb_api", "connection-closed");
-                return Err(Error::closed());
+                return Err(Error::closed("connection closed"));
             }
             self.read_buf.truncate(prev_len + n);
         }
@@ -1180,12 +1179,9 @@ where
                 }
                 Message::CopyData(body) if in_copy_out => {
                     let chunk = body.data();
-                    writer.write_all(chunk).map_err(|e| {
-                        Error::new(
-                            super::error::ErrorKind::Io,
-                            format!("Failed to write COPY data: {e}"),
-                        )
-                    })?;
+                    writer
+                        .write_all(chunk)
+                        .map_err(|e| Error::io(format!("Failed to write COPY data: {e}")))?;
                     total_bytes += chunk.len() as u64;
                 }
                 Message::CopyDone => {
@@ -1280,7 +1276,7 @@ mod tests {
         conn.desynchronized = true;
         assert!(!conn.is_healthy());
         let err = conn.ensure_healthy().expect_err("must fail-fast");
-        assert_eq!(err.kind(), crate::client::error::ErrorKind::Connection);
+        assert!(matches!(err, Error::Connection { .. }));
         assert!(
             err.to_string().to_lowercase().contains("desynchron"),
             "error message should mention desynchronization; got: {err}",
@@ -1319,7 +1315,7 @@ mod tests {
         let Err(err) = conn.simple_query("SELECT 1") else {
             panic!("desynced simple_query must fail-fast")
         };
-        assert_eq!(err.kind(), crate::client::error::ErrorKind::Connection);
+        assert!(matches!(err, Error::Connection { .. }));
         assert!(err.to_string().to_lowercase().contains("desynchron"));
     }
 }

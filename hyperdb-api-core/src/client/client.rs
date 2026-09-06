@@ -70,7 +70,7 @@ use super::cancel::Cancellable;
 use super::config::Config;
 use super::connection::{RawConnection, parse_error_response};
 use super::endpoint::ConnectionEndpoint;
-use super::error::{Error, ErrorKind, Result};
+use super::error::{Error, Result};
 use super::prepare;
 use super::row::{Row, StreamRow};
 use super::statement::ParamFormat;
@@ -572,10 +572,10 @@ impl Client {
                         error = %e,
                         "query-cancel-send-failed"
                     );
-                    Error::io(e)
+                    Error::from_io(e)
                 })?;
 
-                stream.flush().map_err(Error::io)?;
+                stream.flush().map_err(Error::from_io)?;
             }
             #[cfg(unix)]
             ConnectionEndpoint::DomainSocket { directory, name } => {
@@ -602,10 +602,10 @@ impl Client {
                         error = %e,
                         "query-cancel-send-failed"
                     );
-                    Error::io(e)
+                    Error::from_io(e)
                 })?;
 
-                stream.flush().map_err(Error::io)?;
+                stream.flush().map_err(Error::from_io)?;
             }
             #[cfg(windows)]
             ConnectionEndpoint::NamedPipe { host, name } => {
@@ -636,10 +636,10 @@ impl Client {
                         error = %e,
                         "query-cancel-send-failed"
                     );
-                    Error::io(e)
+                    Error::from_io(e)
                 })?;
 
-                file.flush().map_err(Error::io)?;
+                file.flush().map_err(Error::from_io)?;
             }
         }
 
@@ -1185,7 +1185,7 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// - Returns [`ErrorKind::Query`] if `query` (trimmed) does not
+    /// - Returns [`Error::Query`] if `query` (trimmed) does not
     ///   start with `COPY` (defense-in-depth check against non-COPY
     ///   statements).
     /// - Returns [`Error`] (connection) if the connection mutex is
@@ -1195,8 +1195,7 @@ impl Client {
     pub fn copy_in_raw(&self, query: &str) -> Result<CopyInWriter<'_>> {
         // Defense-in-depth: reject queries that don't look like COPY statements
         if !query.trim_start().to_ascii_uppercase().starts_with("COPY") {
-            return Err(Error::new(
-                ErrorKind::Query,
+            return Err(Error::query(
                 "copy_in_raw() requires a COPY statement. \
                  The query must start with 'COPY'.",
             ));

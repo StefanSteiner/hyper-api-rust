@@ -439,7 +439,7 @@ impl AsyncClient {
                         error = %e,
                         "query-cancel-send-failed"
                     );
-                    Error::io(e)
+                    Error::from_io(e)
                 })?;
             }
             #[cfg(unix)]
@@ -466,7 +466,7 @@ impl AsyncClient {
                         error = %e,
                         "query-cancel-send-failed"
                     );
-                    Error::io(e)
+                    Error::from_io(e)
                 })?;
             }
             #[cfg(windows)]
@@ -499,10 +499,10 @@ impl AsyncClient {
                         error = %e,
                         "query-cancel-send-failed"
                     );
-                    Error::io(e)
+                    Error::from_io(e)
                 })?;
 
-                file.flush().map_err(Error::io)?;
+                file.flush().map_err(Error::from_io)?;
             }
         }
 
@@ -608,8 +608,8 @@ impl AsyncClient {
                 let mut buf = BytesMut::with_capacity(16);
                 frontend::cancel_request(self.process_id, self.secret_key, &mut buf);
 
-                stream.write_all(&buf).map_err(Error::io)?;
-                stream.flush().map_err(Error::io)?;
+                stream.write_all(&buf).map_err(Error::from_io)?;
+                stream.flush().map_err(Error::from_io)?;
             }
             #[cfg(unix)]
             ConnectionEndpoint::DomainSocket { directory, name } => {
@@ -630,8 +630,8 @@ impl AsyncClient {
                 let mut buf = BytesMut::with_capacity(16);
                 frontend::cancel_request(self.process_id, self.secret_key, &mut buf);
 
-                stream.write_all(&buf).map_err(Error::io)?;
-                stream.flush().map_err(Error::io)?;
+                stream.write_all(&buf).map_err(Error::from_io)?;
+                stream.flush().map_err(Error::from_io)?;
             }
             #[cfg(windows)]
             ConnectionEndpoint::NamedPipe { host, name } => {
@@ -655,8 +655,8 @@ impl AsyncClient {
                 let mut buf = BytesMut::with_capacity(16);
                 frontend::cancel_request(self.process_id, self.secret_key, &mut buf);
 
-                file.write_all(&buf).map_err(Error::io)?;
-                file.flush().map_err(Error::io)?;
+                file.write_all(&buf).map_err(Error::from_io)?;
+                file.flush().map_err(Error::from_io)?;
             }
         }
 

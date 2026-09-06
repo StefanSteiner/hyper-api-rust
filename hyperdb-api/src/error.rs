@@ -475,76 +475,80 @@ impl Error {
     }
 }
 
-// Internal mapping: `client::Error` → public `Error`. The mapping is
-// exhaustive over `client::ErrorKind` (verified to NOT be
-// `#[non_exhaustive]`); adding a kind in `hyperdb-api-core` will break
-// this build until the mapping is updated, which is intended.
+// Internal mapping: `client::Error` → public `Error`. Both types are now
+// flat enums, so this is a variant-to-variant match. `client::Error` is
+// `#[non_exhaustive]`, so the wildcard arm is required; it routes any
+// future variant to `Internal` rather than failing the build.
 //
-// `chain = err.to_string()` walks the inner error's full Display chain
-// (message + cause + detail). We use it for tuple variants whose
-// `Display` is just `"<prefix>: {0}"`, where embedding the chain into
-// the single string field gives the caller the full picture.
+// `chain = err.to_string()` renders the inner error's `Display`, which
+// folds in the `DETAIL` suffix where one applies. We use it for tuple
+// variants whose `Display` is just `"<prefix>: {0}"`, where embedding the
+// whole rendering into the single string field gives the caller the full
+// picture.
 //
 // For the `Server` variant we use the *un-chained* `message` and pass
 // `detail`/`hint` separately; the `Server` `Display` impl re-appends
 // "DETAIL: ..." and "HINT: ..." lines from those fields, so using
 // `chain` would duplicate the detail text.
 //
-// SQLSTATE: `client::Error::sqlstate()` may return `Some` for any
-// kind. After Follow-up C, the flat enum carries `sqlstate` on
-// `Server`, `Connection`, `Closed`, and `Cancelled` so callers can
-// match on it programmatically (e.g. SQLSTATE 57014 `query_canceled`
-// arrives via Cancelled and is now exposed structurally). Other
-// variants still drop SQLSTATE — folded into the message via `chain`.
+// SQLSTATE: the flat enum carries `sqlstate` on `Server`, `Connection`,
+// `Closed`, and `Cancelled` so callers can match on it programmatically
+// (e.g. SQLSTATE 57014 `query_canceled` arrives via Cancelled and is
+// exposed structurally). Those are exactly the `client::Error` variants
+// that carry one, so nothing is dropped in transit.
 impl From<hyperdb_api_core::client::Error> for Error {
     fn from(err: hyperdb_api_core::client::Error) -> Self {
-        use hyperdb_api_core::client::ErrorKind as CoreKind;
+        use hyperdb_api_core::client::Error as CoreError;
 
         let chain = err.to_string();
-        let kind = err.kind();
-        let sqlstate = err.sqlstate().map(str::to_string);
-        let detail = err.detail().map(str::to_string);
-        let hint = err.hint().map(str::to_string);
-        let message = err.message().to_string();
 
-        match kind {
-            CoreKind::Connection => Error::Connection {
+        match err {
+            CoreError::Connection { sqlstate, .. } => Error::Connection {
                 message: chain,
                 source: None,
                 sqlstate,
             },
-            CoreKind::Authentication => Error::Authentication(chain),
-            // Use unchained `message` here: detail/hint are passed as
+            CoreError::Authentication(_) => Error::Authentication(chain),
+            // Use the unchained `message` here: detail/hint are passed as
             // separate fields and the `Server` Display impl re-renders
             // them. Using `chain` would duplicate detail text.
-            CoreKind::Query => Error::Server {
+            CoreError::Query {
+                message,
+                sqlstate,
+                detail,
+                hint,
+            } => Error::Server {
                 sqlstate,
                 message,
                 detail,
                 hint,
             },
-            CoreKind::Protocol => Error::Protocol(chain),
+            CoreError::Protocol(_) => Error::Protocol(chain),
             // Wire-level I/O failures are reported as Connection errors
             // (the underlying io::Error is type-erased in core, so we
             // cannot recover it as a typed `source` here).
-            CoreKind::Io => Error::Connection {
+            CoreError::Io(_) => Error::Connection {
                 message: chain,
                 source: None,
-                sqlstate,
+                sqlstate: None,
             },
-            CoreKind::Config => Error::Config(chain),
-            CoreKind::Timeout => Error::Timeout(chain),
-            CoreKind::Cancelled => Error::Cancelled {
+            CoreError::Config(_) => Error::Config(chain),
+            CoreError::Timeout(_) => Error::Timeout(chain),
+            CoreError::Cancelled { sqlstate, .. } => Error::Cancelled {
                 message: chain,
                 sqlstate,
             },
-            CoreKind::Closed => Error::Closed {
+            CoreError::Closed { sqlstate, .. } => Error::Closed {
                 message: chain,
                 sqlstate,
             },
-            CoreKind::Conversion => Error::Conversion(chain),
-            CoreKind::FeatureNotSupported => Error::FeatureNotSupported(chain),
-            CoreKind::Other => Error::Internal { message: chain },
+            CoreError::Conversion(_) => Error::Conversion(chain),
+            CoreError::FeatureNotSupported(_) => Error::FeatureNotSupported(chain),
+            CoreError::Other(_) => Error::Internal { message: chain },
+            // No wildcard arm on purpose: `client::Error` is not
+            // `#[non_exhaustive]`, so this match is exhaustive and a
+            // variant added upstream fails to compile here until it is
+            // given a deliberate public mapping.
         }
     }
 }
@@ -567,7 +571,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hyperdb_api_core::client::{Error as CoreError, ErrorKind as CoreKind};
+    use hyperdb_api_core::client::Error as CoreError;
 
     #[test]
     fn server_display_includes_sqlstate_detail_and_hint() {
@@ -603,13 +607,12 @@ mod tests {
         // appends ": {detail}" inline. The flat-Error mapping must
         // not also add "\nDETAIL: {detail}" — that would duplicate the
         // text. We verify by counting occurrences.
-        let core = CoreError::new_with_details(
-            CoreKind::Query,
-            "duplicate key value",
-            Some("Key (id)=(42) already exists.".to_string()),
-            Some("Choose a different key.".to_string()),
-            Some("23505".to_string()),
-        );
+        let core = CoreError::Query {
+            message: "duplicate key value".to_string(),
+            sqlstate: Some("23505".to_string()),
+            detail: Some("Key (id)=(42) already exists.".to_string()),
+            hint: Some("Choose a different key.".to_string()),
+        };
         let public: Error = core.into();
         let s = public.to_string();
         // The detail text should appear exactly once in the rendered
@@ -623,29 +626,36 @@ mod tests {
     }
 
     #[test]
-    fn from_client_error_exhaustive_over_kinds() {
-        // Smoke test: every ErrorKind maps cleanly with no panic.
-        // (Compilation already enforces exhaustiveness.)
-        for kind in [
-            CoreKind::Connection,
-            CoreKind::Authentication,
-            CoreKind::Query,
-            CoreKind::Protocol,
-            CoreKind::Io,
-            CoreKind::Config,
-            CoreKind::Timeout,
-            CoreKind::Cancelled,
-            CoreKind::Closed,
-            CoreKind::Conversion,
-            CoreKind::FeatureNotSupported,
-            CoreKind::Other,
+    fn from_client_error_maps_every_variant() {
+        // Smoke test: every `client::Error` variant maps cleanly with no
+        // panic and without losing the message.
+        //
+        // This list is hand-written and nothing forces it to stay
+        // complete. The guarantee that a new variant gets a deliberate
+        // mapping comes from the `From` impl instead: `client::Error` is
+        // not `#[non_exhaustive]` and that match has no wildcard, so
+        // adding a variant upstream breaks the build there. Extend this
+        // list when that happens.
+        for core in [
+            CoreError::connection("test message"),
+            CoreError::authentication("test message"),
+            CoreError::query("test message"),
+            CoreError::protocol("test message"),
+            CoreError::io("test message"),
+            CoreError::config("test message"),
+            CoreError::timeout("test message"),
+            CoreError::cancelled("test message"),
+            CoreError::closed("test message"),
+            CoreError::conversion("test message"),
+            CoreError::feature_not_supported("test message"),
+            CoreError::other("test message"),
         ] {
-            let core = CoreError::new(kind, "test message");
+            let rendered = format!("{core:?}");
             let public: Error = core.into();
             // Each variant's Display must include the message text.
             assert!(
                 public.to_string().contains("test message"),
-                "{kind:?} mapping lost the message: {public}",
+                "{rendered} mapping lost the message: {public}",
             );
         }
     }

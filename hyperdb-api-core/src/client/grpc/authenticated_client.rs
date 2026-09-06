@@ -34,7 +34,7 @@ use tracing::{debug, info, warn};
 
 use std::collections::HashMap;
 
-use crate::client::error::{Error, ErrorKind, Result};
+use crate::client::error::{Error, Result};
 use hyperdb_api_salesforce::{DataCloudToken, SharedTokenProvider};
 
 use super::error::from_grpc_status;
@@ -167,9 +167,9 @@ impl AuthenticatedGrpcClient {
     /// # Errors
     ///
     /// Propagates any error from `Self::ensure_connected`: Salesforce
-    /// auth failures (surfaced as [`ErrorKind::Authentication`]),
-    /// invalid tenant URL (surfaced as [`ErrorKind::Config`]), or
-    /// gRPC transport setup failures ([`ErrorKind::Connection`]).
+    /// auth failures (surfaced as [`Error::Authentication`]),
+    /// invalid tenant URL (surfaced as [`Error::Config`]), or
+    /// gRPC transport setup failures ([`Error::Connection`]).
     pub async fn connect(
         token_provider: SharedTokenProvider,
         dataspace: Option<String>,
@@ -398,7 +398,7 @@ impl AuthenticatedGrpcClient {
     ///
     /// # Errors
     ///
-    /// - Returns [`ErrorKind::Authentication`] if the DC JWT cannot be
+    /// - Returns [`Error::Authentication`] if the DC JWT cannot be
     ///   refreshed through the underlying Salesforce token provider
     ///   (including after the auth-retry budget is exhausted).
     /// - Propagates any error from
@@ -461,10 +461,7 @@ impl AuthenticatedGrpcClient {
         }
 
         Err(last_error.unwrap_or_else(|| {
-            Error::new(
-                ErrorKind::Authentication,
-                "Parameterized query failed after token refresh",
-            )
+            Error::authentication("Parameterized query failed after token refresh")
         }))
     }
 
@@ -472,7 +469,7 @@ impl AuthenticatedGrpcClient {
     ///
     /// # Errors
     ///
-    /// - Returns [`ErrorKind::Authentication`] if every retry attempt
+    /// - Returns [`Error::Authentication`] if every retry attempt
     ///   still surfaces an auth error after forcing a token refresh.
     /// - Propagates any other [`Error`] from the underlying gRPC
     ///   executor (SQL errors, transport failures).
@@ -522,21 +519,16 @@ impl AuthenticatedGrpcClient {
             }
         }
 
-        Err(last_error.unwrap_or_else(|| {
-            Error::new(
-                ErrorKind::Authentication,
-                "Query failed after token refresh",
-            )
-        }))
+        Err(last_error.unwrap_or_else(|| Error::authentication("Query failed after token refresh")))
     }
 
     /// Forces a token refresh, even if the current token is still valid.
     ///
     /// # Errors
     ///
-    /// - Returns [`ErrorKind::Authentication`] if
+    /// - Returns [`Error::Authentication`] if
     ///   [`SharedTokenProvider::force_refresh`] fails.
-    /// - Returns [`ErrorKind::Config`] or [`ErrorKind::Connection`]
+    /// - Returns [`Error::Config`] or [`Error::Connection`]
     ///   if the fresh tenant URL is invalid or the gRPC channel
     ///   cannot be rebuilt.
     pub async fn refresh_token(&mut self) -> Result<()> {
@@ -584,7 +576,7 @@ impl AuthenticatedGrpcClient {
     ///
     /// # Errors
     ///
-    /// - Returns [`ErrorKind::Other`] if every retry attempt still
+    /// - Returns [`Error::Other`] if every retry attempt still
     ///   fails with an auth error after forcing a token refresh.
     /// - Propagates any error from
     ///   [`GrpcClient::cancel_query`](super::GrpcClient::cancel_query) (transport failure, `tonic::Status`).
@@ -617,10 +609,7 @@ impl AuthenticatedGrpcClient {
             }
         }
 
-        Err(Error::new(
-            ErrorKind::Other,
-            "Cancel failed after DC JWT refresh",
-        ))
+        Err(Error::other("Cancel failed after DC JWT refresh"))
     }
 
     #[expect(
@@ -844,21 +833,13 @@ impl AuthenticatedGrpcClient {
             return Ok(Vec::new());
         }
 
-        let reader = StreamReader::try_new(Cursor::new(arrow_data), None).map_err(|e| {
-            Error::new(
-                ErrorKind::Protocol,
-                format!("Failed to parse Arrow data: {e}"),
-            )
-        })?;
+        let reader = StreamReader::try_new(Cursor::new(arrow_data), None)
+            .map_err(|e| Error::protocol(format!("Failed to parse Arrow data: {e}")))?;
 
         let mut values = Vec::new();
         for batch_result in reader {
-            let batch = batch_result.map_err(|e| {
-                Error::new(
-                    ErrorKind::Protocol,
-                    format!("Failed to read Arrow batch: {e}"),
-                )
-            })?;
+            let batch = batch_result
+                .map_err(|e| Error::protocol(format!("Failed to read Arrow batch: {e}")))?;
 
             if let Some(arr) = batch
                 .column(column_idx)
@@ -887,21 +868,13 @@ impl AuthenticatedGrpcClient {
             return Ok(Vec::new());
         }
 
-        let reader = StreamReader::try_new(Cursor::new(arrow_data), None).map_err(|e| {
-            Error::new(
-                ErrorKind::Protocol,
-                format!("Failed to parse Arrow data: {e}"),
-            )
-        })?;
+        let reader = StreamReader::try_new(Cursor::new(arrow_data), None)
+            .map_err(|e| Error::protocol(format!("Failed to parse Arrow data: {e}")))?;
 
         let mut tables = Vec::new();
         for batch_result in reader {
-            let batch = batch_result.map_err(|e| {
-                Error::new(
-                    ErrorKind::Protocol,
-                    format!("Failed to read Arrow batch: {e}"),
-                )
-            })?;
+            let batch = batch_result
+                .map_err(|e| Error::protocol(format!("Failed to read Arrow batch: {e}")))?;
 
             let schema_col = batch
                 .column(0)
@@ -947,7 +920,7 @@ impl AuthenticatedGrpcClient {
     /// # Errors
     ///
     /// Propagates any error from [`Self::execute_query`]. Returns an
-    /// Arrow IPC parse error (wrapped as [`ErrorKind::Other`]) when
+    /// Arrow IPC parse error (wrapped as [`Error::Other`]) when
     /// the result payload cannot be read as a `StreamReader`.
     pub async fn get_table_labels(
         &mut self,
@@ -982,7 +955,7 @@ impl AuthenticatedGrpcClient {
     /// # Errors
     ///
     /// Propagates any error from [`Self::execute_query`]. Returns an
-    /// Arrow IPC parse error (wrapped as [`ErrorKind::Other`]) when
+    /// Arrow IPC parse error (wrapped as [`Error::Other`]) when
     /// the result payload cannot be read as a `StreamReader`.
     pub async fn get_column_labels(
         &mut self,
@@ -1048,12 +1021,11 @@ impl AuthenticatedGrpcClient {
             return Ok(());
         }
 
-        let token = self.token_provider.get_token().await.map_err(|e| {
-            Error::new(
-                ErrorKind::Authentication,
-                format!("Failed to get DC JWT: {e}"),
-            )
-        })?;
+        let token = self
+            .token_provider
+            .get_token()
+            .await
+            .map_err(|e| Error::authentication(format!("Failed to get DC JWT: {e}")))?;
 
         self.connect_to_tenant(&token).await?;
         self.current_token = Some(token);
@@ -1069,12 +1041,11 @@ impl AuthenticatedGrpcClient {
     async fn force_refresh_and_reconnect(&mut self) -> Result<()> {
         info!("Refreshing DC JWT");
 
-        let token = self.token_provider.refresh_token().await.map_err(|e| {
-            Error::new(
-                ErrorKind::Authentication,
-                format!("Failed to refresh DC JWT: {e}"),
-            )
-        })?;
+        let token = self
+            .token_provider
+            .refresh_token()
+            .await
+            .map_err(|e| Error::authentication(format!("Failed to refresh DC JWT: {e}")))?;
 
         self.connect_to_tenant(&token).await?;
         self.current_token = Some(token);
@@ -1088,13 +1059,13 @@ impl AuthenticatedGrpcClient {
         let tenant_url = token.tenant_url();
         let hostname = tenant_url
             .host_str()
-            .ok_or_else(|| Error::new(ErrorKind::Config, "No hostname in tenant URL"))?;
+            .ok_or_else(|| Error::config("No hostname in tenant URL"))?;
 
         let grpc_endpoint = format!("https://{hostname}:443");
         info!(endpoint = %grpc_endpoint, "Connecting to Data Cloud");
 
         let endpoint = Endpoint::from_shared(grpc_endpoint.clone())
-            .map_err(|e| Error::new(ErrorKind::Config, format!("Invalid gRPC endpoint: {e}")))?;
+            .map_err(|e| Error::config(format!("Invalid gRPC endpoint: {e}")))?;
 
         let endpoint = endpoint
             .connect_timeout(self.connect_timeout)
@@ -1104,14 +1075,12 @@ impl AuthenticatedGrpcClient {
         let tls_config = tonic::transport::ClientTlsConfig::new().with_enabled_roots();
         let endpoint = endpoint
             .tls_config(tls_config)
-            .map_err(|e| Error::new(ErrorKind::Config, format!("TLS configuration error: {e}")))?;
+            .map_err(|e| Error::config(format!("TLS configuration error: {e}")))?;
 
-        let channel = endpoint.connect().await.map_err(|e| {
-            Error::new(
-                ErrorKind::Connection,
-                format!("Failed to connect to {grpc_endpoint}: {e}"),
-            )
-        })?;
+        let channel = endpoint
+            .connect()
+            .await
+            .map_err(|e| Error::connection(format!("Failed to connect to {grpc_endpoint}: {e}")))?;
 
         self.channel = Some(channel);
         debug!("gRPC channel established");
@@ -1148,12 +1117,12 @@ impl AuthenticatedGrpcClient {
         let channel = self
             .channel
             .as_ref()
-            .ok_or_else(|| Error::new(ErrorKind::Connection, "Not connected"))?;
+            .ok_or_else(|| Error::connection("Not connected"))?;
 
         let token = self
             .current_token
             .as_ref()
-            .ok_or_else(|| Error::new(ErrorKind::Authentication, "No token available"))?;
+            .ok_or_else(|| Error::authentication("No token available"))?;
 
         let params = params.into();
         debug!(
@@ -1167,12 +1136,7 @@ impl AuthenticatedGrpcClient {
         // Build the lakehouse name
         let lakehouse = token
             .lakehouse_name(self.dataspace.as_deref())
-            .map_err(|e| {
-                Error::new(
-                    ErrorKind::Authentication,
-                    format!("Failed to get lakehouse name: {e}"),
-                )
-            })?;
+            .map_err(|e| Error::authentication(format!("Failed to get lakehouse name: {e}")))?;
 
         // Build query parameter
         let query_param = QueryParam {
@@ -1239,12 +1203,12 @@ impl AuthenticatedGrpcClient {
         let channel = self
             .channel
             .as_ref()
-            .ok_or_else(|| Error::new(ErrorKind::Connection, "Not connected"))?;
+            .ok_or_else(|| Error::connection("Not connected"))?;
 
         let token = self
             .current_token
             .as_ref()
-            .ok_or_else(|| Error::new(ErrorKind::Authentication, "No token available"))?;
+            .ok_or_else(|| Error::authentication("No token available"))?;
 
         debug!(query_id = %query_id, "Cancelling query");
 
@@ -1263,14 +1227,14 @@ impl AuthenticatedGrpcClient {
             token
                 .bearer_token()
                 .parse()
-                .map_err(|_| Error::new(ErrorKind::Authentication, "Invalid token format"))?,
+                .map_err(|_| Error::authentication("Invalid token format"))?,
         );
         request.metadata_mut().insert(
             "audience",
             token
                 .tenant_url_str()
                 .parse()
-                .map_err(|_| Error::new(ErrorKind::Config, "Invalid tenant URL"))?,
+                .map_err(|_| Error::config("Invalid tenant URL"))?,
         );
 
         let mut client = HyperServiceClient::new(channel.clone())
@@ -1293,7 +1257,7 @@ impl AuthenticatedGrpcClient {
     /// Broader substring matches (e.g. "token", "expired") are intentionally
     /// avoided to prevent spurious retries on unrelated errors.
     fn is_auth_error(error: &Error) -> bool {
-        if matches!(error.kind(), ErrorKind::Authentication) {
+        if matches!(error, Error::Authentication(_)) {
             return true;
         }
 
@@ -1331,14 +1295,14 @@ impl AuthenticatedGrpcClientSync {
     ///
     /// # Errors
     ///
-    /// - Returns [`ErrorKind::Other`] if a current-thread Tokio
+    /// - Returns [`Error::Other`] if a current-thread Tokio
     ///   runtime cannot be built.
     /// - Propagates any error from [`AuthenticatedGrpcClient::connect`].
     pub fn connect(token_provider: SharedTokenProvider, dataspace: Option<String>) -> Result<Self> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map_err(|e| Error::new(ErrorKind::Other, format!("Failed to create runtime: {e}")))?;
+            .map_err(|e| Error::other(format!("Failed to create runtime: {e}")))?;
 
         let inner =
             runtime.block_on(AuthenticatedGrpcClient::connect(token_provider, dataspace))?;

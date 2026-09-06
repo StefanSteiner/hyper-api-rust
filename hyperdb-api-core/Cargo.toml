@@ -23,6 +23,7 @@ salesforce-auth = ["dep:hyperdb-api-salesforce", "dep:arrow"]
 bytes = { workspace = true }
 byteorder = { workspace = true }
 memchr = { workspace = true }
+thiserror = { workspace = true }
 tracing = { workspace = true }
 socket2 = { workspace = true }
 

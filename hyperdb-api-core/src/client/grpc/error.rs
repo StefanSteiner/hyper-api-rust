@@ -10,7 +10,76 @@ use std::fmt;
 
 use tonic::Status;
 
-use crate::client::error::{Error, ErrorKind};
+use crate::client::error::Error;
+
+/// Which [`Error`] variant a gRPC status code or SQLSTATE maps to.
+///
+/// gRPC is the one place in the crate where the variant is chosen at
+/// runtime from a wire code rather than being known at the call site, so
+/// the decision needs a name it can be carried around under. It stays
+/// private to this module — [`Error`] itself is flat and has no `kind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Variant {
+    Authentication,
+    Cancelled,
+    Connection,
+    FeatureNotSupported,
+    Other,
+    Query,
+    Timeout,
+}
+
+impl Variant {
+    /// Builds the corresponding [`Error`], attaching the server's
+    /// diagnostics to the variants that carry them.
+    ///
+    /// `Query`, `Connection`, and `Cancelled` have fields for the pieces
+    /// they can use. The rest have only a message, so any `detail` is
+    /// folded into it rather than dropped — that keeps the rendered text
+    /// identical to what the previous struct-shaped error produced.
+    fn build(
+        self,
+        message: String,
+        detail: Option<String>,
+        hint: Option<String>,
+        sqlstate: Option<String>,
+    ) -> Error {
+        match self {
+            Variant::Query => Error::Query {
+                message,
+                sqlstate,
+                detail,
+                hint,
+            },
+            Variant::Connection => Error::Connection {
+                message: fold_detail(message, detail.as_deref()),
+                sqlstate,
+            },
+            Variant::Cancelled => Error::Cancelled {
+                message: fold_detail(message, detail.as_deref()),
+                sqlstate,
+            },
+            Variant::Authentication => {
+                Error::authentication(fold_detail(message, detail.as_deref()))
+            }
+            Variant::FeatureNotSupported => {
+                Error::feature_not_supported(fold_detail(message, detail.as_deref()))
+            }
+            Variant::Timeout => Error::timeout(fold_detail(message, detail.as_deref())),
+            Variant::Other => Error::other(fold_detail(message, detail.as_deref())),
+        }
+    }
+}
+
+/// Appends `": {detail}"` unless `message` already contains it, matching
+/// what `Error`'s `Display` does for the variants that keep a `detail`
+/// field.
+fn fold_detail(message: String, detail: Option<&str>) -> String {
+    match detail {
+        Some(detail) if !message.contains(detail) => format!("{message}: {detail}"),
+        _ => message,
+    }
+}
 
 /// gRPC-specific error information.
 ///
@@ -54,8 +123,7 @@ impl std::error::Error for GrpcError {}
 pub(super) fn from_grpc_status(status: Status) -> Error {
     // First, try to parse structured error details (ErrorInfo proto)
     if let Some(error_info) = parse_error_info(&status) {
-        return Error::new_with_details(
-            grpc_code_to_error_kind(status.code()),
+        return grpc_code_to_variant(status.code()).build(
             error_info.message,
             error_info.detail,
             error_info.hint,
@@ -69,7 +137,7 @@ pub(super) fn from_grpc_status(status: Status) -> Error {
     }
 
     // Last resort: use the raw gRPC error message
-    Error::new(grpc_code_to_error_kind(status.code()), status.message())
+    grpc_code_to_variant(status.code()).build(status.message().to_string(), None, None, None)
 }
 
 /// Attempts to parse `ErrorInfo` from the gRPC status details.
@@ -216,18 +284,12 @@ fn parse_xml_error(message: &str) -> Option<Error> {
         (None, None) => message.to_string(),
     };
 
-    // Determine error kind from SQLSTATE
-    let kind = sqlstate
+    // Determine the variant from SQLSTATE
+    let variant = sqlstate
         .as_ref()
-        .map_or(ErrorKind::Query, |s| sqlstate_to_error_kind(s));
+        .map_or(Variant::Query, |s| sqlstate_to_variant(s));
 
-    Some(Error::new_with_details(
-        kind,
-        error_message,
-        detail,
-        hint,
-        sqlstate,
-    ))
+    Some(variant.build(error_message, detail, hint, sqlstate))
 }
 
 /// Extracts content from an XML tag like `<tag>content</tag>`.
@@ -241,42 +303,42 @@ fn extract_xml_tag(text: &str, tag: &str) -> Option<String> {
     Some(text[start..end].to_string())
 }
 
-/// Converts gRPC status code to `ErrorKind`.
-fn grpc_code_to_error_kind(code: tonic::Code) -> ErrorKind {
+/// Converts a gRPC status code to the [`Error`] variant it maps to.
+fn grpc_code_to_variant(code: tonic::Code) -> Variant {
     match code {
-        tonic::Code::Ok => ErrorKind::Other, // Shouldn't happen for errors
-        tonic::Code::Cancelled => ErrorKind::Cancelled,
-        tonic::Code::Unknown => ErrorKind::Query,
-        tonic::Code::InvalidArgument => ErrorKind::Query,
-        tonic::Code::DeadlineExceeded => ErrorKind::Timeout,
-        tonic::Code::NotFound => ErrorKind::Query,
-        tonic::Code::AlreadyExists => ErrorKind::Query,
-        tonic::Code::PermissionDenied => ErrorKind::Authentication,
-        tonic::Code::ResourceExhausted => ErrorKind::Query,
-        tonic::Code::FailedPrecondition => ErrorKind::Query,
-        tonic::Code::Aborted => ErrorKind::Query,
-        tonic::Code::OutOfRange => ErrorKind::Query,
-        tonic::Code::Unimplemented => ErrorKind::FeatureNotSupported,
-        tonic::Code::Internal => ErrorKind::Query,
-        tonic::Code::Unavailable => ErrorKind::Connection,
-        tonic::Code::DataLoss => ErrorKind::Query,
-        tonic::Code::Unauthenticated => ErrorKind::Authentication,
+        tonic::Code::Ok => Variant::Other, // Shouldn't happen for errors
+        tonic::Code::Cancelled => Variant::Cancelled,
+        tonic::Code::Unknown => Variant::Query,
+        tonic::Code::InvalidArgument => Variant::Query,
+        tonic::Code::DeadlineExceeded => Variant::Timeout,
+        tonic::Code::NotFound => Variant::Query,
+        tonic::Code::AlreadyExists => Variant::Query,
+        tonic::Code::PermissionDenied => Variant::Authentication,
+        tonic::Code::ResourceExhausted => Variant::Query,
+        tonic::Code::FailedPrecondition => Variant::Query,
+        tonic::Code::Aborted => Variant::Query,
+        tonic::Code::OutOfRange => Variant::Query,
+        tonic::Code::Unimplemented => Variant::FeatureNotSupported,
+        tonic::Code::Internal => Variant::Query,
+        tonic::Code::Unavailable => Variant::Connection,
+        tonic::Code::DataLoss => Variant::Query,
+        tonic::Code::Unauthenticated => Variant::Authentication,
     }
 }
 
-/// Converts SQLSTATE code to `ErrorKind`.
-fn sqlstate_to_error_kind(sqlstate: &str) -> ErrorKind {
+/// Converts a SQLSTATE code to the [`Error`] variant it maps to.
+fn sqlstate_to_variant(sqlstate: &str) -> Variant {
     match sqlstate {
         // Query canceled
-        "57014" => ErrorKind::Cancelled,
+        "57014" => Variant::Cancelled,
         // Authentication errors (28xxx)
-        s if s.starts_with("28") => ErrorKind::Authentication,
+        s if s.starts_with("28") => Variant::Authentication,
         // Connection errors (08xxx)
-        s if s.starts_with("08") => ErrorKind::Connection,
+        s if s.starts_with("08") => Variant::Connection,
         // Feature not supported (0A000)
-        "0A000" => ErrorKind::FeatureNotSupported,
+        "0A000" => Variant::FeatureNotSupported,
         // Everything else is a query error
-        _ => ErrorKind::Query,
+        _ => Variant::Query,
     }
 }
 
@@ -306,17 +368,63 @@ mod tests {
 
     #[test]
     fn test_grpc_code_mapping() {
-        assert!(matches!(
-            grpc_code_to_error_kind(tonic::Code::Cancelled),
-            ErrorKind::Cancelled
-        ));
-        assert!(matches!(
-            grpc_code_to_error_kind(tonic::Code::Unauthenticated),
-            ErrorKind::Authentication
-        ));
-        assert!(matches!(
-            grpc_code_to_error_kind(tonic::Code::Unavailable),
-            ErrorKind::Connection
-        ));
+        assert_eq!(
+            grpc_code_to_variant(tonic::Code::Cancelled),
+            Variant::Cancelled
+        );
+        assert_eq!(
+            grpc_code_to_variant(tonic::Code::Unauthenticated),
+            Variant::Authentication
+        );
+        assert_eq!(
+            grpc_code_to_variant(tonic::Code::Unavailable),
+            Variant::Connection
+        );
+    }
+
+    /// A SQLSTATE-selected variant must keep the code on the variants that
+    /// have a field for it — the public `hyperdb_api::Error` mapping reads
+    /// `sqlstate()` for `Cancelled` and `Connection`, not just `Query`.
+    #[test]
+    fn test_sqlstate_survives_variant_selection() {
+        let err = sqlstate_to_variant("57014").build(
+            "canceled".to_string(),
+            None,
+            None,
+            Some("57014".to_string()),
+        );
+        assert!(matches!(err, Error::Cancelled { .. }));
+        assert_eq!(err.sqlstate(), Some("57014"));
+
+        let err = sqlstate_to_variant("08006").build(
+            "connection failure".to_string(),
+            None,
+            None,
+            Some("08006".to_string()),
+        );
+        assert!(matches!(err, Error::Connection { .. }));
+        assert_eq!(err.sqlstate(), Some("08006"));
+    }
+
+    /// The variants with no `detail` field must fold it into the message
+    /// rather than dropping it, so the rendered text is unchanged.
+    #[test]
+    fn test_detail_folded_into_message_when_no_field() {
+        let err = Variant::Timeout.build(
+            "deadline exceeded".to_string(),
+            Some("waited 30s".to_string()),
+            None,
+            None,
+        );
+        assert_eq!(err.to_string(), "deadline exceeded: waited 30s");
+
+        // Already contained → not repeated.
+        let err = Variant::Timeout.build(
+            "deadline exceeded: waited 30s".to_string(),
+            Some("waited 30s".to_string()),
+            None,
+            None,
+        );
+        assert_eq!(err.to_string(), "deadline exceeded: waited 30s");
     }
 }

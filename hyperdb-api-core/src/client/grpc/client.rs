@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tonic::transport::{Channel, Endpoint};
 use tracing::{debug, info, warn};
 
-use crate::client::error::{Error, ErrorKind, Result};
+use crate::client::error::{Error, Result};
 
 use super::config::GrpcConfig;
 use super::error::from_grpc_status;
@@ -88,15 +88,15 @@ impl GrpcClient {
     ///
     /// # Errors
     ///
-    /// - Returns [`ErrorKind::Config`] if `config.endpoint` is not a
+    /// - Returns [`Error::Config`] if `config.endpoint` is not a
     ///   well-formed URI, or if TLS configuration fails.
-    /// - Returns [`ErrorKind::Connection`] if the gRPC transport
+    /// - Returns [`Error::Connection`] if the gRPC transport
     ///   cannot establish a channel to the endpoint.
     pub async fn connect(config: GrpcConfig) -> Result<Self> {
         info!(endpoint = %config.endpoint, "Connecting to Hyper via gRPC");
 
         let endpoint = Endpoint::from_shared(config.endpoint.clone())
-            .map_err(|e| Error::new(ErrorKind::Config, format!("Invalid gRPC endpoint: {e}")))?;
+            .map_err(|e| Error::config(format!("Invalid gRPC endpoint: {e}")))?;
 
         // Configure timeouts
         let endpoint = endpoint
@@ -108,9 +108,9 @@ impl GrpcClient {
             // Use system root certificates for TLS validation
             let tls_config = tonic::transport::ClientTlsConfig::new().with_enabled_roots();
 
-            endpoint.tls_config(tls_config).map_err(|e| {
-                Error::new(ErrorKind::Config, format!("TLS configuration error: {e}"))
-            })?
+            endpoint
+                .tls_config(tls_config)
+                .map_err(|e| Error::config(format!("TLS configuration error: {e}")))?
         } else {
             endpoint
         };
@@ -118,10 +118,9 @@ impl GrpcClient {
         // Connect
         let channel = endpoint.connect().await.map_err(|e| {
             debug!("gRPC connection error details: {:?}", e);
-            Error::new(
-                ErrorKind::Connection,
-                format!("Failed to connect to gRPC endpoint: {e} (details: {e:?})"),
-            )
+            Error::connection(format!(
+                "Failed to connect to gRPC endpoint: {e} (details: {e:?})"
+            ))
         })?;
 
         debug!("gRPC channel established");
@@ -303,7 +302,7 @@ impl GrpcClient {
     ///
     /// # Errors
     ///
-    /// - Returns [`ErrorKind::Protocol`] if the server returns no
+    /// - Returns [`Error::Protocol`] if the server returns no
     ///   result chunks and does not signal completion.
     /// - Propagates any error from the underlying
     ///   `GrpcQueryExecutor` — auth failure, transport error, or
@@ -381,7 +380,7 @@ impl GrpcClient {
         }
 
         if final_result.chunks.is_empty() && !final_result.is_complete {
-            return Err(Error::new(ErrorKind::Protocol, "No result from query"));
+            return Err(Error::protocol("No result from query"));
         }
 
         Ok(final_result)
@@ -393,7 +392,7 @@ impl GrpcClient {
     ///
     /// # Errors
     ///
-    /// - Returns [`ErrorKind::Protocol`] if the server returns no
+    /// - Returns [`Error::Protocol`] if the server returns no
     ///   result chunks and does not signal completion.
     /// - Propagates any error from the underlying
     ///   `GrpcQueryExecutor` — auth failure, transport error, or
@@ -463,7 +462,7 @@ impl GrpcClient {
         }
 
         if final_result.chunks.is_empty() && !final_result.is_complete {
-            return Err(Error::new(ErrorKind::Protocol, "No result from query"));
+            return Err(Error::protocol("No result from query"));
         }
 
         Ok(final_result)
@@ -800,7 +799,7 @@ impl GrpcClientSync {
     ///
     /// # Errors
     ///
-    /// - Returns [`ErrorKind::Other`] if a current-thread Tokio
+    /// - Returns [`Error::Other`] if a current-thread Tokio
     ///   runtime cannot be built.
     /// - Propagates any error from [`GrpcClient::connect`] (invalid
     ///   endpoint, TLS configuration failure, or transport setup
@@ -809,12 +808,7 @@ impl GrpcClientSync {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map_err(|e| {
-                Error::new(
-                    ErrorKind::Other,
-                    format!("Failed to create Tokio runtime: {e}"),
-                )
-            })?;
+            .map_err(|e| Error::other(format!("Failed to create Tokio runtime: {e}")))?;
 
         let inner = runtime.block_on(GrpcClient::connect(config))?;
 
