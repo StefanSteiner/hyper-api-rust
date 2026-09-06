@@ -53,7 +53,8 @@ use crate::daemon;
 use crate::error::{ErrorCode, McpError};
 use crate::schema::ColumnSchema;
 use hyperdb_api::{
-    Catalog, Connection, CreateMode, HyperProcess, Parameters, SqlType, escape_sql_path,
+    Catalog, Connection, CopyTableReport, CreateMode, HyperProcess, Parameters, SqlType,
+    escape_sql_path,
 };
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -1070,6 +1071,29 @@ impl Engine {
             .execute_command(&create_sql)
             .map_err(McpError::from)?;
         Ok(())
+    }
+
+    /// Copies `source` to `destination`, reproducing the source's schema
+    /// rather than letting `CREATE TABLE AS SELECT` infer it.
+    ///
+    /// Returns the fidelity report so callers can tell the user which
+    /// constraints survived. Both names should be fully qualified when a
+    /// second database is attached: Hyper stops resolving unqualified DDL once
+    /// the session holds more than one database.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`Catalog::copy_table`] errors — a missing source, an
+    /// existing destination, or a row that violates a constraint being
+    /// reproduced.
+    pub fn copy_table_preserving_schema(
+        &self,
+        source: &str,
+        destination: &str,
+    ) -> Result<CopyTableReport, McpError> {
+        Catalog::new(&self.connection)
+            .copy_table(source, destination)
+            .map_err(McpError::from)
     }
 
     /// Returns `(name, hyper_type, nullable)` for every column of `table`,

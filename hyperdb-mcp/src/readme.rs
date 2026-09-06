@@ -173,7 +173,18 @@ alias. `copy_query` also retains `target_database`.
 - `export` — write a table or query result to a file (Parquet, Iceberg,
   Arrow IPC, CSV, .hyper). Hyper export leaves the source database
   unchanged, but creates or replaces the destination `.hyper` file and
-  materializes all user tables into it.
+  materializes all user tables into it. Column constraints are carried
+  across: NOT NULL, DEFAULT, COLLATE, ASSUMED PRIMARY KEY, and ASSUMED
+  UNIQUE all survive the copy, so a `.hyper` export is a faithful backup
+  rather than a data-only dump. The response carries a `schema_fidelity`
+  object (`fully_preserved` plus per-class counts and an `unpreserved`
+  list, each entry naming its `table` and `column`) — check it before
+  treating an export as a backup. Note that Hyper rejects
+  PRIMARY KEY, UNIQUE, FOREIGN KEY, and CHECK at CREATE TABLE
+  (`Index support is disabled` / `check constraints not implemented
+  yet`), so no source table can carry those to begin with; ASSUMED
+  PRIMARY KEY and ASSUMED UNIQUE are the forms Hyper accepts, and it
+  records them without enforcing them.
 - `chart` — render a bar / line / scatter / histogram PNG or SVG from a
   SQL query as a quick diagnostic. Use long-format data (numeric y;
   optional `series` grouping). See `Chart delivery and presentation`.

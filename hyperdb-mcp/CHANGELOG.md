@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`export` — `schema_fidelity` in the response for `format="hyper"`.** Reports
+  `fully_preserved` plus per-class counts (`not_null_columns`,
+  `default_columns`, `collated_columns`, `assumed_primary_keys`,
+  `assumed_unique_constraints`) and an `unpreserved` list naming each entry's
+  table and column, the reason, and the offending expression. The table matters
+  because a whole-database export merges one report per table, and a bare
+  column name cannot be acted on. Hyper stores non-literal defaults
+  database-qualified — `NOW()`
+  reads back as `"mydb"."pg_catalog"."now"()` — so re-emitting one into the
+  exported file would leave it depending on the source database still being
+  attached. Those defaults are dropped and listed rather than reproduced
+  unsoundly, so a partially faithful backup says so at export time instead of
+  looking clean.
 - **`status` — `engine.connection` block**
   ([#124](https://github.com/tableau/hyper-api-rust/issues/124)) — reports the
   `hyperd` endpoint in the forms another Hyper client needs: `transport`
@@ -135,6 +148,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **`export(format="hyper")` silently dropped every column constraint.** The
+  copy ran on `CREATE TABLE AS SELECT`, which infers the destination schema
+  from the query's result columns — types but no constraints — so a database
+  with `NOT NULL` columns produced a "backup" in which every column was
+  nullable, with no defaults and no keys. Data was intact; only the schema was
+  quietly relaxed, which is the kind of loss a user discovers months later.
+  Each table now goes through `hyperdb-api`'s constraint-preserving
+  `Catalog::copy_table`, so `NOT NULL`, `DEFAULT`, `COLLATE`, `ASSUMED PRIMARY
+  KEY` and `ASSUMED UNIQUE` all survive an export and a subsequent re-attach of
+  the exported file. Fixes
+  [issue #127](https://github.com/tableau/hyper-api-rust/issues/127).
+- `export(format="hyper")` reported `rows: 0` regardless of how much it
+  copied, because `CREATE TABLE AS SELECT` reports no affected rows. The copy
+  now populates via `INSERT ... SELECT` and reports the count it actually
+  wrote.
 - Parquet and Arrow IPC files carrying a column stored with the physical
   `NullType` — what a writer emits for an optional column that happens to be
   entirely null in one partition — are rejected during footer inspection, with

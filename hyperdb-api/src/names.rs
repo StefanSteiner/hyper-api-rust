@@ -14,8 +14,15 @@ use smallvec::SmallVec;
 
 use crate::error::{Error, Result};
 
-/// `PostgreSQL` identifier length limit (in characters).
-pub(crate) const PG_IDENTIFIER_LIMIT: usize = 63;
+/// Upper bound on identifier length (in characters).
+///
+/// This is a sanity bound against runaway input, not `PostgreSQL`'s
+/// `NAMEDATALEN`. Hyper does not share that 63-character limit — it accepts a
+/// 283-character table name without complaint — so rejecting at 63 refused
+/// names the engine had already stored, which made tables and databases with
+/// long names unreadable through the typed name API even though a raw query
+/// could reach them.
+pub(crate) const IDENTIFIER_LIMIT: usize = 1024;
 
 /// Escapes a SQL identifier for safe use in queries.
 ///
@@ -24,7 +31,7 @@ pub(crate) const PG_IDENTIFIER_LIMIT: usize = 63;
 ///
 /// # Errors
 ///
-/// Returns an error if the name exceeds the `PostgreSQL` identifier limit (63 characters).
+/// Returns an error if the name exceeds the identifier length limit.
 /// This behavior is consistent with [`Name::try_new()`].
 ///
 /// # Example
@@ -41,15 +48,17 @@ pub(crate) const PG_IDENTIFIER_LIMIT: usize = 63;
 ///     Ok(())
 /// }
 ///
-/// // Names exceeding 63 characters are rejected
-/// let long_name = "a".repeat(64);
-/// assert!(escape_name(&long_name).is_err());
+/// // A name Hyper accepts but PostgreSQL's 63-character NAMEDATALEN would not
+/// assert!(escape_name(&"a".repeat(93)).is_ok());
+///
+/// // Absurdly long names are still rejected
+/// assert!(escape_name(&"a".repeat(2000)).is_err());
 /// ```
 pub fn escape_name(name: &str) -> Result<String> {
     let len = name.chars().count();
-    if len > PG_IDENTIFIER_LIMIT {
+    if len > IDENTIFIER_LIMIT {
         return Err(Error::invalid_name(format!(
-            "Name exceeds PostgreSQL identifier limit ({len} > {PG_IDENTIFIER_LIMIT})"
+            "Name exceeds identifier limit ({len} > {IDENTIFIER_LIMIT})"
         )));
     }
 
@@ -132,7 +141,7 @@ impl Name {
     ///
     /// # Errors
     ///
-    /// Returns an error if the name is empty or exceeds the `PostgreSQL` identifier limit (63 characters).
+    /// Returns an error if the name is empty or exceeds the identifier length limit.
     ///
     /// # Example
     ///
@@ -297,7 +306,7 @@ impl DatabaseName {
     ///
     /// # Errors
     ///
-    /// Returns an error if the name is empty or exceeds the `PostgreSQL` identifier limit.
+    /// Returns an error if the name is empty or exceeds the identifier length limit.
     pub fn try_new(name: impl Into<String>) -> Result<Self> {
         Ok(DatabaseName {
             name: Name::try_new(name)?,
@@ -392,7 +401,7 @@ impl SchemaName {
     ///
     /// # Errors
     ///
-    /// Returns an error if the schema name is empty or exceeds the `PostgreSQL` identifier limit.
+    /// Returns an error if the schema name is empty or exceeds the identifier length limit.
     ///
     /// # Example
     ///
@@ -417,7 +426,7 @@ impl SchemaName {
     ///
     /// # Errors
     ///
-    /// Returns an error if the database name is empty or exceeds the `PostgreSQL` identifier limit.
+    /// Returns an error if the database name is empty or exceeds the identifier length limit.
     ///
     /// # Example
     ///
@@ -549,7 +558,7 @@ impl TableName {
     ///
     /// # Errors
     ///
-    /// Returns an error if the table name is empty or exceeds the `PostgreSQL` identifier limit.
+    /// Returns an error if the table name is empty or exceeds the identifier length limit.
     ///
     /// # Example
     ///
@@ -575,7 +584,7 @@ impl TableName {
     ///
     /// # Errors
     ///
-    /// Returns an error if the schema name is empty or exceeds the `PostgreSQL` identifier limit.
+    /// Returns an error if the schema name is empty or exceeds the identifier length limit.
     ///
     /// # Example
     ///
@@ -598,7 +607,7 @@ impl TableName {
     ///
     /// # Errors
     ///
-    /// Returns an error if the database name is empty or exceeds the `PostgreSQL` identifier limit.
+    /// Returns an error if the database name is empty or exceeds the identifier length limit.
     ///
     /// # Example
     ///
@@ -820,14 +829,24 @@ mod tests {
 
     #[test]
     fn test_escape_name_too_long() {
-        // 63 characters should be OK
-        let max_name = "a".repeat(PG_IDENTIFIER_LIMIT);
+        let max_name = "a".repeat(IDENTIFIER_LIMIT);
         assert!(escape_name(&max_name).is_ok());
 
-        // 64 characters should fail
-        let too_long = "a".repeat(PG_IDENTIFIER_LIMIT + 1);
+        let too_long = "a".repeat(IDENTIFIER_LIMIT + 1);
         let err = escape_name(&too_long).unwrap_err();
         assert!(err.to_string().contains("identifier limit"));
+    }
+
+    #[test]
+    fn names_longer_than_postgresql_namedatalen_are_accepted() {
+        // Hyper stores a 93-character table name happily, so the typed name
+        // API must be able to address one. Rejecting at PostgreSQL's 63
+        // meant a whole-database copy failed on a table the engine had
+        // already written.
+        let name = "a".repeat(93);
+        assert!(escape_name(&name).is_ok());
+        assert!(Name::try_new(name.clone()).is_ok());
+        assert!(TableName::try_new(name).is_ok());
     }
 
     #[test]

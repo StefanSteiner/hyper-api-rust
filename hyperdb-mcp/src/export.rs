@@ -21,14 +21,14 @@
 //!   (the Iceberg table root with `metadata/` and `data/` subdirs);
 //!   hyperd creates it. Round-trips cleanly with `load_iceberg`.
 //! - **Hyper** — new `.hyper` file populated via `CREATE DATABASE` +
-//!   `ATTACH DATABASE` + `CREATE TABLE AS SELECT`, openable directly in
-//!   Tableau Desktop. (Cannot use plain `std::fs::copy` because on
-//!   Windows `hyperd` holds an exclusive lock on the workspace file.)
+//!   `ATTACH DATABASE` + a constraint-preserving per-table copy, openable
+//!   directly in Tableau Desktop. (Cannot use plain `std::fs::copy` because
+//!   on Windows `hyperd` holds an exclusive lock on the workspace file.)
 
 use crate::engine::Engine;
 use crate::error::{ErrorCode, McpError};
 use crate::stats::{ExportStats, StatsTimer};
-use hyperdb_api::{escape_sql_path, escape_string_literal};
+use hyperdb_api::{CopyTableReport, escape_sql_path, escape_string_literal};
 use serde_json::{Map, Value};
 
 /// Specifies what to export and where.
@@ -74,6 +74,9 @@ pub struct ExportOptions {
 pub struct ExportResult {
     pub rows: u64,
     pub stats: ExportStats,
+    /// Which source constraints the copy reproduced, for `format = "hyper"`.
+    /// `None` for the row-oriented formats, which carry no schema at all.
+    pub schema_fidelity: Option<CopyTableReport>,
 }
 
 /// Top-level export dispatcher. Resolves the source SQL, then delegates to
@@ -265,6 +268,7 @@ fn run_copy_to(
             format: format_label.into(),
             output_path: path.into(),
         },
+        schema_fidelity: None,
     })
 }
 
@@ -404,6 +408,7 @@ fn export_iceberg(
             format: "iceberg".into(),
             output_path: path.into(),
         },
+        schema_fidelity: None,
     })
 }
 
@@ -429,7 +434,7 @@ fn walk_dir_size(dir: &std::path::Path) -> std::io::Result<u64> {
 
 /// Export the workspace tables as a new `.hyper` file. Issues
 /// `CREATE DATABASE` + `ATTACH DATABASE` against the target path and
-/// populates it with one `CREATE TABLE AS SELECT` per user table.
+/// populates it with one constraint-preserving copy per user table.
 ///
 /// We can't just `std::fs::copy(workspace, target)` because on Windows
 /// hyperd holds the workspace file open with an exclusive lock, and
@@ -440,6 +445,12 @@ fn walk_dir_size(dir: &std::path::Path) -> std::io::Result<u64> {
 /// reproduced. That's acceptable for the current callers (LLMs
 /// exporting workspace data for Tableau Desktop), but documented here
 /// so a future caller that needs full catalog fidelity knows why.
+///
+/// Within a table the copy is faithful: `NOT NULL`, `DEFAULT`,
+/// `ASSUMED PRIMARY KEY`, and `ASSUMED UNIQUE` all survive. Anything that
+/// could not be reproduced comes back in
+/// [`ExportResult::schema_fidelity`] so the caller can say so out loud
+/// instead of handing back a quietly degraded backup.
 fn export_hyper(
     engine: &Engine,
     path: &str,
@@ -492,7 +503,8 @@ fn export_hyper(
         );
     }
 
-    let rows = result?;
+    let report = result?;
+    let rows = report.rows_copied;
 
     let file_size = std::fs::metadata(path).map_or(0, |m| m.len());
 
@@ -506,24 +518,31 @@ fn export_hyper(
             format: "hyper".into(),
             output_path: path.into(),
         },
+        schema_fidelity: Some(report),
     })
 }
 
 /// Copy every user table from `source_db` (None → primary) into the
-/// database attached as `target_alias`. Returns the total row count
-/// written. Excludes `pg_catalog` / `information_schema` (and Hyper's
-/// own system schemas) so we only touch user data.
+/// database attached as `target_alias`. Returns the aggregated copy report.
+/// Excludes `pg_catalog` / `information_schema` (and Hyper's own system
+/// schemas) so we only touch user data.
+///
+/// Each table goes through [`Engine::copy_table_preserving_schema`] rather
+/// than `CREATE TABLE AS SELECT`. `CTAS` infers the destination schema from
+/// the query's result columns, which carry types but no constraints, so it
+/// produced backups whose columns were all nullable with no defaults and no
+/// keys — data intact, schema quietly relaxed.
 fn populate_export_target(
     engine: &Engine,
     source_db: Option<&str>,
     target_alias: &str,
-) -> Result<u64, McpError> {
+) -> Result<CopyTableReport, McpError> {
     let escaped_alias = target_alias.replace('"', "\"\"");
     let source = source_db.map_or_else(|| engine.primary_db_name(), str::to_string);
     let escaped_source = source.replace('"', "\"\"");
 
     let schemas = list_user_schemas(engine, &escaped_source)?;
-    let mut total_rows: u64 = 0;
+    let mut report = CopyTableReport::default();
 
     for schema in &schemas {
         let escaped_schema = schema.replace('"', "\"\"");
@@ -542,15 +561,14 @@ fn populate_export_target(
                 continue;
             }
             let escaped_table = table.replace('"', "\"\"");
-            let rows_copied = engine.execute_command(&format!(
-                "CREATE TABLE \"{escaped_alias}\".\"{escaped_schema}\".\"{escaped_table}\" AS \
-                 SELECT * FROM \"{escaped_source}\".\"{escaped_schema}\".\"{escaped_table}\"",
-            ))?;
-            total_rows = total_rows.saturating_add(rows_copied);
+            report.merge(engine.copy_table_preserving_schema(
+                &format!("\"{escaped_source}\".\"{escaped_schema}\".\"{escaped_table}\""),
+                &format!("\"{escaped_alias}\".\"{escaped_schema}\".\"{escaped_table}\""),
+            )?);
         }
     }
 
-    Ok(total_rows)
+    Ok(report)
 }
 
 fn list_user_schemas(engine: &Engine, escaped_db: &str) -> Result<Vec<String>, McpError> {
