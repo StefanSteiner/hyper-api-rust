@@ -408,8 +408,17 @@ fn export_overwrite_true_replaces_existing_file() {
 ///   list (or SQLSTATE `55006`) matches, so it correctly stays
 ///   `SqlError` both before and after this fix. This test pins that
 ///   boundary: the routing change must not misclassify it.
+/// - **On Windows the same setup never reaches `CREATE DATABASE`**, and
+///   that is the interesting half. `hyperd` holds the attached file open,
+///   Windows refuses to unlink a file another process holds, and the
+///   pre-delete fails with `ERROR_SHARING_VIOLATION`. So the pre-delete —
+///   not the SQL — is where a contended export target actually surfaces,
+///   which is why it now classifies as `RESOURCE_BUSY` instead of
+///   `PERMISSION_DENIED`. This assertion is split per platform rather
+///   than pinned to the Unix answer: pinning only the Unix answer is what
+///   made this test fail on Windows CI when it was written.
 #[test]
-fn export_hyper_over_same_session_attached_target_stays_sql_error() {
+fn export_hyper_over_same_session_attached_target_is_classified_per_platform() {
     let te = TestEngine::new_ephemeral();
     setup_test_table(&te);
 
@@ -445,17 +454,40 @@ fn export_hyper_over_same_session_attached_target_stays_sql_error() {
     let err = export_to_file(&te.engine, &opts)
         .expect_err("exporting over a path already attached in this session must fail");
 
-    assert_eq!(
-        err.code,
-        ErrorCode::SqlError,
-        "a same-session 'database already exists' conflict (42P04) is not a lock \
-         conflict and must not be reclassified as RESOURCE_BUSY: {err:?}"
-    );
-    assert!(
-        err.message.contains("42P04") || err.message.to_lowercase().contains("already exists"),
-        "expected a duplicate-database error, got: {}",
-        err.message
-    );
+    if cfg!(windows) {
+        // The pre-delete loses to hyperd's own handle on the attached
+        // file. That is a holder conflict, not a permissions problem, so
+        // it must carry the "close the other process / copy the file"
+        // guidance rather than "check file permissions".
+        assert_eq!(
+            err.code,
+            ErrorCode::ResourceBusy,
+            "a target held open by another process must classify as \
+             RESOURCE_BUSY, not PERMISSION_DENIED: {err:?}"
+        );
+        let guidance = err
+            .suggestion
+            .as_deref()
+            .expect("RESOURCE_BUSY must carry recovery guidance");
+        assert!(
+            guidance.to_lowercase().contains("another process"),
+            "guidance must point at the holder, not at file permissions: {guidance}"
+        );
+    } else {
+        // Unix unlinks the open file, so the export reaches its own
+        // `CREATE DATABASE` and collides with the same-session alias.
+        assert_eq!(
+            err.code,
+            ErrorCode::SqlError,
+            "a same-session 'database already exists' conflict (42P04) is not a \
+             lock conflict and must not be reclassified as RESOURCE_BUSY: {err:?}"
+        );
+        assert!(
+            err.message.contains("42P04") || err.message.to_lowercase().contains("already exists"),
+            "expected a duplicate-database error, got: {}",
+            err.message
+        );
+    }
 }
 
 /// Iceberg round-trip: export a table to an Iceberg directory, then read

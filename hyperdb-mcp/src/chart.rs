@@ -408,10 +408,10 @@ pub struct ChartOptions {
     pub format: ChartFormat,
     pub width: u32,
     pub height: u32,
-    /// Histogram bin count. Values are clamped into
-    /// `1..=`[`MAX_HISTOGRAM_BINS`] by the renderer, so a `0` or an
-    /// absurdly large count is corrected rather than rejected. Ignored by
-    /// every other chart type.
+    /// Histogram bin count. Clamped into `1..=500` by the renderer, so a
+    /// `0` or an absurdly large count is corrected rather than rejected —
+    /// the renderer allocates one counter per bin, so it does not trust
+    /// this value. Ignored by every other chart type.
     pub bins: u32,
     /// Override the chart-type-specific default for how the x column is
     /// interpreted:

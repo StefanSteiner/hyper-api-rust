@@ -358,25 +358,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   axes are unchanged: there a `NULL` remains a legitimate blank-labelled
   category. Part of
   [issue #277](https://github.com/tableau/hyper-api-rust/issues/277).
-- **`export`'s `CREATE DATABASE` / `ATTACH DATABASE` now route through the
-  same attach-context error mapper `attach_database` uses**, so a lock
-  conflict on the export target would surface as `RESOURCE_BUSY` with
-  recovery guidance rather than a generic `SQL_ERROR`. The same is done for
-  the `CREATE DATABASE IF NOT EXISTS` immediately before `attach`'s already
-  mapped `ATTACH`.
+- **Exporting over a `.hyper` file another process holds open reported a
+  permissions failure instead of a busy resource (Windows).** `export`
+  deletes an existing target before recreating it, and Windows refuses to
+  unlink a file another process holds open — so a contended export target
+  failed with `PERMISSION_DENIED "Cannot remove existing target … (os error
+  32)"` and the guidance *"Check file permissions on the source or target
+  path"*, which points at something the user will find nothing wrong with.
+  That delete is now classified: a sharing violation
+  (`ERROR_SHARING_VIOLATION` / `ERROR_LOCK_VIOLATION`, or `EBUSY` anywhere)
+  surfaces as `RESOURCE_BUSY`, whose guidance names the actual remedy —
+  close the holding process or copy the file. A genuine permissions failure
+  still reports `PERMISSION_DENIED`. Unix is unaffected: `unlink` succeeds
+  regardless of open handles, which is why this only ever appeared on
+  Windows.
 
-  This is a **defensive consistency change, not a fixed user-visible
-  regression.** No such failure is currently reachable through `export`:
-  `export_hyper` deletes an existing target *before* those statements run
-  and maps any delete failure to `PERMISSION_DENIED "Cannot remove existing
-  target"`. On Unix that unlink succeeds whether or not another process
-  holds the file, so the `CREATE DATABASE` that follows always sees a free
-  path; on Windows a genuinely locked target fails at the delete instead, or
-  is left delete-pending so the create faces no lock. The routing is kept
-  because it is cheap and makes the two paths behave alike if the ordering
-  ever changes — but the classification it adds is, today, unreachable, and
-  the earlier claim here that 0.7.2 returned `RESOURCE_BUSY` for a contended
-  export was never substantiated. Part of
+  The related routing of `export`'s `CREATE DATABASE` / `ATTACH DATABASE`
+  through the same attach-context error mapper `attach_database` uses (and
+  the same for the `CREATE DATABASE IF NOT EXISTS` before `attach`'s already
+  mapped `ATTACH`) is kept, but is a **defensive consistency change rather
+  than a fixed user-visible regression**: because the delete above runs
+  first, those statements never see a contended target — on Unix the path is
+  always freed, and on Windows the delete fails before them. The earlier
+  claim that 0.7.2 returned `RESOURCE_BUSY` from those statements for a
+  contended export was never substantiated and is withdrawn; the real
+  failure was one step earlier, at the delete. Part of
   [issue #277](https://github.com/tableau/hyper-api-rust/issues/277).
 - **Corrected the justification on chart.rs's `cast_precision_loss`
   suppression.** The file-wide `#![allow]` claimed values approaching 2^53
