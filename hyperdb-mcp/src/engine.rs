@@ -54,7 +54,7 @@ use crate::error::{ErrorCode, McpError};
 use crate::schema::ColumnSchema;
 use hyperdb_api::{
     Catalog, Connection, CopyTableReport, CreateMode, HyperProcess, Parameters, SqlType,
-    escape_sql_path,
+    Transaction, escape_sql_path,
 };
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -236,6 +236,167 @@ impl Drop for ScopedSearchPath<'_> {
                 "failed to restore schema_search_path — next tool call may route incorrectly"
             );
         }
+    }
+}
+
+/// Builds the DDL for [`Engine::create_table_in`] and
+/// [`EngineTransaction::create_table_in`] — the statements to run, in order.
+///
+/// Kept separate from execution so both the plain `&Engine` path and the
+/// transaction-scoped path share one definition of the schema validation and
+/// identifier quoting. Yields a `DROP TABLE IF EXISTS` first when `replace`,
+/// then the `CREATE TABLE IF NOT EXISTS`.
+///
+/// # Errors
+///
+/// - [`ErrorCode::EmptyData`] if `columns` is empty.
+/// - [`ErrorCode::SchemaMismatch`] if a column's `hyper_type` is not
+///   resolvable by [`crate::schema::map_hyper_type`].
+fn create_table_statements(
+    table_name: &str,
+    columns: &[ColumnSchema],
+    replace: bool,
+    target_db: Option<&str>,
+) -> Result<Vec<String>, McpError> {
+    if columns.is_empty() {
+        return Err(McpError::new(
+            ErrorCode::EmptyData,
+            "No columns to create table from",
+        ));
+    }
+    for col in columns {
+        if crate::schema::map_hyper_type(&col.hyper_type).is_none() {
+            return Err(McpError::new(
+                ErrorCode::SchemaMismatch,
+                format!(
+                    "Unknown type '{}' for column '{}'",
+                    col.hyper_type, col.name
+                ),
+            ));
+        }
+    }
+
+    let quoted_table = match target_db {
+        Some(db) => {
+            let esc_db = db.replace('"', "\"\"");
+            let esc_tbl = table_name.replace('"', "\"\"");
+            format!("\"{esc_db}\".\"public\".\"{esc_tbl}\"")
+        }
+        None => format!("\"{}\"", table_name.replace('"', "\"\"")),
+    };
+
+    let col_defs: Vec<String> = columns
+        .iter()
+        .map(|c| {
+            let nullable = if c.nullable { "" } else { " NOT NULL" };
+            format!(
+                "\"{}\" {}{}",
+                c.name.replace('"', "\"\""),
+                c.hyper_type,
+                nullable
+            )
+        })
+        .collect();
+
+    let mut statements = Vec::with_capacity(2);
+    if replace {
+        statements.push(format!("DROP TABLE IF EXISTS {quoted_table}"));
+    }
+    statements.push(format!(
+        "CREATE TABLE IF NOT EXISTS {} ({})",
+        quoted_table,
+        col_defs.join(", ")
+    ));
+    Ok(statements)
+}
+
+/// The transaction-scoped view of an [`Engine`], handed to
+/// [`Engine::execute_in_transaction`] closures.
+///
+/// Wraps [`hyperdb_api::Transaction`] — the RAII guard that issues
+/// `ROLLBACK` on drop unless committed — and re-exposes the engine
+/// operations that transactional callers need, translating
+/// [`hyperdb_api::Error`] into [`McpError`] as the equivalent `&Engine`
+/// methods do.
+///
+/// Closures receive this rather than `&Engine` for a reason: the guard
+/// holds `&mut Connection`, so the borrow checker will not let the same
+/// connection be driven around the transaction. That statically rules out
+/// the "statement escaped the transaction" bug class that the previous
+/// `&self` + `*_unguarded` shape could only address by convention.
+#[derive(Debug)]
+pub struct EngineTransaction<'conn> {
+    txn: Transaction<'conn>,
+}
+
+impl EngineTransaction<'_> {
+    /// Commits the transaction.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the server's `COMMIT` failure as an [`McpError`].
+    pub fn commit(self) -> Result<(), McpError> {
+        self.txn.commit().map_err(McpError::from)
+    }
+
+    /// Rolls the transaction back explicitly.
+    ///
+    /// Dropping the guard rolls back too; this exists so callers can
+    /// observe (and log) a rollback failure.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the server's `ROLLBACK` failure as an [`McpError`].
+    pub fn rollback(self) -> Result<(), McpError> {
+        self.txn.rollback().map_err(McpError::from)
+    }
+
+    /// Executes a DDL/DML command inside the transaction. Returns the
+    /// affected row count.
+    ///
+    /// The transaction-scoped counterpart of [`Engine::execute_command`],
+    /// with the same error conversion.
+    ///
+    /// # Errors
+    ///
+    /// Converts any [`hyperdb_api::Error`] into an [`McpError`] — SQL
+    /// syntax errors, constraint violations, and connection loss all
+    /// surface here.
+    pub fn execute_command(&self, sql: &str) -> Result<u64, McpError> {
+        self.txn.execute_command(sql).map_err(McpError::from)
+    }
+
+    /// Creates a table inside the transaction, optionally in a
+    /// non-primary database.
+    ///
+    /// The transaction-scoped counterpart of [`Engine::create_table_in`];
+    /// see that method for the `replace` semantics and the note on Hyper
+    /// auto-committing DDL.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Engine::create_table_in`].
+    pub fn create_table_in(
+        &self,
+        table_name: &str,
+        columns: &[ColumnSchema],
+        replace: bool,
+        target_db: Option<&str>,
+    ) -> Result<(), McpError> {
+        for sql in create_table_statements(table_name, columns, replace, target_db)? {
+            self.execute_command(&sql)?;
+        }
+        Ok(())
+    }
+
+    /// The connection this transaction is running on, for the APIs that
+    /// take a `&Connection` directly (e.g. [`hyperdb_api::ArrowInserter`]).
+    ///
+    /// Work issued through this reference lands inside the transaction —
+    /// it is the same session the guard holds open.
+    #[must_use]
+    pub fn connection(&self) -> &Connection {
+        self.txn.connection()
     }
 }
 
@@ -640,6 +801,74 @@ impl Engine {
         })
     }
 
+    /// Runs `f` with the schema search path pointed at `alias`, restoring
+    /// the primary database afterwards. A `None` alias runs `f` unchanged.
+    ///
+    /// The closure form of [`Self::scoped_search_path`], for callers that
+    /// need `&mut Engine` inside the scope — [`Self::execute_in_transaction`]
+    /// being the motivating case. The `ScopedSearchPath` guard borrows the
+    /// engine immutably for its whole lifetime, so it cannot coexist with
+    /// the transaction guard's exclusive borrow of the same connection;
+    /// this helper sequences the set/restore around `f` instead of holding
+    /// a borrow across it. Prefer the guard when `&Engine` suffices.
+    ///
+    /// Restoration is unconditional: it runs on the `Ok` path, the `Err`
+    /// path, and while unwinding from a panic, matching
+    /// [`ScopedSearchPath`]'s `Drop`. A failed restore is logged, not
+    /// surfaced — the engine mutex serializes tool calls, so a stale path
+    /// only survives until the next call sets its own.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `SET schema_search_path` failure if the path cannot be
+    /// pointed at `alias`, in which case `f` never runs. Otherwise returns
+    /// whatever `f` returns.
+    ///
+    /// Does **not** nest: the restore target is always
+    /// [`Self::primary_db_name`], not the search path in effect on entry, so a
+    /// nested call restores to the primary database rather than to the outer
+    /// alias. [`Self::scoped_search_path`] has the same limitation. No call
+    /// site nests today; reading the session's current `schema_search_path`
+    /// would be the fix if one ever needs to.
+    ///
+    /// # Panics
+    ///
+    /// Does not introduce new panic sites. A panic inside `f` is caught
+    /// only long enough to restore the search path, then re-raised via
+    /// [`std::panic::resume_unwind`] with its payload intact.
+    pub fn with_search_path<F, T>(&mut self, alias: Option<&str>, f: F) -> Result<T, McpError>
+    where
+        F: FnOnce(&mut Engine) -> Result<T, McpError>,
+    {
+        let Some(alias) = alias else {
+            return f(self);
+        };
+        let restore_to = self.primary_db_name();
+        let set_sql = format!("SET schema_search_path = '{}'", alias.replace('\'', "''"));
+        self.execute_command(&set_sql)?;
+
+        // `AssertUnwindSafe` is sound for the same reason it is in
+        // `ScopedSearchPath`'s `Drop`: the only state that outlives the
+        // unwind is a session variable we are about to overwrite anyway.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
+
+        let restore_sql = format!(
+            "SET schema_search_path = '{}'",
+            restore_to.replace('\'', "''")
+        );
+        if let Err(e) = self.execute_command(&restore_sql) {
+            tracing::warn!(
+                error = %e.message,
+                "failed to restore schema_search_path — next tool call may route incorrectly"
+            );
+        }
+
+        match result {
+            Ok(inner) => inner,
+            Err(panic_payload) => std::panic::resume_unwind(panic_payload),
+        }
+    }
+
     /// Directory where `hyperd` writes its log files. The MCP binary should
     /// also drop its own client-side log here so debugging starts in one
     /// place.
@@ -828,49 +1057,41 @@ impl Engine {
     ///
     /// # Panics
     ///
-    /// Does not introduce new panic sites. If `f` panics, the transaction
-    /// is rolled back (best-effort) and the original panic is re-raised
-    /// via [`std::panic::resume_unwind`], preserving the panic payload.
-    // Uses the `*_unguarded` transaction methods rather than the RAII guard,
-    // because this helper takes `&self` and the guard needs `&mut self`.
-    // Moving to the guard requires reshaping `Engine`'s locking model — see
-    // issue #72 for two implementation paths (wrap the connection in a
-    // `Mutex` vs. introduce an `EngineTransaction` guard) and the closure call
-    // sites that need updating. Until then the pairing obligation the
-    // `*_unguarded` docs describe is discharged by the `catch_unwind` below,
-    // which rolls back before resuming any unwind.
-    pub fn execute_in_transaction<F, T>(&self, f: F) -> Result<T, McpError>
+    /// Does not introduce new panic sites. If `f` panics, the guard's
+    /// `Drop` rolls the transaction back as the unwind passes through
+    /// and the original panic continues to propagate untouched.
+    pub fn execute_in_transaction<F, T>(&mut self, f: F) -> Result<T, McpError>
     where
-        F: FnOnce(&Engine) -> Result<T, McpError>,
+        F: FnOnce(&EngineTransaction<'_>) -> Result<T, McpError>,
     {
-        self.connection
-            .begin_transaction_unguarded()
-            .map_err(McpError::from)?;
+        let txn = EngineTransaction {
+            txn: self.connection.transaction().map_err(McpError::from)?,
+        };
         tracing::debug!("tx: BEGIN issued");
-        // `catch_unwind` wraps the closure so a panic (unwrap on None,
-        // indexing OOB, arithmetic overflow, …) doesn't leave an open
-        // transaction on the connection. Without this, the next tool
-        // call would hit "transaction already in progress" and the
-        // server's ConnectionLost auto-reconnect would *not* recover
-        // because the connection is live; the engine would stay wedged
-        // until restart. `AssertUnwindSafe` is correct here: we hold
-        // the transaction open for the closure's duration, and we
-        // always issue a rollback before resuming the panic, so no
-        // logical invariant survives into the panicking stack.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
-        match result {
-            Ok(Ok(val)) => {
+        // No `catch_unwind` here: the guard's `Drop` issues the rollback,
+        // so a panic in `f` (unwrap on None, indexing OOB, arithmetic
+        // overflow, …) unwinds through this frame and rolls back on the
+        // way out. That is the whole point of holding the RAII guard —
+        // it discharges the pairing obligation on *every* exit path,
+        // including the ones a hand-written match cannot name. Leaving a
+        // transaction open would wedge the session: the next tool call
+        // fails with "transaction already in progress" on a connection
+        // that is otherwise healthy, so the server's ConnectionLost
+        // auto-reconnect would not recover it.
+        match f(&txn) {
+            Ok(val) => {
                 tracing::debug!("tx: closure returned Ok, issuing COMMIT");
-                self.connection.commit_unguarded().map_err(McpError::from)?;
+                txn.commit()?;
                 Ok(val)
             }
-            Ok(Err(e)) => {
+            Err(e) => {
                 tracing::debug!(err = %e, "tx: closure returned Err, issuing ROLLBACK");
-                if let Err(rb_err) = self.connection.rollback_unguarded() {
-                    // Rollback itself failed — log it but keep the original
-                    // error as the primary cause. A failed rollback usually
-                    // means the transaction was already aborted by the server,
-                    // which is fine (nothing to unwind).
+                // Rolling back explicitly rather than leaning on `Drop`
+                // so a rollback failure can be logged. The original error
+                // stays the primary cause either way — a failed rollback
+                // usually means the server already aborted the
+                // transaction, which is what we wanted anyway.
+                if let Err(rb_err) = txn.rollback() {
                     tracing::warn!(
                         "rollback after error failed (original error preserved): {}",
                         rb_err
@@ -879,15 +1100,6 @@ impl Engine {
                     tracing::debug!("tx: ROLLBACK succeeded");
                 }
                 Err(e)
-            }
-            Err(panic_payload) => {
-                tracing::error!("tx: closure panicked, issuing ROLLBACK before resuming unwind");
-                // Best-effort rollback. If it fails, the connection is
-                // unusable — but we're about to panic anyway, and
-                // `HyperMcpServer::with_engine` will drop the engine
-                // when the panic surfaces as a poisoned tokio task.
-                let _ = self.connection.rollback_unguarded();
-                std::panic::resume_unwind(panic_payload)
             }
         }
     }
@@ -1017,59 +1229,11 @@ impl Engine {
         replace: bool,
         target_db: Option<&str>,
     ) -> Result<(), McpError> {
-        if columns.is_empty() {
-            return Err(McpError::new(
-                ErrorCode::EmptyData,
-                "No columns to create table from",
-            ));
-        }
-        for col in columns {
-            if crate::schema::map_hyper_type(&col.hyper_type).is_none() {
-                return Err(McpError::new(
-                    ErrorCode::SchemaMismatch,
-                    format!(
-                        "Unknown type '{}' for column '{}'",
-                        col.hyper_type, col.name
-                    ),
-                ));
-            }
-        }
-
-        let quoted_table = match target_db {
-            Some(db) => {
-                let esc_db = db.replace('"', "\"\"");
-                let esc_tbl = table_name.replace('"', "\"\"");
-                format!("\"{esc_db}\".\"public\".\"{esc_tbl}\"")
-            }
-            None => format!("\"{}\"", table_name.replace('"', "\"\"")),
-        };
-        if replace {
+        for sql in create_table_statements(table_name, columns, replace, target_db)? {
             self.connection
-                .execute_command(&format!("DROP TABLE IF EXISTS {quoted_table}"))
+                .execute_command(&sql)
                 .map_err(McpError::from)?;
         }
-
-        let col_defs: Vec<String> = columns
-            .iter()
-            .map(|c| {
-                let nullable = if c.nullable { "" } else { " NOT NULL" };
-                format!(
-                    "\"{}\" {}{}",
-                    c.name.replace('"', "\"\""),
-                    c.hyper_type,
-                    nullable
-                )
-            })
-            .collect();
-
-        let create_sql = format!(
-            "CREATE TABLE IF NOT EXISTS {} ({})",
-            quoted_table,
-            col_defs.join(", ")
-        );
-        self.connection
-            .execute_command(&create_sql)
-            .map_err(McpError::from)?;
         Ok(())
     }
 

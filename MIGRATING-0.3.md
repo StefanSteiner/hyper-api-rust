@@ -252,7 +252,13 @@ Callers that hold a pooled connection (`deadpool::managed::Object<ConnectionMana
 
 ### MCP follow-up
 
-The MCP server's `Engine::execute_in_transaction` helper takes `&self` and so cannot use the RAII guard. It retains the deprecated raw methods with a function-level `#[allow(deprecated, reason = "...")]` annotation. Migrating it requires reshaping `Engine`'s locking model. Two structural paths and an acceptance-criteria checklist are written up in [issue #72](https://github.com/tableau/hyper-api-rust/issues/72).
+The MCP server's `Engine::execute_in_transaction` helper originally took `&self` and so could not use the RAII guard. [Issue #72](https://github.com/tableau/hyper-api-rust/issues/72) closed that gap: the helper now takes `&mut self`, holds a `Transaction`, and hands its closure an `EngineTransaction` view instead of `&Engine`.
+
+Two in-tree holdouts remain, both by design rather than oversight — they are the `&self` helpers the `*_unguarded` methods were added for:
+
+- **`KvStore`** (`kv_store.rs`, in `pop`, `set_batch`, `set_batch_if_absent`) holds `connection: &'conn Connection`, a *shared* reference. `Connection::transaction()` needs `&mut self`, so adopting the guard would mean threading `&mut` out through `Connection::kv_store()` — a public breaking change that would also stop callers from opening two stores at once.
+  These paths do pair every begin with a commit or a best-effort rollback, so the obligation is discharged on the `Ok` and `Err` paths; a **panic** between them would leak an open transaction.
+- **`AsyncKvStore`** (`async_kv_store.rs`, same three operations) has the same shape and additionally cannot be rescued by a guard at all: Rust has no async `Drop`, which is why `AsyncTransaction`'s own `Drop` only warns. A future cancelled between the begin and the commit leaves the transaction open until the next command on that connection — the cancellation hazard described above, unmitigated.
 
 ---
 

@@ -17,7 +17,7 @@ use tempfile::TempPath;
 /// inserted with correct column values and ordering.
 #[test]
 fn ingest_json_basic() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     let data = r#"[{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]"#;
     let opts = IngestOptions {
         table: "users".into(),
@@ -26,7 +26,7 @@ fn ingest_json_basic() {
         merge_key: None,
         target_db: None,
     };
-    let result = ingest_json(&te.engine, data, &opts).unwrap();
+    let result = ingest_json(&mut te.engine, data, &opts).unwrap();
     assert_eq!(result.rows, 2);
 
     let rows = te
@@ -41,7 +41,7 @@ fn ingest_json_basic() {
 /// First ingest creates the table with 1 row, second ingest appends 1 more.
 #[test]
 fn ingest_json_append_mode() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     let data1 = r#"[{"id": 1}]"#;
     let data2 = r#"[{"id": 2}]"#;
     let opts_replace = IngestOptions {
@@ -58,8 +58,8 @@ fn ingest_json_append_mode() {
         merge_key: None,
         target_db: None,
     };
-    ingest_json(&te.engine, data1, &opts_replace).unwrap();
-    ingest_json(&te.engine, data2, &opts_append).unwrap();
+    ingest_json(&mut te.engine, data1, &opts_replace).unwrap();
+    ingest_json(&mut te.engine, data2, &opts_append).unwrap();
 
     let count: i64 = te
         .engine
@@ -74,7 +74,7 @@ fn ingest_json_append_mode() {
 /// correctly loads both data rows.
 #[test]
 fn ingest_csv_basic() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     let csv_text = "id,name,score\n1,Alice,95.5\n2,Bob,88.0\n";
     let opts = IngestOptions {
         table: "scores".into(),
@@ -83,7 +83,7 @@ fn ingest_csv_basic() {
         merge_key: None,
         target_db: None,
     };
-    let result = ingest_csv(&te.engine, csv_text, &opts).unwrap();
+    let result = ingest_csv(&mut te.engine, csv_text, &opts).unwrap();
     assert_eq!(result.rows, 2);
 
     let rows = te
@@ -98,7 +98,7 @@ fn ingest_csv_basic() {
 /// declared by the override rather than being inferred as TEXT.
 #[test]
 fn ingest_json_with_schema_override() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     let data = r#"[{"amount": "123.45"}]"#;
     let mut schema = serde_json::Map::new();
     schema.insert(
@@ -112,7 +112,7 @@ fn ingest_json_with_schema_override() {
         merge_key: None,
         target_db: None,
     };
-    let result = ingest_json(&te.engine, data, &opts).unwrap();
+    let result = ingest_json(&mut te.engine, data, &opts).unwrap();
     assert_eq!(result.rows, 1);
 }
 
@@ -120,7 +120,7 @@ fn ingest_json_with_schema_override() {
 /// silently creating a table with no columns.
 #[test]
 fn ingest_json_empty_returns_error() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     let data = "[]";
     let opts = IngestOptions {
         table: "empty".into(),
@@ -129,7 +129,7 @@ fn ingest_json_empty_returns_error() {
         merge_key: None,
         target_db: None,
     };
-    let result = ingest_json(&te.engine, data, &opts);
+    let result = ingest_json(&mut te.engine, data, &opts);
     assert!(result.is_err());
 }
 
@@ -160,7 +160,7 @@ fn tmp_with_ext(ext: &str, content: &[u8]) -> (String, TempPath) {
 /// of objects — the format produced by typical REST API snapshots.
 #[test]
 fn ingest_json_file_loads_json_array() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     let (path, _keep) = tmp_with_ext(
         "json",
         b"[{\"id\":1,\"name\":\"Alice\"},{\"id\":2,\"name\":\"Bob\"},{\"id\":3,\"name\":\"Carol\"}]",
@@ -172,7 +172,7 @@ fn ingest_json_file_loads_json_array() {
         merge_key: None,
         target_db: None,
     };
-    let result = ingest_json_file(&te.engine, &path, &opts).unwrap();
+    let result = ingest_json_file(&mut te.engine, &path, &opts).unwrap();
     assert_eq!(result.rows, 3);
     assert_eq!(result.stats.file_format.as_deref(), Some("json"));
     assert_eq!(result.stats.operation, "load_file");
@@ -190,7 +190,7 @@ fn ingest_json_file_loads_json_array() {
 /// are tolerated so real-world log files load without preprocessing.
 #[test]
 fn ingest_json_file_loads_jsonl() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     let jsonl = b"{\"k\":\"start\",\"n\":1}\n\
                   \n\
                   {\"k\":\"progress\",\"n\":2}\n\
@@ -203,7 +203,7 @@ fn ingest_json_file_loads_jsonl() {
         merge_key: None,
         target_db: None,
     };
-    let result = ingest_json_file(&te.engine, &path, &opts).unwrap();
+    let result = ingest_json_file(&mut te.engine, &path, &opts).unwrap();
     assert_eq!(result.rows, 3, "blank lines are skipped, data rows count 3");
     assert_eq!(result.stats.file_format.as_deref(), Some("jsonl"));
 
@@ -220,7 +220,7 @@ fn ingest_json_file_loads_jsonl() {
 /// the offending line number, not a cryptic byte offset.
 #[test]
 fn ingest_json_file_reports_bad_jsonl_line() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     let bad = b"{\"id\":1}\n\
                 {\"id\":2}\n\
                 not-json\n";
@@ -232,7 +232,7 @@ fn ingest_json_file_reports_bad_jsonl_line() {
         merge_key: None,
         target_db: None,
     };
-    let Err(err) = ingest_json_file(&te.engine, &path, &opts) else {
+    let Err(err) = ingest_json_file(&mut te.engine, &path, &opts) else {
         panic!("expected malformed JSONL to error")
     };
     assert_eq!(err.code, hyperdb_mcp::error::ErrorCode::SchemaMismatch);
@@ -249,7 +249,7 @@ fn ingest_json_file_reports_bad_jsonl_line() {
 /// users rely on when filtering with `WHERE col IS NULL`.
 #[test]
 fn ingest_csv_empty_cells_become_null() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     // Rows 1/3 have age set, row 2 leaves age empty. The empty cell
     // should land as SQL NULL, not an empty-string zero or a parse
     // error on the numeric column.
@@ -261,7 +261,7 @@ fn ingest_csv_empty_cells_become_null() {
         merge_key: None,
         target_db: None,
     };
-    let result = ingest_csv(&te.engine, csv_text, &opts).unwrap();
+    let result = ingest_csv(&mut te.engine, csv_text, &opts).unwrap();
     assert_eq!(result.rows, 3);
 
     let nulls: i64 = te
@@ -381,7 +381,7 @@ fn detect_file_format_defaults_to_csv_when_unreadable() {
 /// this whole fix set was designed to remove.
 #[test]
 fn ingest_json_file_handles_log_extension_via_content_sniff() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     // Construct the payload through `detect_file_format` so the test
     // mirrors the production dispatch path rather than hard-coding a
     // specific ingest function.
@@ -400,7 +400,7 @@ fn ingest_json_file_handles_log_extension_via_content_sniff() {
         merge_key: None,
         target_db: None,
     };
-    let result = ingest_json_file(&te.engine, &path, &opts).unwrap();
+    let result = ingest_json_file(&mut te.engine, &path, &opts).unwrap();
     assert_eq!(result.rows, 2);
     assert_eq!(result.stats.file_format.as_deref(), Some("jsonl"));
 }
@@ -410,7 +410,7 @@ fn ingest_json_file_handles_log_extension_via_content_sniff() {
 /// defensive `OR col IS NULL` clause.
 #[test]
 fn ingest_csv_file_empty_cells_become_null() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     let (path, _keep) = tmp_with_ext("csv", b"code,label\nAAA,first\n,middle\nBBB,\n");
     let opts = IngestOptions {
         table: "lookup".into(),
@@ -419,7 +419,7 @@ fn ingest_csv_file_empty_cells_become_null() {
         merge_key: None,
         target_db: None,
     };
-    let result = ingest_csv_file(&te.engine, &path, &opts).unwrap();
+    let result = ingest_csv_file(&mut te.engine, &path, &opts).unwrap();
     assert_eq!(result.rows, 3);
 
     let code_nulls: i64 = te
@@ -549,7 +549,7 @@ fn extract_json_path_multi_level() {
 /// End-to-end: extract from Splunk-shaped wrapper and ingest into Hyper.
 #[test]
 fn extract_json_path_then_ingest() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     let inner = serde_json::json!({
         "status": "success",
         "query_result": {
@@ -573,7 +573,7 @@ fn extract_json_path_then_ingest() {
         merge_key: None,
         target_db: None,
     };
-    let result = ingest_json(&te.engine, &extracted, &opts).unwrap();
+    let result = ingest_json(&mut te.engine, &extracted, &opts).unwrap();
     assert_eq!(result.rows, 2);
 
     let rows = te
@@ -593,7 +593,7 @@ fn extract_json_path_then_ingest() {
 /// Final shape: 4 rows; updated rows show the new values.
 #[test]
 fn ingest_json_merge_basic() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     let initial = r#"[
         {"id": 1, "name": "Alice"},
         {"id": 2, "name": "Bob"},
@@ -612,7 +612,7 @@ fn ingest_json_merge_basic() {
         merge_key: None,
         target_db: None,
     };
-    ingest_json(&te.engine, initial, &opts_replace).unwrap();
+    ingest_json(&mut te.engine, initial, &opts_replace).unwrap();
 
     let opts_merge = IngestOptions {
         table: "users".into(),
@@ -621,7 +621,7 @@ fn ingest_json_merge_basic() {
         merge_key: Some(vec!["id".into()]),
         target_db: None,
     };
-    let merge_result = ingest_json(&te.engine, updates, &opts_merge).unwrap();
+    let merge_result = ingest_json(&mut te.engine, updates, &opts_merge).unwrap();
     // No new columns in this merge → schema_changed must remain false so
     // the server handler skips the resource-list-changed broadcast.
     assert!(
@@ -649,7 +649,7 @@ fn ingest_json_merge_basic() {
 /// and old rows have `host = NULL`.
 #[test]
 fn ingest_json_merge_adds_new_column() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     let initial = r#"[{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]"#;
     let with_host = r#"[
         {"id": 2, "name": "Bob", "host": "host-2"},
@@ -663,7 +663,7 @@ fn ingest_json_merge_adds_new_column() {
         merge_key: None,
         target_db: None,
     };
-    ingest_json(&te.engine, initial, &opts_replace).unwrap();
+    ingest_json(&mut te.engine, initial, &opts_replace).unwrap();
 
     let opts_merge = IngestOptions {
         table: "t".into(),
@@ -672,7 +672,7 @@ fn ingest_json_merge_adds_new_column() {
         merge_key: Some(vec!["id".into()]),
         target_db: None,
     };
-    let merge_result = ingest_json(&te.engine, with_host, &opts_merge).unwrap();
+    let merge_result = ingest_json(&mut te.engine, with_host, &opts_merge).unwrap();
     // ALTER TABLE fired → schema_changed must be true so the server
     // handler issues a resource-list-changed broadcast and clients
     // re-fetch their schema cache.
@@ -704,7 +704,7 @@ fn ingest_json_merge_adds_new_column() {
 /// table becomes the target and rows are loaded as-if by replace.
 #[test]
 fn ingest_json_merge_target_does_not_exist() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     let data = r#"[{"id": 1, "name": "Alice"}]"#;
     let opts_merge = IngestOptions {
         table: "fresh".into(),
@@ -713,7 +713,7 @@ fn ingest_json_merge_target_does_not_exist() {
         merge_key: Some(vec!["id".into()]),
         target_db: None,
     };
-    let result = ingest_json(&te.engine, data, &opts_merge).unwrap();
+    let result = ingest_json(&mut te.engine, data, &opts_merge).unwrap();
     assert_eq!(result.rows, 1);
     // Target was just created from scratch via the rename short-circuit;
     // by definition this is a "shape changed" event, so notify clients.
@@ -735,7 +735,7 @@ fn ingest_json_merge_target_does_not_exist() {
 /// at the tool boundary).
 #[test]
 fn ingest_json_merge_missing_key_param() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     let data = r#"[{"id": 1}]"#;
     let opts = IngestOptions {
         table: "t".into(),
@@ -744,7 +744,7 @@ fn ingest_json_merge_missing_key_param() {
         merge_key: None,
         target_db: None,
     };
-    let err = ingest_json(&te.engine, data, &opts).unwrap_err();
+    let err = ingest_json(&mut te.engine, data, &opts).unwrap_err();
     assert!(
         err.message.to_lowercase().contains("merge_key"),
         "error must mention merge_key; got: {}",
@@ -758,7 +758,7 @@ fn ingest_json_merge_missing_key_param() {
 /// untouched.
 #[test]
 fn ingest_json_merge_key_not_in_target() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     // Target has only `id`. Merge attempts to key on `not_a_col`.
     let opts_replace = IngestOptions {
         table: "t".into(),
@@ -767,7 +767,7 @@ fn ingest_json_merge_key_not_in_target() {
         merge_key: None,
         target_db: None,
     };
-    ingest_json(&te.engine, r#"[{"id": 1}]"#, &opts_replace).unwrap();
+    ingest_json(&mut te.engine, r#"[{"id": 1}]"#, &opts_replace).unwrap();
 
     let opts_merge = IngestOptions {
         table: "t".into(),
@@ -776,7 +776,12 @@ fn ingest_json_merge_key_not_in_target() {
         merge_key: Some(vec!["not_a_col".into()]),
         target_db: None,
     };
-    let err = ingest_json(&te.engine, r#"[{"id": 2, "not_a_col": "x"}]"#, &opts_merge).unwrap_err();
+    let err = ingest_json(
+        &mut te.engine,
+        r#"[{"id": 2, "not_a_col": "x"}]"#,
+        &opts_merge,
+    )
+    .unwrap_err();
     assert!(
         err.message.contains("not_a_col"),
         "error must name the missing column; got: {}",
@@ -799,7 +804,7 @@ fn ingest_json_merge_key_not_in_target() {
 /// practice. Reject with a clear error rather than silently coercing.
 #[test]
 fn ingest_json_merge_key_type_mismatch() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     // Force `id` to BIGINT explicitly.
     let mut so = serde_json::Map::new();
     so.insert("id".into(), serde_json::json!("BIGINT"));
@@ -810,7 +815,7 @@ fn ingest_json_merge_key_type_mismatch() {
         merge_key: None,
         target_db: None,
     };
-    ingest_json(&te.engine, r#"[{"id": 1, "name": "a"}]"#, &opts_replace).unwrap();
+    ingest_json(&mut te.engine, r#"[{"id": 1, "name": "a"}]"#, &opts_replace).unwrap();
 
     // Incoming has id as quoted string, no override → inferred TEXT.
     let opts_merge = IngestOptions {
@@ -820,7 +825,8 @@ fn ingest_json_merge_key_type_mismatch() {
         merge_key: Some(vec!["id".into()]),
         target_db: None,
     };
-    let err = ingest_json(&te.engine, r#"[{"id": "1", "name": "a"}]"#, &opts_merge).unwrap_err();
+    let err =
+        ingest_json(&mut te.engine, r#"[{"id": "1", "name": "a"}]"#, &opts_merge).unwrap_err();
     assert!(
         err.message.to_lowercase().contains("type mismatch"),
         "error must mention type mismatch; got: {}",
@@ -832,7 +838,7 @@ fn ingest_json_merge_key_type_mismatch() {
 /// We still reject because silently coercing risks data loss.
 #[test]
 fn ingest_json_merge_existing_column_type_mismatch() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     // Target has score as DOUBLE PRECISION.
     let mut so = serde_json::Map::new();
     so.insert("score".into(), serde_json::json!("DOUBLE PRECISION"));
@@ -843,7 +849,12 @@ fn ingest_json_merge_existing_column_type_mismatch() {
         merge_key: None,
         target_db: None,
     };
-    ingest_json(&te.engine, r#"[{"id": 1, "score": 99.5}]"#, &opts_replace).unwrap();
+    ingest_json(
+        &mut te.engine,
+        r#"[{"id": 1, "score": 99.5}]"#,
+        &opts_replace,
+    )
+    .unwrap();
 
     // Incoming has score as quoted text.
     let opts_merge = IngestOptions {
@@ -854,7 +865,7 @@ fn ingest_json_merge_existing_column_type_mismatch() {
         target_db: None,
     };
     let err = ingest_json(
-        &te.engine,
+        &mut te.engine,
         r#"[{"id": 1, "score": "not a number"}]"#,
         &opts_merge,
     )
@@ -871,7 +882,7 @@ fn ingest_json_merge_existing_column_type_mismatch() {
 /// describe/list experience over time.
 #[test]
 fn ingest_json_merge_no_orphan_tmp_on_failure() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     // Force a key-not-in-target failure (cheap, deterministic).
     let opts_replace = IngestOptions {
         table: "t".into(),
@@ -880,7 +891,7 @@ fn ingest_json_merge_no_orphan_tmp_on_failure() {
         merge_key: None,
         target_db: None,
     };
-    ingest_json(&te.engine, r#"[{"id": 1}]"#, &opts_replace).unwrap();
+    ingest_json(&mut te.engine, r#"[{"id": 1}]"#, &opts_replace).unwrap();
 
     let opts_merge = IngestOptions {
         table: "t".into(),
@@ -889,7 +900,11 @@ fn ingest_json_merge_no_orphan_tmp_on_failure() {
         merge_key: Some(vec!["bogus_key".into()]),
         target_db: None,
     };
-    let _ = ingest_json(&te.engine, r#"[{"id": 2, "bogus_key": "x"}]"#, &opts_merge);
+    let _ = ingest_json(
+        &mut te.engine,
+        r#"[{"id": 2, "bogus_key": "x"}]"#,
+        &opts_merge,
+    );
 
     // Look for any leftover `__hyperdb_merge_*` table.
     let table_rows = te
@@ -923,7 +938,7 @@ fn ingest_json_merge_no_orphan_tmp_on_failure() {
 /// non-matching key tuples insert as new rows.
 #[test]
 fn ingest_json_merge_multi_key() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     // Initial: 4 rows keyed by (region, year).
     let initial = r#"[
         {"region": "us", "year": 2025, "amount": 100},
@@ -938,7 +953,7 @@ fn ingest_json_merge_multi_key() {
         merge_key: None,
         target_db: None,
     };
-    ingest_json(&te.engine, initial, &opts_replace).unwrap();
+    ingest_json(&mut te.engine, initial, &opts_replace).unwrap();
 
     // Merge: us/2026 updates (amount→999); eu/2027 is new; us/2025 stays untouched.
     let updates = r#"[
@@ -952,7 +967,7 @@ fn ingest_json_merge_multi_key() {
         merge_key: Some(vec!["region".into(), "year".into()]),
         target_db: None,
     };
-    ingest_json(&te.engine, updates, &opts_merge).unwrap();
+    ingest_json(&mut te.engine, updates, &opts_merge).unwrap();
 
     let rows = te
         .engine
@@ -984,7 +999,7 @@ fn ingest_json_merge_multi_key() {
 /// the alias behavior so future refactors don't regress it.
 #[test]
 fn ingest_json_merge_type_canonicalization_does_not_false_reject() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
 
     // Force the target's `id` column to be created from the `"INT"` user
     // string. After `CREATE TABLE`, Hyper canonicalizes to `"INTEGER"`
@@ -998,7 +1013,7 @@ fn ingest_json_merge_type_canonicalization_does_not_false_reject() {
         merge_key: None,
         target_db: None,
     };
-    ingest_json(&te.engine, r#"[{"id": 1, "name": "a"}]"#, &opts_replace).unwrap();
+    ingest_json(&mut te.engine, r#"[{"id": 1, "name": "a"}]"#, &opts_replace).unwrap();
 
     // Sanity: confirm the catalog canonicalized to INTEGER. (If this
     // assertion ever fails, Hyper's behavior changed, and the test
@@ -1025,7 +1040,7 @@ fn ingest_json_merge_type_canonicalization_does_not_false_reject() {
         target_db: None,
     };
     let result = ingest_json(
-        &te.engine,
+        &mut te.engine,
         r#"[{"id": 1, "name": "updated"}, {"id": 2, "name": "new"}]"#,
         &opts_merge,
     );
@@ -1054,7 +1069,7 @@ fn ingest_json_merge_type_canonicalization_does_not_false_reject() {
 /// overlapping (update) + 1 new (insert) → final 4.
 #[test]
 fn ingest_csv_merge_basic() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     let initial = "id,name\n1,Alice\n2,Bob\n3,Carol\n";
     let updates = "id,name\n2,Bob Jr.\n3,Carol Updated\n4,Dave\n";
 
@@ -1065,7 +1080,7 @@ fn ingest_csv_merge_basic() {
         merge_key: None,
         target_db: None,
     };
-    ingest_csv(&te.engine, initial, &opts_replace).unwrap();
+    ingest_csv(&mut te.engine, initial, &opts_replace).unwrap();
 
     let opts_merge = IngestOptions {
         table: "users_csv".into(),
@@ -1074,7 +1089,7 @@ fn ingest_csv_merge_basic() {
         merge_key: Some(vec!["id".into()]),
         target_db: None,
     };
-    let merge_result = ingest_csv(&te.engine, updates, &opts_merge).unwrap();
+    let merge_result = ingest_csv(&mut te.engine, updates, &opts_merge).unwrap();
     assert!(
         !merge_result.stats.schema_changed,
         "row-only merge must leave schema_changed false"

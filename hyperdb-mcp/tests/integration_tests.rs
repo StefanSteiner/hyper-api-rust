@@ -14,7 +14,7 @@ use hyperdb_mcp::ingest::{IngestOptions, ingest_csv, ingest_json};
 /// GROUP BY aggregation. Verifies multi-table workspace queries work end-to-end.
 #[test]
 fn full_pipeline_json_to_query() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
 
     let orders = r#"[
         {"order_id": 1, "customer_id": 1, "amount": 100.50},
@@ -28,7 +28,7 @@ fn full_pipeline_json_to_query() {
         merge_key: None,
         target_db: None,
     };
-    ingest_json(&te.engine, orders, &opts).unwrap();
+    ingest_json(&mut te.engine, orders, &opts).unwrap();
 
     let customers = r#"[
         {"customer_id": 1, "name": "Alice"},
@@ -41,7 +41,7 @@ fn full_pipeline_json_to_query() {
         merge_key: None,
         target_db: None,
     };
-    ingest_json(&te.engine, customers, &opts).unwrap();
+    ingest_json(&mut te.engine, customers, &opts).unwrap();
 
     let rows = te.engine.execute_query_to_json(
         "SELECT c.name, SUM(o.amount) as total FROM orders o JOIN customers c ON o.customer_id = c.customer_id GROUP BY c.name ORDER BY total DESC"
@@ -55,7 +55,7 @@ fn full_pipeline_json_to_query() {
 /// pipeline that the `query_file` MCP tool relies on.
 #[test]
 fn full_pipeline_csv_ingest_and_export() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
 
     let csv_data = "product,quantity,price\nWidget,100,9.99\nGadget,50,19.99\n";
     let opts = IngestOptions {
@@ -65,7 +65,7 @@ fn full_pipeline_csv_ingest_and_export() {
         merge_key: None,
         target_db: None,
     };
-    ingest_csv(&te.engine, csv_data, &opts).unwrap();
+    ingest_csv(&mut te.engine, csv_data, &opts).unwrap();
 
     let dir = tempfile::tempdir().unwrap();
     let export_path = dir.path().join("export.csv");
@@ -135,7 +135,7 @@ fn status_reports_workspace_info() {
 /// final count should be 3.
 #[test]
 fn append_mode_accumulates_data() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
 
     let batch1 = r#"[{"v": 1}, {"v": 2}]"#;
     let batch2 = r#"[{"v": 3}]"#;
@@ -155,8 +155,8 @@ fn append_mode_accumulates_data() {
         target_db: None,
     };
 
-    ingest_json(&te.engine, batch1, &opts_replace).unwrap();
-    ingest_json(&te.engine, batch2, &opts_append).unwrap();
+    ingest_json(&mut te.engine, batch1, &opts_replace).unwrap();
+    ingest_json(&mut te.engine, batch2, &opts_append).unwrap();
 
     let rows = te
         .engine

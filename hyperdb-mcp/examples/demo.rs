@@ -229,7 +229,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Step 1: spin up engine ─────────────────────────────────────────
     section("Step 1 · Launch the engine (local database)");
-    let engine = Engine::new(None)?;
+    let mut engine = Engine::new(None)?;
     println!("   Ephemeral DB: {}", engine.ephemeral_path().display());
     println!("   Log dir:   {}", engine.log_dir().display());
     println!("   hyperd is running: {}", engine.is_running());
@@ -243,7 +243,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         merge_key: None,
         target_db: None,
     };
-    let ingest_result = ingest_csv_file(&engine, csv_path.to_str().unwrap(), &ingest_opts)?;
+    let ingest_result = ingest_csv_file(&mut engine, csv_path.to_str().unwrap(), &ingest_opts)?;
     println!(
         "   Ingested {} rows into `coder_stats`.",
         ingest_result.rows

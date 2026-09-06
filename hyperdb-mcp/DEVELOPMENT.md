@@ -101,16 +101,21 @@ Every ingest function (`ingest_json`, `ingest_csv`, `ingest_parquet_file`, `inge
 Three edges to this guarantee, all documented in `src/engine.rs`:
 
 1. **DDL auto-commits.** Hyper commits `CREATE TABLE` / `DROP TABLE` immediately, regardless of the surrounding transaction. In `replace` mode the original table is already gone by the time INSERTs start, so a failed replace-mode ingest leaves an empty table rather than restoring the original. Append mode is fully atomic because it issues DDL only when the target doesn't exist and, when it does, no data is lost on failure.
-2. **Panic safety.** `execute_in_transaction` wraps the closure in
-   `catch_unwind(AssertUnwindSafe(...))`, issues a best-effort ROLLBACK on
-   panic, and `resume_unwind`s the original payload. Without this, a panic
-   inside the closure (unwrap on None, indexing OOB, arithmetic overflow) would
-   leave an open transaction and every subsequent tool call would hit
-   "transaction already in progress" — classified as `InternalError`, not
-   `ConnectionLost`, so the reconnect path at `with_engine` would not rescue it
-   and the engine would stay wedged until restart. Tested via
-   `execute_in_transaction_rolls_back_on_panic` in
+2. **Panic safety, at the SQL level only.** `execute_in_transaction` holds a
+   `hyperdb_api::Transaction` RAII guard and hands the closure an
+   `EngineTransaction` view of it. The guard's `Drop` issues the ROLLBACK, so a
+   panic inside the closure (unwrap on None, indexing OOB, arithmetic overflow)
+   rolls back as the unwind passes through — no `catch_unwind` needed, and no
+   exit path can forget. That is the whole of what the guard buys: the
+   *session* is left clean, so no later statement hits "transaction already in
+   progress" on a rolled-back transaction. Tested via
+   `execute_in_transaction_rolls_back_on_panic` and
+   `execute_in_transaction_never_leaks_an_open_transaction` in
    `tests/transaction_tests.rs`.
+
+   It does **not** keep a panicking tool call from wedging the server, and neither did the `catch_unwind` it replaced — both re-raise the panic once the rollback is done.
+   `with_engine` holds a `std::sync::MutexGuard` across the closure, so the unwind poisons `Arc<Mutex<Option<Engine>>>`; `ensure_engine` then returns `InternalError "Lock poisoned"` for every subsequent tool call, and nothing calls `clear_poison()`. The engine is unusable for the process lifetime.
+   Recovering from poisoning — most plausibly by having `ensure_engine` drop the engine and re-spawn, as it already does for `ConnectionLost` — is a live design question, deliberately out of scope for issue #72. Note that the two tests above drive `TestEngine` directly and never cross `with_engine`, so they cannot observe the poisoning.
 3. **Post-error wire-protocol quirk.** After a mid-transaction Hyper-level error (e.g. a NOT NULL violation on INSERT), the first SELECT after rollback may return an empty result set due to residual bytes on the connection. Retrying the query once restores normal behavior; the rollback itself is always correct. The `query_resilient` helper in `tests/transaction_tests.rs` is the robust pattern.
 
 ---

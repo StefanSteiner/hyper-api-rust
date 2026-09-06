@@ -92,6 +92,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- `Transaction`'s `Drop` now logs the implicit rollback it was already
+  performing: a `tracing::warn!` when the rollback itself fails, and a
+  `tracing::debug!` when it succeeds. Behavior is otherwise unchanged (the
+  rollback is still best-effort and `Drop` still cannot report failure), but a
+  transaction discharged by a panic is no longer invisible in the logs — on
+  that path there is no `Err` for a caller to inspect. `AsyncTransaction`'s
+  `Drop` already warned.
+
 - **BREAKING:** the `arrow` dependency moved from **58** to **59**. Arrow types
   appear in this crate's public API (`ArrowReader`, `ArrowInserter`,
   `AsyncArrowInserter`, `ArrowResult` and the Arrow IPC paths), so a consumer

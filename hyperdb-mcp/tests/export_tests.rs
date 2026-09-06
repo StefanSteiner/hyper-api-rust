@@ -378,7 +378,7 @@ fn export_overwrite_true_replaces_existing_file() {
 fn iceberg_export_round_trips_through_load_iceberg() {
     use hyperdb_mcp::lakehouse::{IcebergIngestOptions, ingest_iceberg_table};
 
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     setup_test_table(&te);
 
     let dir = tempfile::tempdir().unwrap();
@@ -416,7 +416,7 @@ fn iceberg_export_round_trips_through_load_iceberg() {
         metadata_filename: None,
         version_as_of: None,
     };
-    let ingest_result = ingest_iceberg_table(&te.engine, iceberg_str, &ingest_opts).unwrap();
+    let ingest_result = ingest_iceberg_table(&mut te.engine, iceberg_str, &ingest_opts).unwrap();
     assert_eq!(ingest_result.rows, 2);
 
     // The reported schema must list all three source columns. The initial
@@ -473,7 +473,7 @@ fn iceberg_export_round_trips_through_load_iceberg() {
 /// its place.
 #[test]
 fn iceberg_export_overwrite_replaces_directory() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     setup_test_table(&te);
 
     let dir = tempfile::tempdir().unwrap();
@@ -510,7 +510,7 @@ fn iceberg_export_overwrite_replaces_directory() {
     // 2-row Iceberg table was replaced, not augmented.
     use hyperdb_mcp::lakehouse::{IcebergIngestOptions, ingest_iceberg_table};
     let ingest = ingest_iceberg_table(
-        &te.engine,
+        &mut te.engine,
         iceberg_str,
         &IcebergIngestOptions {
             table: "t".into(),
@@ -571,7 +571,7 @@ fn parquet_export_round_trips_through_load_file() {
     use hyperdb_mcp::ingest::IngestOptions;
     use hyperdb_mcp::ingest_arrow::ingest_parquet_file;
 
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     // A table whose columns include every type the old JSON-based
     // exporter would have degraded: NUMERIC with scale, DATE, plus
     // plain INT/TEXT/DOUBLE. The round-trip must preserve all of them.
@@ -618,7 +618,7 @@ fn parquet_export_round_trips_through_load_file() {
 
     // Reload through our own parquet loader.
     let ingest_result = ingest_parquet_file(
-        &te.engine,
+        &mut te.engine,
         path_str,
         &IngestOptions {
             table: "pq_export_reloaded".into(),
@@ -688,7 +688,7 @@ fn arrow_ipc_export_round_trips_through_load_file() {
     use hyperdb_mcp::ingest::IngestOptions;
     use hyperdb_mcp::ingest_arrow::ingest_arrow_ipc_file;
 
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     setup_test_table(&te);
 
     let dir = tempfile::tempdir().unwrap();
@@ -715,7 +715,7 @@ fn arrow_ipc_export_round_trips_through_load_file() {
     // Stream vs File sub-format, so an export producing Stream bytes
     // round-trips without extra conversion.
     let ingest_result = ingest_arrow_ipc_file(
-        &te.engine,
+        &mut te.engine,
         path_str,
         &IngestOptions {
             table: "arrow_reloaded".into(),

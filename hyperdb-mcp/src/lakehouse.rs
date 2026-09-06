@@ -179,7 +179,7 @@ fn count_rows(engine: &Engine, table: &str) -> Result<u64, McpError> {
 /// - Returns [`ErrorCode::InternalError`] if the post-ingest
 ///   `COUNT(*)` cannot be read back (bubbled from `count_rows`).
 pub fn ingest_iceberg_table(
-    engine: &Engine,
+    engine: &mut Engine,
     path: &str,
     opts: &IcebergIngestOptions,
 ) -> Result<IngestResult, McpError> {
@@ -193,12 +193,12 @@ pub fn ingest_iceberg_table(
     // the transaction to avoid the post-CTAS wire-state quirk that
     // truncates the returned count — see `ingest_parquet_file` for the
     // long version.
-    let affected = engine.execute_in_transaction(|engine| {
+    let affected = engine.execute_in_transaction(|txn| {
         if is_replace {
             let quoted_table = format!("\"{}\"", opts.table.replace('"', "\"\""));
-            engine.execute_command(&format!("DROP TABLE IF EXISTS {quoted_table}"))?;
+            txn.execute_command(&format!("DROP TABLE IF EXISTS {quoted_table}"))?;
         }
-        engine.execute_command(&sql)
+        txn.execute_command(&sql)
     })?;
 
     let row_count = if is_replace {

@@ -1622,11 +1622,16 @@ impl HyperMcpServer {
     /// heals itself.
     fn with_engine<F, R>(&self, f: F) -> Result<R, McpError>
     where
-        F: FnOnce(&Engine) -> Result<R, McpError>,
+        F: FnOnce(&mut Engine) -> Result<R, McpError>,
     {
         let (result, daemon_health_port, connection_lost) = {
             let mut guard = self.ensure_engine()?;
-            let engine = guard.as_ref().expect("ensure_engine guarantees Some");
+            // `&mut` because transactional paths need
+            // `Engine::execute_in_transaction`, whose RAII guard borrows the
+            // connection exclusively. Handing it out costs nothing: the
+            // engine already lives behind this exclusive `Mutex`, so no
+            // caller was ever sharing it concurrently.
+            let engine = guard.as_mut().expect("ensure_engine guarantees Some");
             let daemon_health_port = engine.daemon_health_port();
             // Bootstrap the catalog exactly once per engine. Intentionally
             // runs *inside* `with_engine` (not `ensure_engine`) so the
@@ -2779,12 +2784,13 @@ impl HyperMcpServer {
             // require_writable=true ensures non-primary aliases must be writable.
             // Held for the entire batch (and transaction, if multi-statement).
             let target_db = self.resolve_db(engine, params.database.as_deref(), None, true)?;
-            let _search_guard = match target_db {
-                Some(ref alias) => Some(engine.scoped_search_path(alias)?),
-                None => None,
-            };
             let total_timer = crate::stats::StatsTimer::start();
+            // The closure form of the search-path scope rather than the
+            // `ScopedSearchPath` guard: the multi-statement branch needs
+            // `&mut Engine` for the transaction guard, which the guard's
+            // immutable borrow of the engine would block.
             let (per_statement, affected_total, operation): (Vec<Value>, u64, &'static str) =
+                engine.with_search_path(target_db.as_deref(), |engine| {
                 if params.sql.len() == 1 {
                     // Singletons skip BEGIN/COMMIT — same auto-commit behavior
                     // as the pre-batch `execute` tool, and DDL singletons stay
@@ -2792,7 +2798,7 @@ impl HyperMcpServer {
                     let stmt = &params.sql[0];
                     let t = crate::stats::StatsTimer::start();
                     let affected = engine.execute_command(stmt)?;
-                    (
+                    Ok((
                         vec![json!({
                             "sql": Self::fmt_sql(stmt),
                             "affected_rows": affected,
@@ -2800,15 +2806,15 @@ impl HyperMcpServer {
                         })],
                         affected,
                         "command",
-                    )
+                    ))
                 } else {
                     let stmts = &params.sql;
-                    let (results, total) = engine.execute_in_transaction(|engine| {
+                    let (results, total) = engine.execute_in_transaction(|txn| {
                         let mut out = Vec::with_capacity(stmts.len());
                         let mut total: u64 = 0;
                         for (idx, stmt) in stmts.iter().enumerate() {
                             let t = crate::stats::StatsTimer::start();
-                            let affected = engine.execute_command(stmt).map_err(|e| {
+                            let affected = txn.execute_command(stmt).map_err(|e| {
                                 // Preserve the original error's code AND its
                                 // suggestion (e.g. Hyper's "did you mean
                                 // <column>?") — append the rollback context
@@ -2844,8 +2850,9 @@ impl HyperMcpServer {
                         }
                         Ok((out, total))
                     })?;
-                    (results, total, "transaction")
-                };
+                    Ok((results, total, "transaction"))
+                }
+                })?;
             let elapsed = total_timer.elapsed_ms();
             // Reconcile only when the batch contains a statement that
             // could have changed the set of tables (CREATE / DROP /
@@ -4442,7 +4449,7 @@ impl HyperMcpServer {
     pub fn resource_body_for_uri(&self, uri: &str) -> Result<Option<ResourceBody>, McpError> {
         if uri == "hyper://workspace" {
             return self
-                .with_engine(super::engine::Engine::status)
+                .with_engine(|engine| engine.status())
                 .map(|v| Some(ResourceBody::Json(v)));
         }
         if uri == "hyper://tables" {
@@ -4584,7 +4591,7 @@ impl HyperMcpServer {
             "hyper://readme".to_string(),
             "hyper://schema/kv".to_string(),
         ];
-        if let Ok(tables) = self.with_engine(super::engine::Engine::describe_tables) {
+        if let Ok(tables) = self.with_engine(|engine| engine.describe_tables()) {
             // `describe_tables` already filters out `_hyperdb_*` meta-
             // tables via `is_internal_table`, so any table we see here
             // is user-visible.
@@ -4614,9 +4621,9 @@ impl HyperMcpServer {
     /// orient itself in a single resource read without first calling
     /// `status` and `describe` tools.
     fn build_readme_body(&self) -> Result<ResourceBody, McpError> {
-        let status = self.with_engine(super::engine::Engine::status)?;
+        let status = self.with_engine(|engine| engine.status())?;
         let tables = self
-            .with_engine(super::engine::Engine::describe_tables)
+            .with_engine(|engine| engine.describe_tables())
             .unwrap_or_default();
 
         let has_persistent = status
@@ -5059,7 +5066,7 @@ Full SQL reference: https://developer.salesforce.com/docs/data/data-cloud-query-
             .no_annotation(),
         ];
 
-        if let Ok(tables) = self.with_engine(super::engine::Engine::describe_tables) {
+        if let Ok(tables) = self.with_engine(|engine| engine.describe_tables()) {
             // `describe_tables` already excludes `_hyperdb_*` meta-
             // tables (see `is_internal_table`), so the resource
             // catalog only surfaces user-visible tables.

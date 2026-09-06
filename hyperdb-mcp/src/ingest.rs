@@ -13,9 +13,10 @@
 //! # Atomicity
 //!
 //! Every ingest function wraps its `INSERT` / `COPY` work inside a single
-//! transaction via [`Engine::execute_in_transaction`]. If any row fails to
-//! insert, all prior inserts from the same call are rolled back, so a failed
-//! ingest leaves zero additional rows behind.
+//! transaction via [`Engine::execute_in_transaction`], which holds an RAII
+//! guard for the duration. If any row fails to insert, all prior inserts from
+//! the same call are rolled back, so a failed ingest leaves zero additional
+//! rows behind — and the guard's `Drop` covers the panic path too.
 //!
 //! Note that Hyper auto-commits DDL (`DROP TABLE`, `CREATE TABLE`) regardless
 //! of the surrounding transaction. In `replace` mode, this means the original
@@ -295,12 +296,12 @@ impl Drop for TempTableGuard<'_> {
 ///   INSERT statements. The temp table is dropped before the error
 ///   propagates.
 pub fn merge_via_temp_table<F>(
-    engine: &Engine,
+    engine: &mut Engine,
     opts: &IngestOptions,
     replace_load: F,
 ) -> Result<IngestResult, McpError>
 where
-    F: FnOnce(&IngestOptions) -> Result<IngestResult, McpError>,
+    F: FnOnce(&mut Engine, &IngestOptions) -> Result<IngestResult, McpError>,
 {
     // Belt-and-suspenders contract check. Every per-format ingest only
     // calls this helper when `opts.mode == "merge"`; if a future
@@ -373,7 +374,7 @@ where
         merge_key: None,
         target_db: opts.target_db.clone(),
     };
-    let tmp_result = replace_load(&tmp_opts)?;
+    let tmp_result = replace_load(engine, &tmp_opts)?;
 
     // Arm the cleanup guard immediately after the load so any later
     // failure (or panic) drops the temp table on unwind. The guard
@@ -616,12 +617,12 @@ fn types_compatible(a: &str, b: &str) -> bool {
 ///   [`Engine::create_table`], the per-row `INSERT` statements, or
 ///   transaction commit/rollback failures.
 pub fn ingest_json(
-    engine: &Engine,
+    engine: &mut Engine,
     json_str: &str,
     opts: &IngestOptions,
 ) -> Result<IngestResult, McpError> {
     if opts.mode == "merge" {
-        return merge_via_temp_table(engine, opts, |tmp_opts| {
+        return merge_via_temp_table(engine, opts, |engine, tmp_opts| {
             ingest_json(engine, json_str, tmp_opts)
         });
     }
@@ -649,8 +650,8 @@ pub fn ingest_json(
     // zero side effects.
     let is_replace = opts.mode != "append";
     let qualified = qualified_table(opts);
-    let row_count = engine.execute_in_transaction(|engine| {
-        engine.create_table_in(&opts.table, &columns, is_replace, opts.target_db.as_deref())?;
+    let row_count = engine.execute_in_transaction(|txn| {
+        txn.create_table_in(&opts.table, &columns, is_replace, opts.target_db.as_deref())?;
         let mut row_count = 0u64;
         let col_names: Vec<String> = columns.iter().map(|c| format!("\"{}\"", c.name)).collect();
         for obj in &array {
@@ -671,7 +672,7 @@ pub fn ingest_json(
                 col_names.join(", "),
                 values.join(", ")
             );
-            engine.execute_command(&sql)?;
+            txn.execute_command(&sql)?;
             row_count += 1;
         }
         Ok(row_count)
@@ -718,12 +719,12 @@ pub fn ingest_json(
 ///   or the `COPY FROM` statement (SQL errors, schema mismatches,
 ///   connection loss).
 pub fn ingest_csv(
-    engine: &Engine,
+    engine: &mut Engine,
     csv_text: &str,
     opts: &IngestOptions,
 ) -> Result<IngestResult, McpError> {
     if opts.mode == "merge" {
-        return merge_via_temp_table(engine, opts, |tmp_opts| {
+        return merge_via_temp_table(engine, opts, |engine, tmp_opts| {
             ingest_csv(engine, csv_text, tmp_opts)
         });
     }
@@ -786,9 +787,9 @@ pub fn ingest_csv(
     // Create table + COPY inside one transaction so that a COPY failure also
     // unwinds the table creation.
     let is_replace = opts.mode != "append";
-    let row_count = engine.execute_in_transaction(|engine| {
-        engine.create_table_in(&opts.table, &columns, is_replace, opts.target_db.as_deref())?;
-        engine.execute_command(&copy_sql)
+    let row_count = engine.execute_in_transaction(|txn| {
+        txn.create_table_in(&opts.table, &columns, is_replace, opts.target_db.as_deref())?;
+        txn.execute_command(&copy_sql)
     });
 
     // `temp_path` (TempPath) auto-deletes the file when dropped at end of scope.
@@ -835,12 +836,12 @@ pub fn ingest_csv(
 /// - Propagates any transaction error from [`Engine::create_table`]
 ///   or the `COPY FROM` statement.
 pub fn ingest_csv_file(
-    engine: &Engine,
+    engine: &mut Engine,
     path: &str,
     opts: &IngestOptions,
 ) -> Result<IngestResult, McpError> {
     if opts.mode == "merge" {
-        return merge_via_temp_table(engine, opts, |tmp_opts| {
+        return merge_via_temp_table(engine, opts, |engine, tmp_opts| {
             ingest_csv_file(engine, path, tmp_opts)
         });
     }
@@ -880,9 +881,9 @@ pub fn ingest_csv_file(
     );
 
     let is_replace = opts.mode != "append";
-    let row_count = engine.execute_in_transaction(|engine| {
-        engine.create_table_in(&opts.table, &columns, is_replace, opts.target_db.as_deref())?;
-        engine.execute_command(&copy_sql)
+    let row_count = engine.execute_in_transaction(|txn| {
+        txn.create_table_in(&opts.table, &columns, is_replace, opts.target_db.as_deref())?;
+        txn.execute_command(&copy_sql)
     })?;
 
     let elapsed = timer.elapsed_ms();
@@ -1039,7 +1040,7 @@ pub async fn ingest_csv_file_async(
 ///   JSON / JSONL) and from [`ingest_json`] (schema inference,
 ///   transaction failures, etc.).
 pub fn ingest_json_file(
-    engine: &Engine,
+    engine: &mut Engine,
     path: &str,
     opts: &IngestOptions,
 ) -> Result<IngestResult, McpError> {

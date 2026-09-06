@@ -105,7 +105,7 @@ fn create_test_arrow_ipc(path: &str) {
 /// back to verify all rows loaded and NULL values are preserved.
 #[test]
 fn ingest_parquet() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test.parquet");
     let path_str = path.to_str().unwrap();
@@ -118,7 +118,7 @@ fn ingest_parquet() {
         merge_key: None,
         target_db: None,
     };
-    let result = ingest_parquet_file(&te.engine, path_str, &opts).unwrap();
+    let result = ingest_parquet_file(&mut te.engine, path_str, &opts).unwrap();
     assert_eq!(result.rows, 3);
 
     let rows = te
@@ -152,7 +152,7 @@ fn ingest_parquet_decimal128_not_null_preserves_values() {
     use parquet::arrow::ArrowWriter;
     use std::fs::File;
 
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("decimal.parquet");
     let path_str = path.to_str().unwrap();
@@ -185,7 +185,7 @@ fn ingest_parquet_decimal128_not_null_preserves_values() {
         merge_key: None,
         target_db: None,
     };
-    let result = ingest_parquet_file(&te.engine, path_str, &opts).unwrap();
+    let result = ingest_parquet_file(&mut te.engine, path_str, &opts).unwrap();
     assert_eq!(result.rows, 3);
 
     // The inferred target schema must preserve precision and scale so the
@@ -227,7 +227,7 @@ fn ingest_parquet_reports_accurate_row_count_above_131072() {
 
     const ROW_COUNT: usize = 200_000;
 
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("big.parquet");
     let path_str = path.to_str().unwrap();
@@ -249,7 +249,7 @@ fn ingest_parquet_reports_accurate_row_count_above_131072() {
         merge_key: None,
         target_db: None,
     };
-    let result = ingest_parquet_file(&te.engine, path_str, &opts).unwrap();
+    let result = ingest_parquet_file(&mut te.engine, path_str, &opts).unwrap();
 
     // The bug would have reported 200000 & 0x1FFFF = 68928.
     assert_eq!(
@@ -270,7 +270,7 @@ fn ingest_parquet_reports_accurate_row_count_above_131072() {
 /// `INSERT INTO ... SELECT * FROM external(...)` branch of the native path.
 #[test]
 fn ingest_parquet_append_adds_to_existing_rows() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("append.parquet");
     let path_str = path.to_str().unwrap();
@@ -283,7 +283,7 @@ fn ingest_parquet_append_adds_to_existing_rows() {
         merge_key: None,
         target_db: None,
     };
-    let r1 = ingest_parquet_file(&te.engine, path_str, &opts_replace).unwrap();
+    let r1 = ingest_parquet_file(&mut te.engine, path_str, &opts_replace).unwrap();
     assert_eq!(r1.rows, 3);
 
     let opts_append = IngestOptions {
@@ -293,7 +293,7 @@ fn ingest_parquet_append_adds_to_existing_rows() {
         merge_key: None,
         target_db: None,
     };
-    let r2 = ingest_parquet_file(&te.engine, path_str, &opts_append).unwrap();
+    let r2 = ingest_parquet_file(&mut te.engine, path_str, &opts_append).unwrap();
     assert_eq!(r2.rows, 3);
 
     let rows = te
@@ -310,7 +310,7 @@ fn ingest_parquet_append_adds_to_existing_rows() {
 /// override.
 #[test]
 fn ingest_parquet_applies_schema_override() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("override.parquet");
     let path_str = path.to_str().unwrap();
@@ -325,7 +325,7 @@ fn ingest_parquet_applies_schema_override() {
         merge_key: None,
         target_db: None,
     };
-    let result = ingest_parquet_file(&te.engine, path_str, &opts).unwrap();
+    let result = ingest_parquet_file(&mut te.engine, path_str, &opts).unwrap();
     assert_eq!(result.rows, 3);
 
     let id_col = result
@@ -353,7 +353,7 @@ fn ingest_parquet_applies_schema_override() {
 /// back to verify the row count and that the exact schema was preserved.
 #[test]
 fn ingest_arrow_ipc() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test.arrow");
     let path_str = path.to_str().unwrap();
@@ -366,7 +366,7 @@ fn ingest_arrow_ipc() {
         merge_key: None,
         target_db: None,
     };
-    let result = ingest_arrow_ipc_file(&te.engine, path_str, &opts).unwrap();
+    let result = ingest_arrow_ipc_file(&mut te.engine, path_str, &opts).unwrap();
     assert_eq!(result.rows, 2);
 
     let rows = te
@@ -391,7 +391,7 @@ fn ingest_arrow_ipc_decimal128_not_null_preserves_values() {
     use arrow::record_batch::RecordBatch;
     use std::fs::File;
 
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("decimal.arrow");
     let path_str = path.to_str().unwrap();
@@ -421,7 +421,7 @@ fn ingest_arrow_ipc_decimal128_not_null_preserves_values() {
         merge_key: None,
         target_db: None,
     };
-    let result = ingest_arrow_ipc_file(&te.engine, path_str, &opts).unwrap();
+    let result = ingest_arrow_ipc_file(&mut te.engine, path_str, &opts).unwrap();
     assert_eq!(result.rows, 3);
 
     let amount_col = result
@@ -447,7 +447,7 @@ fn ingest_arrow_ipc_decimal128_not_null_preserves_values() {
 /// `ingest_arrow_ipc_file`.
 #[test]
 fn ingest_arrow_ipc_append_adds_to_existing_rows() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("append.arrow");
     let path_str = path.to_str().unwrap();
@@ -460,7 +460,7 @@ fn ingest_arrow_ipc_append_adds_to_existing_rows() {
         merge_key: None,
         target_db: None,
     };
-    let r1 = ingest_arrow_ipc_file(&te.engine, path_str, &opts_replace).unwrap();
+    let r1 = ingest_arrow_ipc_file(&mut te.engine, path_str, &opts_replace).unwrap();
     assert_eq!(r1.rows, 2);
 
     let opts_append = IngestOptions {
@@ -470,7 +470,7 @@ fn ingest_arrow_ipc_append_adds_to_existing_rows() {
         merge_key: None,
         target_db: None,
     };
-    let r2 = ingest_arrow_ipc_file(&te.engine, path_str, &opts_append).unwrap();
+    let r2 = ingest_arrow_ipc_file(&mut te.engine, path_str, &opts_append).unwrap();
     assert_eq!(r2.rows, 2);
 
     let rows = te
@@ -485,7 +485,7 @@ fn ingest_arrow_ipc_append_adds_to_existing_rows() {
 /// The embedded Arrow schema is authoritative on this path.
 #[test]
 fn ingest_arrow_ipc_rejects_schema_override() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("override.arrow");
     let path_str = path.to_str().unwrap();
@@ -500,7 +500,7 @@ fn ingest_arrow_ipc_rejects_schema_override() {
         merge_key: None,
         target_db: None,
     };
-    let Err(err) = ingest_arrow_ipc_file(&te.engine, path_str, &opts) else {
+    let Err(err) = ingest_arrow_ipc_file(&mut te.engine, path_str, &opts) else {
         panic!("override on IPC should be rejected")
     };
     let msg = err.to_string();
@@ -623,7 +623,7 @@ fn ingest_arrow_ipc_accepts_stream_format() {
     use arrow::record_batch::RecordBatch;
     use std::fs::File;
 
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("stream.arrow");
     let path_str = path.to_str().unwrap();
@@ -654,7 +654,7 @@ fn ingest_arrow_ipc_accepts_stream_format() {
         merge_key: None,
         target_db: None,
     };
-    let result = ingest_arrow_ipc_file(&te.engine, path_str, &opts).unwrap();
+    let result = ingest_arrow_ipc_file(&mut te.engine, path_str, &opts).unwrap();
     assert_eq!(result.rows, 3);
 
     let rows = te
@@ -671,7 +671,7 @@ fn ingest_arrow_ipc_accepts_stream_format() {
 /// 3 rows, merge file has 2 overlapping + 1 new → final 4.
 #[test]
 fn ingest_parquet_merge_basic() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     let dir = tempfile::tempdir().unwrap();
 
     // Initial: id=1,2,3 with names Alice/Bob/(NULL).
@@ -684,8 +684,12 @@ fn ingest_parquet_merge_basic() {
         merge_key: None,
         target_db: None,
     };
-    let r1 =
-        ingest_parquet_file(&te.engine, initial_path.to_str().unwrap(), &opts_replace).unwrap();
+    let r1 = ingest_parquet_file(
+        &mut te.engine,
+        initial_path.to_str().unwrap(),
+        &opts_replace,
+    )
+    .unwrap();
     assert_eq!(r1.rows, 3);
 
     // Merge file: id=2 (Bob → "Bob Updated"), id=4 (new "Dave").
@@ -719,7 +723,7 @@ fn ingest_parquet_merge_basic() {
         merge_key: Some(vec!["id".into()]),
         target_db: None,
     };
-    ingest_parquet_file(&te.engine, merge_path.to_str().unwrap(), &opts_merge).unwrap();
+    ingest_parquet_file(&mut te.engine, merge_path.to_str().unwrap(), &opts_merge).unwrap();
 
     let rows = te
         .engine
@@ -737,7 +741,7 @@ fn ingest_parquet_merge_basic() {
 /// column types.
 #[test]
 fn ingest_arrow_ipc_merge_basic() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     let dir = tempfile::tempdir().unwrap();
 
     // Initial: x=10,20 / y=1.5,2.5
@@ -750,8 +754,12 @@ fn ingest_arrow_ipc_merge_basic() {
         merge_key: None,
         target_db: None,
     };
-    let r1 =
-        ingest_arrow_ipc_file(&te.engine, initial_path.to_str().unwrap(), &opts_replace).unwrap();
+    let r1 = ingest_arrow_ipc_file(
+        &mut te.engine,
+        initial_path.to_str().unwrap(),
+        &opts_replace,
+    )
+    .unwrap();
     assert_eq!(r1.rows, 2);
 
     // Merge: x=20 (update y=2.5→9.9), x=30 (new)
@@ -785,7 +793,7 @@ fn ingest_arrow_ipc_merge_basic() {
         merge_key: Some(vec!["x".into()]),
         target_db: None,
     };
-    ingest_arrow_ipc_file(&te.engine, merge_path.to_str().unwrap(), &opts_merge).unwrap();
+    ingest_arrow_ipc_file(&mut te.engine, merge_path.to_str().unwrap(), &opts_merge).unwrap();
 
     let rows = te
         .engine
@@ -816,7 +824,7 @@ fn ingest_arrow_ipc_merge_basic() {
 /// have already run `DROP TABLE IF EXISTS` + `CREATE TABLE AS`.
 #[test]
 fn ingest_parquet_null_type_column_fails_before_issuing_sql() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nulltype.parquet");
     let path_str = path.to_str().unwrap();
@@ -829,7 +837,7 @@ fn ingest_parquet_null_type_column_fails_before_issuing_sql() {
         merge_key: None,
         target_db: None,
     };
-    let err = ingest_parquet_file(&te.engine, path_str, &opts)
+    let err = ingest_parquet_file(&mut te.engine, path_str, &opts)
         .expect_err("a physical NullType column must be rejected");
 
     assert_eq!(err.code, hyperdb_mcp::error::ErrorCode::UnsupportedFormat);
@@ -871,7 +879,7 @@ fn ingest_parquet_null_type_column_fails_before_issuing_sql() {
 /// rather than a plausible-looking SQL statement and a 42804.
 #[test]
 fn ingest_parquet_null_type_column_rejected_even_with_schema_override() {
-    let te = TestEngine::new_ephemeral();
+    let mut te = TestEngine::new_ephemeral();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nulltype_override.parquet");
     let path_str = path.to_str().unwrap();
@@ -889,7 +897,7 @@ fn ingest_parquet_null_type_column_rejected_even_with_schema_override() {
         merge_key: None,
         target_db: None,
     };
-    let err = ingest_parquet_file(&te.engine, path_str, &opts)
+    let err = ingest_parquet_file(&mut te.engine, path_str, &opts)
         .expect_err("a schema override must not appear to fix a NullType column");
     assert_eq!(err.code, hyperdb_mcp::error::ErrorCode::UnsupportedFormat);
 }

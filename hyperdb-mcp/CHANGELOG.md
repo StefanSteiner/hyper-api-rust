@@ -121,13 +121,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `parquet` 58.x pinned `thrift ^0.17`, and `parquet` 59 dropped thrift
   entirely.
 
-- `Engine::execute_in_transaction` now calls `hyperdb-api`'s `*_unguarded`
-  transaction methods instead of the deprecated `begin_transaction` / `commit`
-  / `rollback`, which 1.0.0 removed. No behavior change: the helper still takes
-  `&self`, so the RAII guard remains unavailable to it, and it still rolls back
-  before resuming an unwind. The `#[allow(deprecated)]` it needed is gone.
-  Moving to the guard still waits on
-  [issue #72](https://github.com/tableau/hyper-api-rust/issues/72).
+- **BREAKING:** `Engine::execute_in_transaction` now holds `hyperdb-api`'s RAII
+  `Transaction` guard instead of driving the session with the unguarded
+  `begin`/`commit`/`rollback` methods
+  ([#72](https://github.com/tableau/hyper-api-rust/issues/72)). The helper
+  takes `&mut self` and its closure receives an `EngineTransaction` view
+  rather than `&Engine`, so transactional work can no longer reach around the
+  transaction to the raw connection. Rollback on the panic path is now the
+  guard's `Drop` rather than a hand-written `catch_unwind`; commit and
+  error-path rollback are unchanged, including the `tracing::warn!` on a
+  failed rollback. The panic itself still propagates, exactly as the previous
+  `resume_unwind` did, so a panicking tool call still poisons the server's
+  engine mutex: the guard cleans up the SQL session, not the process state. The ingest entry points (`ingest_json`, `ingest_csv`,
+  `ingest_csv_file`, `ingest_json_file`, `ingest_parquet_file`,
+  `ingest_arrow_ipc_file`, `ingest_iceberg_table`) and
+  `merge_via_temp_table` take `&mut Engine` to match; `merge_via_temp_table`
+  passes the engine to its `replace_load` closure instead of having callers
+  capture it.
+- **New** `Engine::with_search_path(alias, f)` — the closure form of
+  `scoped_search_path`, for callers that need `&mut Engine` inside the scope.
+  It restores the primary database on the `Ok`, `Err`, and panic paths, the
+  same as the guard's `Drop`. `scoped_search_path` is unchanged and still
+  preferred where `&Engine` suffices.
 - **BREAKING:** the minimum supported Rust version is now **1.88**, up from
   1.81, and the crate is compiled with **edition 2024**. 1.88 is the version
   Red Hat Enterprise Linux 9.7 ships as `rust-toolset`.

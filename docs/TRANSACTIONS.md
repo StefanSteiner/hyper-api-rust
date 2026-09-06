@@ -169,11 +169,22 @@ if result.is_ok() {
 Pairing is entirely on the caller, on **every** path including panics and
 cancelled futures. An unmatched begin wedges the session: later statements fail
 with "transaction already in progress" on a connection that is otherwise
-healthy, so reconnect logic won't clear it. The MCP server's
-`engine.rs::execute_in_transaction` is exactly this case and wraps its closure
-in `catch_unwind` to roll back before resuming an unwind; it stays on the
-unguarded methods until [issue #72](https://github.com/tableau/hyper-api-rust/issues/72)
-restructures `Engine`'s lock model.
+healthy, so reconnect logic won't clear it. That burden is why the MCP server's
+`engine.rs::execute_in_transaction` moved off these methods in
+[issue #72](https://github.com/tableau/hyper-api-rust/issues/72) — it now holds
+a `Transaction` and lets `Drop` discharge the obligation.
+
+Two in-tree callers remain, and they are the reason these methods exist:
+`KvStore::{pop, set_batch, set_batch_if_absent}` and their `AsyncKvStore`
+counterparts. Both hold `connection: &'conn Connection` — a shared reference —
+so the guard's `&mut self` is unavailable without making
+`Connection::kv_store()` take `&mut self`, which would break the public API and
+forbid two open stores on one connection. Both pair every begin with a commit
+or a best-effort rollback, so the `Ok` and `Err` paths are covered; what is
+*not* covered is a panic (sync) or a cancellation (async) landing between the
+two. The async three have no remedy even in principle — no async `Drop` — so
+treat them as the worked example of the hazard this section describes, not as
+code awaiting a mechanical fix.
 
 ## Test Inventory
 
