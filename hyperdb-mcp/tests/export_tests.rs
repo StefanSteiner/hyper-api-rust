@@ -934,6 +934,7 @@ fn export_hyper_preserves_constraints() {
         .execute_command(
             "CREATE TABLE constrained (id INT NOT NULL, code TEXT NOT NULL, \
              qty INT DEFAULT 7, note TEXT DEFAULT 'n/a', \
+             label TEXT COLLATE \"en_US\", \
              ASSUMED PRIMARY KEY (id), ASSUMED UNIQUE (code))",
         )
         .unwrap();
@@ -964,6 +965,7 @@ fn export_hyper_preserves_constraints() {
     assert_eq!(report.rows_copied, 1);
     assert_eq!(report.not_null_columns, 2);
     assert_eq!(report.default_columns, 2);
+    assert_eq!(report.collated_columns, 1);
     assert_eq!(report.assumed_primary_keys, 1);
     assert_eq!(report.assumed_unique_constraints, 1);
     assert!(report.is_fully_preserved(), "{:?}", report.unpreserved);
@@ -986,12 +988,30 @@ fn export_hyper_preserves_constraints() {
              WHERE c.relname = 'constrained' AND a.attnum > 0 ORDER BY a.attnum",
         )
         .unwrap();
-    assert_eq!(column_rows.len(), 4);
+    assert_eq!(column_rows.len(), 5);
     assert_eq!(column_rows[0]["name"], "id");
     assert_eq!(column_rows[0]["nn"], "true");
     assert_eq!(column_rows[1]["nn"], "true");
     assert_eq!(column_rows[2]["hd"], "true");
     assert_eq!(column_rows[3]["hd"], "true");
+
+    // Collation is part of the schema too, and was the one class an earlier
+    // version of this copy dropped while still reporting full fidelity.
+    let collation_rows = te
+        .engine
+        .execute_query_to_json(
+            "SELECT a.attname AS name, coll.collname AS coll \
+             FROM \"verify\".pg_catalog.pg_attribute a \
+             JOIN \"verify\".pg_catalog.pg_class c ON a.attrelid = c.oid \
+             LEFT JOIN \"verify\".pg_catalog.pg_collation coll ON coll.oid = a.attcollation \
+             WHERE c.relname = 'constrained' AND a.attname = 'label'",
+        )
+        .unwrap();
+    assert_eq!(collation_rows.len(), 1);
+    assert_eq!(
+        collation_rows[0]["coll"], "en_US",
+        "exported file lost the column collation"
+    );
 
     let constraint_rows = te
         .engine

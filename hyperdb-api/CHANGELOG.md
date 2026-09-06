@@ -20,6 +20,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Names longer than 63 characters are no longer rejected.** `escape_name`,
+  `Name`, `SchemaName`, `DatabaseName` and `TableName` enforced PostgreSQL's
+  63-character `NAMEDATALEN`, which Hyper does not share — it stores a
+  283-character table name without complaint. The typed name API therefore
+  refused names the engine had already written, making such tables
+  unaddressable through it even though a raw query could reach them. The bound
+  is now a 1024-character sanity limit; SQL-injection safety comes from
+  quoting, not from the length check.
+- `TableDefinition::to_create_sql` emitted column, collation and constraint
+  identifiers unquoted when they were legal bare identifiers. The underlying
+  check does not know the SQL reserved word list, so an all-lowercase keyword
+  — a column named `select` or `order` — was emitted bare and the engine
+  rejected the statement. Generated DDL now quotes identifiers
+  unconditionally, which is semantically identical for every other name.
 - **A `Numeric` with `scale() > 0` can now be bound to a parameterized query.**
   Previously every parameter travelled as PostgreSQL binary, and Hyper rejects
   a binary `NUMERIC` whose `dscale` exceeds the parameter's resolved scale with
@@ -134,8 +148,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `CopyTableReport` — **a successful return does not imply full fidelity**;
   check `CopyTableReport::is_fully_preserved`.
 - `CopyTableReport`, `UnpreservedItem` and `UnpreservedReason` — what a copy
-  reproduced (`NOT NULL`, `DEFAULT`, `ASSUMED PRIMARY KEY`, `ASSUMED UNIQUE`
-  counts) and what it deliberately dropped. Hyper stores non-literal defaults
+  reproduced (`NOT NULL`, `DEFAULT`, `COLLATE`, `ASSUMED PRIMARY KEY`,
+  `ASSUMED UNIQUE` counts) and what it deliberately dropped. Each
+  `UnpreservedItem` names the `table` it came from, so a whole-database copy —
+  which merges one report per table — stays actionable rather than reporting a
+  bare column name. Hyper stores non-literal defaults
   database-qualified (`NOW()` reads back as `"mydb"."pg_catalog"."now"()`), so
   copying one verbatim into another database would leave the copy depending on
   `"mydb"` still being attached. Those defaults are dropped and reported rather
@@ -146,12 +163,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   disabled`, and `CHECK` with `check constraints not implemented yet`, so no
   Hyper table can carry one. Assumed constraints are recorded and reported by
   the engine but **not enforced** — a duplicate key insert succeeds.
-- `TableDefinition::constraints`, `add_constraint`, `push_constraint` and
-  `set_constraints`; `ColumnDefinition::default_expr`, `set_default_expr`,
-  `with_default_expr` and `clear_default_expr`. `TableDefinition::to_create_sql`
-  now emits `DEFAULT` clauses and table-level assumed constraints.
-- `Catalog::get_table_definition` now also populates `DEFAULT` expressions and
-  assumed key constraints, not just names, types and nullability.
+- `TableDefinition::constraints`, `push_constraint` and `set_constraints`;
+  `ColumnDefinition::default_expr`, `set_default_expr` and
+  `clear_default_expr`. `TableDefinition::to_create_sql` now emits `DEFAULT`
+  clauses and table-level assumed constraints.
+- `Catalog::get_table_definition` now also populates `DEFAULT` expressions,
+  column collations and assumed key constraints, not just names, types and
+  nullability.
 - `impl ToSqlParam for Geography` — geography values can now be passed to
   `query_params` / `command_params` and used in predicates and projections.
   They bind as WKT text, because Hyper has no PostgreSQL-binary *input*

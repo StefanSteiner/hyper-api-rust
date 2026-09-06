@@ -105,10 +105,12 @@ impl TableConstraint {
             Self::AssumedPrimaryKey { .. } => "ASSUMED PRIMARY KEY",
             Self::AssumedUnique { .. } => "ASSUMED UNIQUE",
         };
+        // Quoted unconditionally, for the same reason as the column list in
+        // `to_create_sql`: a constrained column may be a reserved word.
         let cols = self
             .columns()
             .iter()
-            .map(|c| SqlIdentifier(c).to_string())
+            .map(|c| QuotedIdentifier(c).to_string())
             .collect::<Vec<_>>()
             .join(", ");
         format!("{keyword} ({cols})")
@@ -269,13 +271,6 @@ impl ColumnDefinition {
     /// database the table is created in. See [`TableDefinition::to_create_sql`].
     pub fn set_default_expr(&mut self, expr: impl Into<String>) {
         self.default_expr = Some(expr.into());
-    }
-
-    /// Sets the `DEFAULT` expression, consuming and returning `self`.
-    #[must_use]
-    pub fn with_default_expr(mut self, expr: impl Into<String>) -> Self {
-        self.default_expr = Some(expr.into());
-        self
     }
 
     /// Removes the `DEFAULT` expression.
@@ -709,12 +704,6 @@ impl TableDefinition {
         &self.constraints
     }
 
-    /// Adds a table-level constraint (fluent builder pattern).
-    pub fn add_constraint(mut self, constraint: TableConstraint) -> Self {
-        self.constraints.push(constraint);
-        self
-    }
-
     /// Adds a table-level constraint in place.
     pub fn push_constraint(&mut self, constraint: TableConstraint) {
         self.constraints.push(constraint);
@@ -793,6 +782,33 @@ impl TableDefinition {
             .map(|s| format!("{}", SqlIdentifier(s)))
     }
 
+    /// Returns the qualified table name with every part quoted.
+    ///
+    /// [`qualified_name`](Self::qualified_name) leaves a name bare when it is
+    /// already a legal unquoted identifier, which is not safe for generated
+    /// DDL: the underlying check does not know the reserved word list, so a
+    /// table reflected out of the catalog as `order` would be emitted bare and
+    /// rejected. Statements this type generates use this instead.
+    fn quoted_qualified_name(&self) -> String {
+        match (&self.database, &self.schema) {
+            (Some(db), Some(schema)) => format!(
+                "{}.{}.{}",
+                QuotedIdentifier(db),
+                QuotedIdentifier(schema),
+                QuotedIdentifier(&self.name)
+            ),
+            (None, Some(schema)) => format!(
+                "{}.{}",
+                QuotedIdentifier(schema),
+                QuotedIdentifier(&self.name)
+            ),
+            (Some(db), None) => {
+                format!("{}.{}", QuotedIdentifier(db), QuotedIdentifier(&self.name))
+            }
+            (None, None) => format!("{}", QuotedIdentifier(&self.name)),
+        }
+    }
+
     /// Returns the qualified table name (escaped).
     ///
     /// Format: `database.schema.table` (if all parts are set, unquoted if valid identifiers)
@@ -869,8 +885,10 @@ impl TableDefinition {
     /// let table = TableDefinition::new("users")
     ///     .add_required_column("id", SqlType::int());
     ///
+    /// // Identifiers are quoted unconditionally, so that a name which happens
+    /// // to be a SQL reserved word is still emitted correctly.
     /// let sql = table.to_create_sql(true)?;
-    /// assert_eq!(sql, r#"CREATE TABLE users (id INTEGER NOT NULL)"#);
+    /// assert_eq!(sql, r#"CREATE TABLE "users" ("id" INTEGER NOT NULL)"#);
     /// # Ok(())
     /// # }
     /// ```
@@ -908,7 +926,7 @@ impl TableDefinition {
         };
 
         sql.push_str(create_keyword);
-        sql.push_str(&self.qualified_name());
+        sql.push_str(&self.quoted_qualified_name());
         sql.push_str(" (");
 
         for (i, col) in self.columns.iter().enumerate() {
@@ -916,14 +934,20 @@ impl TableDefinition {
                 sql.push_str(", ");
             }
 
-            // Always quote column names in CREATE TABLE to preserve case
-            // (PostgreSQL/Hyper case-folds unquoted identifiers to lowercase)
+            // Quote column names unconditionally. This preserves case
+            // (Hyper case-folds unquoted identifiers to lowercase) and, just
+            // as importantly, survives names that are reserved words:
+            // `is_valid_unquoted_identifier` does not know the keyword list,
+            // so `SqlIdentifier` would emit a lowercase `select` bare and the
+            // engine would reject the statement.
             // Note: write! to String is infallible, so we can ignore the Result
-            let _ = write!(sql, "{} {}", SqlIdentifier(&col.name), col.type_name());
+            let _ = write!(sql, "{} {}", QuotedIdentifier(&col.name), col.type_name());
 
-            // Add collation if specified
+            // Add collation if specified. Also always quoted — collation names
+            // are case-sensitive (`en_US`) and the engine accepts the quoted
+            // form for every name in pg_collation.
             if let Some(collation) = &col.collation {
-                let _ = write!(sql, " COLLATE {}", SqlIdentifier(collation));
+                let _ = write!(sql, " COLLATE {}", QuotedIdentifier(collation));
             }
 
             if !col.nullable {
@@ -965,7 +989,7 @@ impl TableDefinition {
     }
 }
 
-use hyperdb_api_core::protocol::escape::SqlIdentifier;
+use hyperdb_api_core::protocol::escape::{QuotedIdentifier, SqlIdentifier};
 use std::fmt::Write;
 
 #[cfg(test)]
@@ -978,12 +1002,50 @@ mod tests {
             .add_required_column("id", SqlType::int())
             .add_nullable_column("name", SqlType::text());
 
+        // Identifiers are quoted unconditionally: the bare-identifier check
+        // does not know the reserved word list, so a name like `order` would
+        // otherwise be emitted bare and rejected. Quoting a name that did not
+        // need it means the same thing.
         let sql = table.to_create_sql(true).unwrap();
-        assert_eq!(sql, r"CREATE TABLE users (id INTEGER NOT NULL, name TEXT)");
+        assert_eq!(
+            sql,
+            r#"CREATE TABLE "users" ("id" INTEGER NOT NULL, "name" TEXT)"#
+        );
 
         // Verify type_name accessor works
         assert_eq!(table.columns[0].type_name(), "INTEGER");
         assert_eq!(table.columns[1].type_name(), "TEXT");
+    }
+
+    #[test]
+    fn create_sql_quotes_reserved_words() {
+        // `is_valid_unquoted_identifier` has no reserved word list, so these
+        // names look like legal bare identifiers. Emitting them bare produces
+        // `syntax error: got SELECT`, which is how a whole-database copy used
+        // to die on a table it had faithfully reflected.
+        let table = TableDefinition::new("order")
+            .add_required_column("select", SqlType::int())
+            .add_nullable_column("from", SqlType::text());
+
+        assert_eq!(
+            table.to_create_sql(true).unwrap(),
+            r#"CREATE TABLE "order" ("select" INTEGER NOT NULL, "from" TEXT)"#
+        );
+    }
+
+    #[test]
+    fn create_sql_quotes_constraint_columns() {
+        let mut table = TableDefinition::new("t").add_required_column("select", SqlType::int());
+        table.push_constraint(TableConstraint::AssumedPrimaryKey {
+            columns: vec!["select".to_string()],
+        });
+
+        assert!(
+            table
+                .to_create_sql(true)
+                .unwrap()
+                .contains(r#"ASSUMED PRIMARY KEY ("select")"#)
+        );
     }
 
     #[test]
@@ -996,7 +1058,7 @@ mod tests {
         let sql = table.to_create_sql(true).unwrap();
         assert_eq!(
             sql,
-            r"CREATE TABLE products (id INTEGER NOT NULL, name TEXT, price NUMERIC(18, 2))"
+            r#"CREATE TABLE "products" ("id" INTEGER NOT NULL, "name" TEXT, "price" NUMERIC(18, 2))"#
         );
     }
 
@@ -1049,7 +1111,7 @@ mod tests {
         let sql = table.to_create_sql(true).unwrap();
         assert_eq!(
             sql,
-            r"CREATE TEMPORARY TABLE temp_data (id INTEGER NOT NULL)"
+            r#"CREATE TEMPORARY TABLE "temp_data" ("id" INTEGER NOT NULL)"#
         );
     }
 

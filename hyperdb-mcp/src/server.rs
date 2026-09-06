@@ -3295,12 +3295,17 @@ impl HyperMcpServer {
                         "fully_preserved": report.is_fully_preserved(),
                         "not_null_columns": report.not_null_columns,
                         "default_columns": report.default_columns,
+                        "collated_columns": report.collated_columns,
                         "assumed_primary_keys": report.assumed_primary_keys,
                         "assumed_unique_constraints": report.assumed_unique_constraints,
                         "unpreserved": report
                             .unpreserved
                             .iter()
                             .map(|item| json!({
+                                // A whole-database export merges one report per
+                                // table, so the table is what makes an entry
+                                // actionable rather than merely alarming.
+                                "table": item.table,
                                 "column": item.column,
                                 "reason": item.reason.to_string(),
                                 "detail": item.detail,

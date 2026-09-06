@@ -45,6 +45,40 @@ fn raw_column_facts(
     rows
 }
 
+/// Reads back `(column, collation)` straight from `pg_catalog`, bypassing the
+/// `Catalog` API for the same reason as [`raw_column_facts`].
+///
+/// An uncollated column reports the sentinel `default`, which is normalised to
+/// `None` here — the engine refuses `COLLATE "default"` back, so it is a
+/// read-only marker rather than a collation.
+fn raw_collations(
+    test: &TestConnection,
+    qualifier: &str,
+    table: &str,
+) -> Vec<(String, Option<String>)> {
+    let sql = format!(
+        "SELECT a.attname, coll.collname \
+         FROM {qualifier}pg_catalog.pg_attribute a \
+         JOIN {qualifier}pg_catalog.pg_class c ON a.attrelid = c.oid \
+         LEFT JOIN {qualifier}pg_catalog.pg_collation coll ON coll.oid = a.attcollation \
+         WHERE c.relname = '{table}' AND a.attnum > 0 ORDER BY a.attnum"
+    );
+    let mut rows = Vec::new();
+    let mut result = test
+        .connection
+        .execute_query(&sql)
+        .expect("collation query failed");
+    while let Some(chunk) = result.next_chunk().expect("chunk") {
+        for row in &chunk {
+            rows.push((
+                row.get::<String>(0).unwrap_or_default(),
+                row.get::<String>(1).filter(|name| name != "default"),
+            ));
+        }
+    }
+    rows
+}
+
 /// Reads back `(contype, column)` pairs from `pg_constraint`.
 fn raw_constraint_facts(
     test: &TestConnection,
@@ -358,9 +392,13 @@ fn test_copy_table_across_databases_persists_after_reattach() {
     let _ = std::fs::remove_file(&backup);
 }
 
-/// A rebuilt `NOT NULL` must reject bad data rather than quietly relaxing.
+/// A copy must not write into a table that already exists.
+///
+/// (There is deliberately no test that a rebuilt `NOT NULL` rejects bad data:
+/// a Hyper source cannot hold a `NULL` in a `NOT NULL` column, so the
+/// violation cannot be constructed from a real source table.)
 #[test]
-fn test_copy_table_surfaces_constraint_violations() {
+fn test_copy_table_rejects_an_existing_destination() {
     let test = TestConnection::new().expect("Failed to create test connection");
 
     test.execute_command("CREATE TABLE nullable_src (a INTEGER)")
@@ -443,4 +481,226 @@ fn test_copy_table_into_non_public_schema() {
             columns: vec!["id".to_string()]
         }]
     );
+}
+
+/// Column collation must survive the copy, read out of the destination.
+///
+/// This is a regression test with a specific history: the first version of
+/// `copy_table` reflected everything *except* collation, so an explicitly
+/// collated column silently landed in the destination uncollated — while the
+/// report claimed `fully_preserved`. `CREATE TABLE … AS SELECT`, the thing
+/// this method replaced, had preserved it. The assertion deliberately reads
+/// `pg_collation` in the destination rather than trusting the report, because
+/// it was precisely the report that was wrong.
+#[test]
+fn test_copy_table_preserves_column_collation() {
+    let test = TestConnection::new().expect("Failed to create test connection");
+
+    test.execute_command(
+        "CREATE TABLE coll_src (a TEXT COLLATE \"en_US\" NOT NULL, b TEXT COLLATE \"binary\", \
+         c TEXT)",
+    )
+    .expect("create source");
+    test.execute_command("INSERT INTO coll_src VALUES ('x', 'y', 'z')")
+        .expect("seed");
+
+    // The source is what we claim it is.
+    assert_eq!(
+        raw_collations(&test, "", "coll_src"),
+        [
+            ("a".to_string(), Some("en_US".to_string())),
+            ("b".to_string(), Some("binary".to_string())),
+            ("c".to_string(), None),
+        ]
+    );
+
+    let report = Catalog::new(&test.connection)
+        .copy_table("public.coll_src", "public.coll_dst")
+        .expect("copy");
+
+    // Assert against the destination file first: the report was the thing
+    // that lied last time, so it is not the primary evidence here.
+    assert_eq!(
+        raw_collations(&test, "", "coll_dst"),
+        [
+            ("a".to_string(), Some("en_US".to_string())),
+            ("b".to_string(), Some("binary".to_string())),
+            ("c".to_string(), None),
+        ],
+        "collation was dropped by the copy"
+    );
+
+    assert_eq!(report.rows_copied, 1);
+    assert_eq!(report.collated_columns, 2);
+    assert!(
+        report.is_fully_preserved(),
+        "unpreserved: {:?}",
+        report.unpreserved
+    );
+}
+
+/// Names that are reserved words must not break the copy.
+///
+/// The reflected identifiers are emitted into `CREATE TABLE` and into both
+/// column lists of the `INSERT … SELECT`. An all-lowercase keyword passes the
+/// "is this a legal bare identifier" check — which does not know the keyword
+/// list — so anything less than unconditional quoting emits `select INTEGER`
+/// and the statement is rejected. `CTAS` never spelled the names out, so this
+/// is a case the copy has to handle that its predecessor did not.
+#[test]
+fn test_copy_table_handles_reserved_word_names() {
+    let test = TestConnection::new().expect("Failed to create test connection");
+
+    test.execute_command(
+        "CREATE TABLE \"order\" (\"select\" INTEGER NOT NULL, \"from\" TEXT, \
+         ASSUMED PRIMARY KEY (\"select\"))",
+    )
+    .expect("create source");
+    test.execute_command("INSERT INTO \"order\" VALUES (1, 'x')")
+        .expect("seed");
+
+    let report = Catalog::new(&test.connection)
+        .copy_table("public.order", "public.group")
+        .expect("copy with reserved-word names");
+
+    assert_eq!(report.rows_copied, 1);
+    assert!(report.is_fully_preserved());
+
+    assert_eq!(
+        raw_column_facts(&test, "", "group"),
+        [
+            ("select".to_string(), true, false),
+            ("from".to_string(), false, false),
+        ]
+    );
+    assert_eq!(
+        raw_constraint_facts(&test, "", "group"),
+        [("p".to_string(), "select".to_string())]
+    );
+}
+
+/// A name longer than PostgreSQL's 63-character `NAMEDATALEN` must copy.
+///
+/// Hyper stores such names without complaint, so refusing them in the typed
+/// name API made a whole-database export fail on a table the engine had
+/// already written — and, because the database name is part of every
+/// qualified name, a long *file* name would have failed every table at once.
+#[test]
+fn test_copy_table_handles_names_longer_than_postgresql_limit() {
+    let test = TestConnection::new().expect("Failed to create test connection");
+
+    let long_name = "t".repeat(93);
+    let long_column = "c".repeat(80);
+    test.execute_command(&format!(
+        "CREATE TABLE \"{long_name}\" (\"{long_column}\" INTEGER NOT NULL)"
+    ))
+    .expect("create source");
+    test.execute_command(&format!("INSERT INTO \"{long_name}\" VALUES (1)"))
+        .expect("seed");
+
+    let report = Catalog::new(&test.connection)
+        .copy_table(
+            format!("public.\"{long_name}\""),
+            "public.long_name_destination",
+        )
+        .expect("copy with over-length name");
+
+    assert_eq!(report.rows_copied, 1);
+    assert_eq!(
+        raw_column_facts(&test, "", "long_name_destination"),
+        [(long_column, true, false)]
+    );
+}
+
+/// Proves the rationale for dropping database-qualified defaults, end to end.
+///
+/// The design's central claim is that re-emitting a default like
+/// `"mydb"."pg_catalog"."now"()` into a *different* database produces a table
+/// that breaks once `"mydb"` is no longer attached. That claim justifies
+/// dropping such defaults, so it is worth demonstrating rather than asserting.
+///
+/// This test does both halves in one go: it copies a table carrying a
+/// non-portable default into a second database, detaches the source, and then
+/// shows (a) the copy is usable — inserting works, because the default was
+/// dropped rather than carried — and (b) a table built the *other* way, with
+/// the qualified default re-emitted verbatim, is not.
+#[test]
+fn test_non_portable_default_would_break_a_detached_copy() {
+    let test = TestConnection::new().expect("Failed to create test connection");
+
+    test.execute_command("CREATE TABLE npd_src (id INTEGER NOT NULL, ts TIMESTAMP DEFAULT now())")
+        .expect("create source");
+    test.execute_command("INSERT INTO npd_src (id) VALUES (1)")
+        .expect("seed");
+
+    let backup = test_result_path("table_copy_npd", "hyper").expect("backup path");
+    let _ = std::fs::remove_file(&backup);
+    let backup_sql = escape_sql_path(&backup.to_string_lossy());
+    test.execute_command(&format!("CREATE DATABASE {backup_sql}"))
+        .expect("create backup db");
+    test.execute_command(&format!("ATTACH DATABASE {backup_sql} AS \"npd_bak\""))
+        .expect("attach backup");
+
+    let source_db = test
+        .database_path
+        .file_stem()
+        .expect("stem")
+        .to_string_lossy()
+        .to_string();
+
+    let report = Catalog::new(&test.connection)
+        .copy_table(
+            format!("\"{source_db}\".\"public\".\"npd_src\""),
+            "\"npd_bak\".\"public\".\"npd_src\"",
+        )
+        .expect("cross-database copy");
+
+    // The default was dropped, and said so, naming the table it came from.
+    assert_eq!(report.rows_copied, 1);
+    assert!(!report.is_fully_preserved());
+    let dropped = report
+        .unpreserved
+        .iter()
+        .find(|item| item.column == "ts")
+        .expect("ts default should be reported");
+    assert_eq!(dropped.reason, UnpreservedReason::NonPortableDefault);
+    assert_eq!(dropped.table, "public.npd_src");
+    assert!(
+        dropped.detail.contains(&source_db),
+        "the reported expression should name the source database: {}",
+        dropped.detail
+    );
+
+    // Build the same table the naive way: re-emit the qualified default as-is.
+    test.execute_command(&format!(
+        "CREATE TABLE \"npd_bak\".\"public\".\"npd_naive\" \
+         (id INTEGER NOT NULL, ts TIMESTAMP DEFAULT \"{source_db}\".\"pg_catalog\".\"now\"())"
+    ))
+    .expect("create naive copy");
+
+    // Reopen the backup with the source database no longer attached. This is
+    // the situation a backup is actually restored in.
+    test.execute_command("DETACH DATABASE \"npd_bak\"")
+        .expect("detach");
+    let standalone =
+        hyperdb_api::Connection::new(&test.hyper, &backup, hyperdb_api::CreateMode::DoNotCreate)
+            .expect("reopen backup standalone");
+
+    // The copied table works, because the unusable default is not there.
+    standalone
+        .execute_command("INSERT INTO npd_src (id) VALUES (2)")
+        .expect("insert into the copied table should work");
+
+    // The naive one does not — this is the failure the drop exists to avoid.
+    let err = standalone
+        .execute_command("INSERT INTO npd_naive (id) VALUES (2)")
+        .expect_err("re-emitted qualified default should be unusable once detached");
+    let message = err.to_string();
+    assert!(
+        message.contains("does not exist") && message.contains(&source_db),
+        "expected an unresolved-schema error naming the source database, got: {message}"
+    );
+
+    drop(standalone);
+    let _ = std::fs::remove_file(&backup);
 }

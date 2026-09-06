@@ -29,8 +29,31 @@ use crate::connection::Connection;
 use crate::error::{Error, Result};
 use crate::table_copy::{CopyTableReport, UnpreservedItem, UnpreservedReason};
 use crate::table_definition::{TableConstraint, TableDefinition};
-use hyperdb_api_core::protocol::escape::SqlIdentifier;
+use hyperdb_api_core::protocol::escape::QuotedIdentifier;
 use hyperdb_api_core::types::SqlType;
+
+/// The collation every uncollated column reports in `pg_collation.collname`.
+///
+/// It is a read-only sentinel: the engine rejects `COLLATE "default"` with
+/// `unknown collation "default"`, so it must never be echoed back into DDL.
+const DEFAULT_COLLATION: &str = "default";
+
+/// One `pg_constraint` row group being accumulated across its column rows.
+struct PendingConstraint {
+    contype: String,
+    conname: String,
+    validated: bool,
+    columns: Vec<String>,
+}
+
+/// The outcome of reflecting a table's constraints.
+#[derive(Default)]
+struct ReflectedConstraints {
+    /// Constraints a `CREATE TABLE` can restate exactly.
+    supported: Vec<TableConstraint>,
+    /// Constraints that cannot be reproduced, as `(description, columns)`.
+    unreproducible: Vec<(String, Vec<String>)>,
+}
 
 /// Provides catalog operations for database metadata.
 ///
@@ -387,9 +410,10 @@ impl<'conn> Catalog<'conn> {
             .map_or("public", super::names::Name::unescaped);
         let table = table_name.table().unescaped();
 
-        // Query column information from pg_catalog. `pg_attrdef` is joined
-        // rather than queried separately so the DEFAULT expressions arrive in
-        // the same round trip, already lined up with their columns.
+        // Query column information from pg_catalog. `pg_attrdef` and
+        // `pg_collation` are joined rather than queried separately so the
+        // DEFAULT expressions and collations arrive in the same round trip,
+        // already lined up with their columns.
         //
         // `db` is already an escaped identifier; `schema`/`table` are compared
         // as string literals, so they get single-quote doubling instead.
@@ -397,12 +421,13 @@ impl<'conn> Catalog<'conn> {
             .database()
             .map_or_else(|| "pg_catalog".to_string(), |db| format!("{db}.pg_catalog"));
         let query = format!(
-            r"SELECT a.attname, t.typname, NOT a.attnotnull as is_nullable, a.atttypid, a.atttypmod, ad.adsrc
+            r"SELECT a.attname, t.typname, NOT a.attnotnull as is_nullable, a.atttypid, a.atttypmod, ad.adsrc, coll.collname
                  FROM {cat}.pg_attribute a
                  JOIN {cat}.pg_type t ON a.atttypid = t.oid
                  JOIN {cat}.pg_class c ON a.attrelid = c.oid
                  JOIN {cat}.pg_namespace n ON c.relnamespace = n.oid
                  LEFT JOIN {cat}.pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
+                 LEFT JOIN {cat}.pg_collation coll ON coll.oid = a.attcollation
                  WHERE n.nspname = '{schema}' AND c.relname = '{table}'
                    AND a.attnum > 0 AND NOT a.attisdropped
                  ORDER BY a.attnum",
@@ -448,6 +473,18 @@ impl<'conn> Catalog<'conn> {
                 {
                     column.set_default_expr(default_expr);
                 }
+
+                // Every column reports a collation; an uncollated one reports
+                // the sentinel `default`, which the engine refuses to accept
+                // back (`unknown collation "default"`). Only a real, named
+                // collation is worth recording.
+                if let Some(collation) = row
+                    .get::<String>(6)
+                    .filter(|name| name != DEFAULT_COLLATION)
+                    && let Some(column) = table_def.columns.last_mut()
+                {
+                    column.set_collation(collation);
+                }
             }
         }
 
@@ -455,19 +492,28 @@ impl<'conn> Catalog<'conn> {
             return Err(Error::not_found(format!("Table {schema}.{table}")));
         }
 
-        table_def.set_constraints(self.get_table_constraints(&table_name)?);
+        table_def.set_constraints(self.get_table_constraints(&table_name)?.supported);
 
         Ok(table_def)
     }
 
-    /// Reads the assumed key constraints declared on a table.
+    /// Reads the key constraints declared on a table.
     ///
     /// `conkey` holds the constrained columns as an array of `attnum`s;
     /// `unnest … WITH ORDINALITY` turns it into ordered column names, which is
     /// what `CREATE TABLE` needs. Constraint *names* are not read back because
     /// Hyper rejects `CONSTRAINT <name> …` on `CREATE TABLE` (`named
     /// constraints not implemented yet`) — the engine derives its own.
-    fn get_table_constraints(&self, table_name: &crate::TableName) -> Result<Vec<TableConstraint>> {
+    ///
+    /// `convalidated` separates the two things a `contype` of `p` can mean. An
+    /// `ASSUMED PRIMARY KEY` — the only kind this engine build will accept —
+    /// reads back as `convalidated = false`. A `.hyper` written by an engine
+    /// with index support would carry an *enforced* key instead, which cannot
+    /// be reproduced here and must not be quietly re-emitted as `ASSUMED`:
+    /// that would downgrade an enforced constraint to an unenforced one and
+    /// report it as preserved. Anything that is not a known-assumed key is
+    /// therefore returned as unreproducible rather than mapped.
+    fn get_table_constraints(&self, table_name: &crate::TableName) -> Result<ReflectedConstraints> {
         let schema = table_name
             .schema()
             .map_or("public", super::names::Name::unescaped);
@@ -477,7 +523,7 @@ impl<'conn> Catalog<'conn> {
             .map_or_else(|| "pg_catalog".to_string(), |db| format!("{db}.pg_catalog"));
 
         let query = format!(
-            r"SELECT con.conname, CAST(con.contype AS TEXT) AS contype, a.attname
+            r"SELECT con.conname, CAST(con.contype AS TEXT) AS contype, a.attname, con.convalidated
                  FROM {cat}.pg_constraint con
                  JOIN {cat}.pg_class c ON con.conrelid = c.oid
                  JOIN {cat}.pg_namespace n ON c.relnamespace = n.oid,
@@ -494,8 +540,8 @@ impl<'conn> Catalog<'conn> {
         // Grouped by (contype, conname) in the ORDER BY above, so consecutive
         // rows with the same key belong to the same constraint. A primary key
         // has an empty `conname`, which is why the type is part of the key.
-        let mut constraints: Vec<TableConstraint> = Vec::new();
-        let mut current: Option<(String, String, Vec<String>)> = None;
+        let mut reflected = ReflectedConstraints::default();
+        let mut current: Option<PendingConstraint> = None;
 
         let mut result = self.connection.execute_query(&query)?;
         while let Some(chunk) = result.next_chunk()? {
@@ -503,39 +549,66 @@ impl<'conn> Catalog<'conn> {
                 let conname = row.get::<String>(0).unwrap_or_default();
                 let contype = row.get::<String>(1).unwrap_or_default();
                 let attname = row.get::<String>(2).unwrap_or_default();
+                let validated = row.get::<bool>(3).unwrap_or(false);
 
                 match &mut current {
-                    Some((ty, name, columns)) if *ty == contype && *name == conname => {
-                        columns.push(attname);
+                    Some(pending) if pending.contype == contype && pending.conname == conname => {
+                        pending.columns.push(attname);
                     }
                     slot => {
                         if let Some(finished) = slot.take() {
-                            Self::push_constraint(&mut constraints, finished);
+                            Self::push_constraint(&mut reflected, finished);
                         }
-                        *slot = Some((contype, conname, vec![attname]));
+                        *slot = Some(PendingConstraint {
+                            contype,
+                            conname,
+                            validated,
+                            columns: vec![attname],
+                        });
                     }
                 }
             }
         }
         if let Some(finished) = current.take() {
-            Self::push_constraint(&mut constraints, finished);
+            Self::push_constraint(&mut reflected, finished);
         }
 
-        Ok(constraints)
+        Ok(reflected)
     }
 
-    /// Maps a `pg_constraint.contype` code onto a [`TableConstraint`].
+    /// Maps one reflected `pg_constraint` row group onto a [`TableConstraint`],
+    /// or records it as unreproducible.
     ///
-    /// Only `p` and `u` are reachable: Hyper rejects the constraint classes
-    /// that would produce any other code.
-    fn push_constraint(
-        out: &mut Vec<TableConstraint>,
-        (contype, _name, columns): (String, String, Vec<String>),
-    ) {
-        match contype.as_str() {
-            "p" => out.push(TableConstraint::AssumedPrimaryKey { columns }),
-            "u" => out.push(TableConstraint::AssumedUnique { columns }),
-            _ => {}
+    /// Only an unvalidated `p` or `u` is an assumed key that `CREATE TABLE`
+    /// can restate. Everything else — an enforced key, a `CHECK`, a foreign
+    /// key, an unknown code from a future engine — is reported rather than
+    /// approximated. See [`get_table_constraints`](Self::get_table_constraints).
+    fn push_constraint(out: &mut ReflectedConstraints, pending: PendingConstraint) {
+        let PendingConstraint {
+            contype,
+            validated,
+            columns,
+            ..
+        } = pending;
+
+        match (contype.as_str(), validated) {
+            ("p", false) => out
+                .supported
+                .push(TableConstraint::AssumedPrimaryKey { columns }),
+            ("u", false) => out
+                .supported
+                .push(TableConstraint::AssumedUnique { columns }),
+            (code, _) => {
+                let description = match code {
+                    "p" => "enforced PRIMARY KEY".to_string(),
+                    "u" => "enforced UNIQUE".to_string(),
+                    "c" => "CHECK".to_string(),
+                    "f" => "FOREIGN KEY".to_string(),
+                    "x" => "EXCLUSION".to_string(),
+                    other => format!("constraint of type '{other}'"),
+                };
+                out.unreproducible.push((description, columns));
+            }
         }
     }
 
@@ -592,10 +665,14 @@ impl<'conn> Catalog<'conn> {
     ///
     /// # Fidelity
     ///
-    /// `NOT NULL`, `DEFAULT`, `ASSUMED PRIMARY KEY`, and `ASSUMED UNIQUE` are
-    /// carried across. `PRIMARY KEY`, `UNIQUE`, `FOREIGN KEY`, and `CHECK`
-    /// cannot be: Hyper rejects all four at `CREATE TABLE`, so no source table
-    /// has one to begin with.
+    /// `NOT NULL`, `DEFAULT`, `COLLATE`, `ASSUMED PRIMARY KEY`, and `ASSUMED
+    /// UNIQUE` are carried across. Enforced `PRIMARY KEY`, `UNIQUE`, `FOREIGN
+    /// KEY`, and `CHECK` cannot be: Hyper rejects all four at `CREATE TABLE`,
+    /// so no table this engine wrote has one to begin with. Should one turn up
+    /// anyway — in a `.hyper` written by an engine with index support — it is
+    /// reported as unpreserved rather than downgraded to its `ASSUMED` form,
+    /// which would swap an enforced constraint for an unenforced one and call
+    /// it preserved.
     ///
     /// Defaults are the one class that can be partly lost. Hyper stores
     /// non-literal defaults database-qualified — `NOW()` reads back as
@@ -614,9 +691,7 @@ impl<'conn> Catalog<'conn> {
     /// # Errors
     ///
     /// - [`Error::NotFound`] if `source` does not exist.
-    /// - [`Error::Server`] if the destination already exists, or if a row
-    ///   violates a constraint being reproduced (copying a `NULL` into a
-    ///   rebuilt `NOT NULL` column fails loudly rather than relaxing it).
+    /// - [`Error::Server`] if the destination already exists.
     ///
     /// # Example
     ///
@@ -648,6 +723,30 @@ impl<'conn> Catalog<'conn> {
         let mut table_def = self.get_table_definition(source.clone())?;
         let mut report = CopyTableReport::default();
 
+        // Every unpreserved item is stamped with its origin: whole-database
+        // copies merge one report per table, and a bare column name would not
+        // say which table lost it.
+        let origin = format!(
+            "{}.{}",
+            source
+                .schema()
+                .map_or("public", super::names::Name::unescaped),
+            source.table().unescaped()
+        );
+
+        // Re-read the constraints for their unreproducible half, which
+        // `get_table_definition` has no field to carry. One extra catalog
+        // query per table is not worth widening that method's return type
+        // for, next to the row copy that follows.
+        for (description, columns) in self.get_table_constraints(&source)?.unreproducible {
+            report.unpreserved.push(UnpreservedItem {
+                table: origin.clone(),
+                column: String::new(),
+                reason: UnpreservedReason::UnsupportedConstraint,
+                detail: format!("{description} ({})", columns.join(", ")),
+            });
+        }
+
         // Retarget the reflected definition at the destination. `schema` and
         // `database` are overwritten unconditionally so a destination that
         // omits them lands in the default location rather than inheriting the
@@ -660,12 +759,16 @@ impl<'conn> Catalog<'conn> {
             if !column.nullable {
                 report.not_null_columns = report.not_null_columns.saturating_add(1);
             }
+            if column.collation().is_some() {
+                report.collated_columns = report.collated_columns.saturating_add(1);
+            }
             match column.default_expr() {
                 Some(expr) if crate::table_copy::is_portable_default(expr) => {
                     report.default_columns = report.default_columns.saturating_add(1);
                 }
                 Some(expr) => {
                     report.unpreserved.push(UnpreservedItem {
+                        table: origin.clone(),
                         column: column.name.clone(),
                         reason: UnpreservedReason::NonPortableDefault,
                         detail: expr.to_string(),
@@ -691,11 +794,13 @@ impl<'conn> Catalog<'conn> {
         self.create_table(&table_def)?;
 
         // Both column lists are spelled out so the copy does not depend on the
-        // destination happening to share the source's column order.
+        // destination happening to share the source's column order. Names are
+        // quoted unconditionally: a reflected name may be a reserved word,
+        // which `SqlIdentifier` would emit bare.
         let columns = table_def
             .columns
             .iter()
-            .map(|c| SqlIdentifier(&c.name).to_string())
+            .map(|c| QuotedIdentifier(&c.name).to_string())
             .collect::<Vec<_>>()
             .join(", ");
         report.rows_copied = self.connection.execute_command(&format!(

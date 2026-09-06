@@ -11,9 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - **`export` — `schema_fidelity` in the response for `format="hyper"`.** Reports
   `fully_preserved` plus per-class counts (`not_null_columns`,
-  `default_columns`, `assumed_primary_keys`, `assumed_unique_constraints`) and
-  an `unpreserved` list naming each column, the reason, and the offending
-  expression. Hyper stores non-literal defaults database-qualified — `NOW()`
+  `default_columns`, `collated_columns`, `assumed_primary_keys`,
+  `assumed_unique_constraints`) and an `unpreserved` list naming each entry's
+  table and column, the reason, and the offending expression. The table matters
+  because a whole-database export merges one report per table, and a bare
+  column name cannot be acted on. Hyper stores non-literal defaults
+  database-qualified — `NOW()`
   reads back as `"mydb"."pg_catalog"."now"()` — so re-emitting one into the
   exported file would leave it depending on the source database still being
   attached. Those defaults are dropped and listed rather than reproduced
@@ -152,9 +155,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   nullable, with no defaults and no keys. Data was intact; only the schema was
   quietly relaxed, which is the kind of loss a user discovers months later.
   Each table now goes through `hyperdb-api`'s constraint-preserving
-  `Catalog::copy_table`, so `NOT NULL`, `DEFAULT`, `ASSUMED PRIMARY KEY` and
-  `ASSUMED UNIQUE` all survive an export and a subsequent re-attach of the
-  exported file. Fixes
+  `Catalog::copy_table`, so `NOT NULL`, `DEFAULT`, `COLLATE`, `ASSUMED PRIMARY
+  KEY` and `ASSUMED UNIQUE` all survive an export and a subsequent re-attach of
+  the exported file. Fixes
   [issue #127](https://github.com/tableau/hyper-api-rust/issues/127).
 - `export(format="hyper")` reported `rows: 0` regardless of how much it
   copied, because `CREATE TABLE AS SELECT` reports no affected rows. The copy

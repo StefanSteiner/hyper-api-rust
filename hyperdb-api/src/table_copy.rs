@@ -23,8 +23,9 @@
 //! Hyper rejects `PRIMARY KEY`, `UNIQUE`, and `FOREIGN KEY` on `CREATE TABLE`
 //! with `Index support is disabled`, and `CHECK` with `check constraints not
 //! implemented yet`. A Hyper table therefore never *has* one of those to lose.
-//! What it can have is `NOT NULL`, `DEFAULT`, and the assumed key forms
-//! ([`TableConstraint`](crate::TableConstraint)) — and all four survive a copy.
+//! What it can have is `NOT NULL`, `DEFAULT`, `COLLATE`, and the assumed key
+//! forms ([`TableConstraint`](crate::TableConstraint)) — and all five survive
+//! a copy.
 
 /// Why a piece of the source schema could not be reproduced.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +42,16 @@ pub enum UnpreservedReason {
     /// on its own later. Dropping the default is the lesser evil, so long as
     /// it is reported.
     NonPortableDefault,
+
+    /// A constraint the destination `CREATE TABLE` cannot restate.
+    ///
+    /// A Hyper-written table only ever holds the assumed key forms, which are
+    /// reproduced exactly. This covers what a `.hyper` from an engine with
+    /// index support could contain — an *enforced* `PRIMARY KEY` or `UNIQUE`,
+    /// a `CHECK`, a foreign key — where restating it as `ASSUMED` would
+    /// downgrade an enforced constraint to an unenforced one and call it
+    /// preserved.
+    UnsupportedConstraint,
 }
 
 impl std::fmt::Display for UnpreservedReason {
@@ -50,6 +61,9 @@ impl std::fmt::Display for UnpreservedReason {
                 "DEFAULT expression is database-qualified and would not resolve \
                  in the destination database",
             ),
+            Self::UnsupportedConstraint => {
+                f.write_str("constraint cannot be reproduced by CREATE TABLE")
+            }
         }
     }
 }
@@ -59,7 +73,17 @@ impl std::fmt::Display for UnpreservedReason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct UnpreservedItem {
+    /// The schema-qualified table the dropped element belonged to.
+    ///
+    /// Reports are merged across tables when a whole database is copied
+    /// ([`CopyTableReport::merge`]), so without this a bare column name is
+    /// ambiguous: two tables each carrying a `created_at` default would
+    /// produce two indistinguishable entries.
+    pub table: String,
     /// The column the dropped schema element belonged to.
+    ///
+    /// Empty for a table-level element such as a constraint, which belongs to
+    /// a set of columns rather than to one; see `detail` for those.
     pub column: String,
     /// Why it could not be carried across.
     pub reason: UnpreservedReason,
@@ -69,7 +93,15 @@ pub struct UnpreservedItem {
 
 impl std::fmt::Display for UnpreservedItem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {} ({})", self.column, self.reason, self.detail)
+        if self.column.is_empty() {
+            write!(f, "{}: {} ({})", self.table, self.reason, self.detail)
+        } else {
+            write!(
+                f,
+                "{}.{}: {} ({})",
+                self.table, self.column, self.reason, self.detail
+            )
+        }
     }
 }
 
@@ -87,6 +119,8 @@ pub struct CopyTableReport {
     pub not_null_columns: usize,
     /// `DEFAULT` expressions carried across.
     pub default_columns: usize,
+    /// Explicitly collated columns carried across.
+    pub collated_columns: usize,
     /// `ASSUMED PRIMARY KEY` constraints carried across.
     pub assumed_primary_keys: usize,
     /// `ASSUMED UNIQUE` constraints carried across.
@@ -102,20 +136,12 @@ impl CopyTableReport {
         self.unpreserved.is_empty()
     }
 
-    /// Total number of constraints carried across, across all classes.
-    #[must_use]
-    pub fn preserved_count(&self) -> usize {
-        self.not_null_columns
-            .saturating_add(self.default_columns)
-            .saturating_add(self.assumed_primary_keys)
-            .saturating_add(self.assumed_unique_constraints)
-    }
-
     /// Folds another report into this one, for callers copying many tables.
     pub fn merge(&mut self, other: Self) {
         self.rows_copied = self.rows_copied.saturating_add(other.rows_copied);
         self.not_null_columns = self.not_null_columns.saturating_add(other.not_null_columns);
         self.default_columns = self.default_columns.saturating_add(other.default_columns);
+        self.collated_columns = self.collated_columns.saturating_add(other.collated_columns);
         self.assumed_primary_keys = self
             .assumed_primary_keys
             .saturating_add(other.assumed_primary_keys);
@@ -187,8 +213,10 @@ mod tests {
             rows_copied: 3,
             not_null_columns: 2,
             default_columns: 1,
+            collated_columns: 2,
             assumed_unique_constraints: 1,
             unpreserved: vec![UnpreservedItem {
+                table: "public.orders".into(),
                 column: "t".into(),
                 reason: UnpreservedReason::NonPortableDefault,
                 detail: r#""db"."pg_catalog"."now"()"#.into(),
@@ -199,9 +227,9 @@ mod tests {
         assert_eq!(a.rows_copied, 5);
         assert_eq!(a.not_null_columns, 3);
         assert_eq!(a.default_columns, 1);
+        assert_eq!(a.collated_columns, 2);
         assert_eq!(a.assumed_primary_keys, 1);
         assert_eq!(a.assumed_unique_constraints, 1);
-        assert_eq!(a.preserved_count(), 6);
         assert!(!a.is_fully_preserved());
         assert_eq!(a.unpreserved.len(), 1);
     }
@@ -210,6 +238,46 @@ mod tests {
     fn empty_report_is_fully_preserved() {
         let report = CopyTableReport::default();
         assert!(report.is_fully_preserved());
-        assert_eq!(report.preserved_count(), 0);
+    }
+
+    #[test]
+    fn merged_items_stay_attributable_to_their_table() {
+        // The reason `UnpreservedItem` carries a table: two tables with a
+        // like-named column must not collapse into indistinguishable entries.
+        let item = |table: &str| UnpreservedItem {
+            table: table.into(),
+            column: "created_at".into(),
+            reason: UnpreservedReason::NonPortableDefault,
+            detail: r#""db"."pg_catalog"."now"()"#.into(),
+        };
+
+        let mut report = CopyTableReport {
+            unpreserved: vec![item("public.orders")],
+            ..Default::default()
+        };
+        report.merge(CopyTableReport {
+            unpreserved: vec![item("public.shipments")],
+            ..Default::default()
+        });
+
+        let rendered: Vec<String> = report.unpreserved.iter().map(ToString::to_string).collect();
+        assert!(rendered[0].starts_with("public.orders.created_at:"));
+        assert!(rendered[1].starts_with("public.shipments.created_at:"));
+        assert_ne!(rendered[0], rendered[1]);
+    }
+
+    #[test]
+    fn table_level_item_renders_without_a_column() {
+        let item = UnpreservedItem {
+            table: "public.orders".into(),
+            column: String::new(),
+            reason: UnpreservedReason::UnsupportedConstraint,
+            detail: "enforced PRIMARY KEY (id)".into(),
+        };
+        assert_eq!(
+            item.to_string(),
+            "public.orders: constraint cannot be reproduced by CREATE TABLE \
+             (enforced PRIMARY KEY (id))"
+        );
     }
 }

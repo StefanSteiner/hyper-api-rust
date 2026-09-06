@@ -184,6 +184,46 @@ pub fn escape_identifier(identifier: &str) -> String {
     format!("{}", SqlIdentifier(identifier))
 }
 
+/// A SQL identifier that is **always** quoted, whatever it contains.
+///
+/// [`SqlIdentifier`] omits the quotes when a name is already a legal bare
+/// identifier, which is fine for display but unsafe for generated DDL:
+/// [`is_valid_unquoted_identifier`] deliberately does not know the reserved
+/// word list, so an all-lowercase keyword such as `select` or `order` passes
+/// the check and is emitted bare, producing a syntax error. Quoting
+/// unconditionally sidesteps the whole question — `"users"` and `users` name
+/// the same relation, so the extra quotes never change meaning.
+///
+/// Use this for any identifier written into SQL that the engine must parse.
+///
+/// # Example
+///
+/// ```
+/// use hyperdb_api_core::protocol::escape::QuotedIdentifier;
+///
+/// // Reserved words survive, where SqlIdentifier would emit them bare
+/// assert_eq!(format!("{}", QuotedIdentifier("select")), "\"select\"");
+/// assert_eq!(format!("{}", QuotedIdentifier("users")), "\"users\"");
+/// // Internal quotes are doubled
+/// assert_eq!(format!("{}", QuotedIdentifier("a\"b")), "\"a\"\"b\"");
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct QuotedIdentifier<'a>(pub &'a str);
+
+impl fmt::Display for QuotedIdentifier<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("\"")?;
+        for c in self.0.chars() {
+            if c == '"' {
+                f.write_str("\"\"")?;
+            } else {
+                write!(f, "{c}")?;
+            }
+        }
+        f.write_str("\"")
+    }
+}
+
 /// Escapes a SQL string literal.
 ///
 /// This is a convenience function that returns the escaped literal as a String.
