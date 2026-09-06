@@ -387,6 +387,16 @@ pub fn write_chart_to_disk(
     Ok(bytes.len() as u64)
 }
 
+/// Upper bound on histogram bins, enforced by the renderer itself.
+///
+/// The MCP `chart` tool clamps its `bins` parameter to this before building
+/// [`ChartOptions`], but [`ChartOptions::bins`] is a plain `u32` that the
+/// public [`render_chart`] API can set to anything. `draw_histogram`
+/// allocates one counter per bin, so an unclamped `u32::MAX` would ask for
+/// roughly 34 GB. The renderer therefore re-applies the cap rather than
+/// trusting its caller to have done it.
+pub(crate) const MAX_HISTOGRAM_BINS: u32 = 500;
+
 /// User-facing chart configuration, parsed from MCP tool parameters.
 #[derive(Debug, Clone)]
 pub struct ChartOptions {
@@ -398,6 +408,10 @@ pub struct ChartOptions {
     pub format: ChartFormat,
     pub width: u32,
     pub height: u32,
+    /// Histogram bin count. Values are clamped into
+    /// `1..=`[`MAX_HISTOGRAM_BINS`] by the renderer, so a `0` or an
+    /// absurdly large count is corrected rather than rejected. Ignored by
+    /// every other chart type.
     pub bins: u32,
     /// Override the chart-type-specific default for how the x column is
     /// interpreted:
@@ -425,6 +439,22 @@ pub struct ChartOptions {
     /// skipped and all frames/charts share the same x extent. Useful for
     /// side-by-side comparisons or animation where a consistent scale
     /// matters. Ignored for bar charts (which use categorical positions).
+    ///
+    /// Per chart type:
+    ///
+    /// - **Line / scatter** — sets the axis bounds only. Points outside the
+    ///   range are still counted in
+    ///   [`ChartResult::rows_plotted`] but plotters clips their geometry, so
+    ///   they render invisibly. They are never moved to another position.
+    /// - **Histogram** — used as the binning extent. Values outside the
+    ///   range are **excluded from the bins entirely** and reported in
+    ///   [`ChartResult::excluded_out_of_range`]; they are *not* folded into
+    ///   the edge bins, which would inflate those bins with observations
+    ///   that don't belong to them. `rows_plotted` counts only the values
+    ///   actually binned, so a range containing no data renders an empty
+    ///   histogram at the requested extent (`rows_plotted: 0`) rather than
+    ///   erroring — that keeps a per-window animation frame renderable.
+    /// - **Bar** — ignored; bar x positions are categorical.
     pub x_range: Option<[f64; 2]>,
     /// Fix the data-role y measure range as `[min, max]`. Unlike `x_range`,
     /// this applies to bar charts; horizontal bars render it on the physical
@@ -472,7 +502,33 @@ impl Default for ChartOptions {
 pub struct ChartResult {
     pub bytes: Vec<u8>,
     pub mime_type: &'static str,
+    /// Values actually drawn. For a histogram with an explicit
+    /// [`ChartOptions::x_range`] this excludes values outside that range,
+    /// so the count never implies more in-window observations than exist.
     pub rows_plotted: usize,
+    /// Values dropped for falling outside an explicit
+    /// [`ChartOptions::x_range`]. Only a histogram can report a nonzero
+    /// count — line/scatter clip out-of-range geometry rather than
+    /// discarding the point, and bar ignores `x_range` outright.
+    pub excluded_out_of_range: usize,
+}
+
+/// What a chart-type-specific drawing routine reports back.
+#[derive(Debug, Default, Clone, Copy)]
+struct DrawOutcome {
+    rows_plotted: usize,
+    excluded_out_of_range: usize,
+}
+
+impl From<usize> for DrawOutcome {
+    /// For the chart types that cannot exclude anything, the plotted count
+    /// is the whole outcome.
+    fn from(rows_plotted: usize) -> Self {
+        Self {
+            rows_plotted,
+            excluded_out_of_range: 0,
+        }
+    }
 }
 
 /// Physical layout for bar marks. This remains crate-private so the public
@@ -724,7 +780,7 @@ fn render_png(
             )
         })?;
     let path = tmp.path().to_path_buf();
-    let rows_plotted = {
+    let outcome = {
         let backend = BitMapBackend::new(&path, (opts.width, opts.height));
         draw_on_backend(backend, rows, opts, presentation, measures, x_measures)?
     };
@@ -738,7 +794,8 @@ fn render_png(
     Ok(ChartResult {
         bytes,
         mime_type: ChartFormat::Png.mime_type(),
-        rows_plotted,
+        rows_plotted: outcome.rows_plotted,
+        excluded_out_of_range: outcome.excluded_out_of_range,
     })
 }
 
@@ -750,14 +807,15 @@ fn render_svg(
     x_measures: Option<&[ChartMeasureValue]>,
 ) -> Result<ChartResult, McpError> {
     let mut svg_string = String::new();
-    let rows_plotted = {
+    let outcome = {
         let backend = SVGBackend::with_string(&mut svg_string, (opts.width, opts.height));
         draw_on_backend(backend, rows, opts, presentation, measures, x_measures)?
     };
     Ok(ChartResult {
         bytes: svg_string.into_bytes(),
         mime_type: ChartFormat::Svg.mime_type(),
-        rows_plotted,
+        rows_plotted: outcome.rows_plotted,
+        excluded_out_of_range: outcome.excluded_out_of_range,
     })
 }
 
@@ -769,7 +827,7 @@ fn draw_on_backend<DB: DrawingBackend>(
     presentation: ChartPresentation,
     measures: Option<&[ChartMeasureValue]>,
     x_measures: Option<&[ChartMeasureValue]>,
-) -> Result<usize, McpError>
+) -> Result<DrawOutcome, McpError>
 where
     <DB as DrawingBackend>::ErrorType: 'static,
 {
@@ -779,9 +837,14 @@ where
     match opts.chart_type {
         // Bar's x is always categorical and histogram has no separate x
         // column, so neither reads `x_measures` — only line/scatter do.
-        ChartType::Bar => draw_bar(&root, rows, opts, presentation, measures),
-        ChartType::Line => draw_line(&root, rows, opts, presentation, measures, x_measures),
-        ChartType::Scatter => draw_scatter(&root, rows, opts, presentation, measures, x_measures),
+        ChartType::Bar => {
+            draw_bar(&root, rows, opts, presentation, measures).map(DrawOutcome::from)
+        }
+        ChartType::Line => {
+            draw_line(&root, rows, opts, presentation, measures, x_measures).map(DrawOutcome::from)
+        }
+        ChartType::Scatter => draw_scatter(&root, rows, opts, presentation, measures, x_measures)
+            .map(DrawOutcome::from),
         ChartType::Histogram => draw_histogram(&root, rows, opts, measures),
     }
 }
@@ -1137,6 +1200,14 @@ fn parse_temporal(s: &str) -> Option<(TemporalKind, f64)> {
 /// Both paths skip leading `NULL`s rather than only inspecting row 0, so a
 /// single blank x on an otherwise numeric or temporal column doesn't flip
 /// the whole chart's interpretation to categorical.
+///
+/// **This is half of a pair.** [`group_chart_series`] must skip the same
+/// rows for the numeric and temporal modes, because
+/// `chart_measure_coordinate_and_label` maps a `NULL` x to
+/// `SchemaMismatch`. Teaching detection alone to look past a blank x makes
+/// the row detection deliberately ignored the row grouping hard-errors on —
+/// turning a chart that rendered (as categorical) into no chart at all. If
+/// you change the skip here, change it there.
 fn detect_line_x_mode(
     rows: &[Value],
     x_col: &str,
@@ -1260,6 +1331,31 @@ fn group_chart_series(
         )?;
 
         let x_raw = obj.get(x_col).cloned().unwrap_or(Value::Null);
+        let x_measure = x_measures.and_then(|values| values.get(row_index));
+
+        // A NULL x has no position on a quantitative or temporal axis, so
+        // drop the row rather than fail the whole chart. This is the other
+        // half of `detect_line_x_mode`'s leading-NULL skip: detection
+        // looks past a blank x to classify the column, and grouping has to
+        // look past the same rows, or the row detection deliberately
+        // ignored becomes the row grouping hard-errors on
+        // (`chart_measure_coordinate_and_label` maps both
+        // `ChartMeasureValue::Null` and a raw `Value::Null` to
+        // `SchemaMismatch`, and `parse_temporal` rejects the empty string
+        // `as_string` yields for a JSON null).
+        //
+        // Categorical is deliberately excluded: there a NULL is a legitimate
+        // (blank-labelled) category position, which is the pre-existing
+        // behavior. When every row is skipped the all-empty-groups guard
+        // below reports `EmptyData`.
+        let x_is_null = match x_measure {
+            Some(measure) => matches!(measure, ChartMeasureValue::Null),
+            None => x_raw.is_null(),
+        };
+        if x_is_null && matches!(x_mode, XMode::Numeric | XMode::Temporal(_)) {
+            continue;
+        }
+
         let (x_val, x_label) = match x_mode {
             XMode::Categorical => {
                 let label = as_string(&x_raw);
@@ -1272,11 +1368,7 @@ fn group_chart_series(
             // large NUMERIC — see `ChartMeasureValue`) still gets its exact
             // display text and an unrounded f64 coordinate rather than
             // falling back to `as_number`'s lossy JSON-number parse.
-            XMode::Numeric => chart_measure_coordinate_and_label(
-                x_measures.and_then(|values| values.get(row_index)),
-                &x_raw,
-                x_col,
-            )?,
+            XMode::Numeric => chart_measure_coordinate_and_label(x_measure, &x_raw, x_col)?,
             XMode::Temporal(_) => {
                 let label = as_string(&x_raw);
                 let val = parse_temporal(&label).map(|(_, ts)| ts).ok_or_else(|| {
@@ -2452,14 +2544,14 @@ fn apply_ranges(
 
 #[expect(
     clippy::cast_precision_loss,
-    reason = "`bin_count` (≤500, clamped in `ChartOptions`), the bin loop index `i`, and each bin's `count`/`y_max` (bounded by MAX_CHART_ROWS = 50,000 total values) are all far below 2^53 — never lossy. The exact plotted values themselves came through the `measures` sidecar as `ChartMeasureValue::coordinate`, already an f64, not from a cast here."
+    reason = "`bin_count` (clamped to 1..=MAX_HISTOGRAM_BINS = 500 below) and the bin loop index `i` are UI layout quantities. Each bin's `count`/`y_max` is a row tally bounded by MAX_CHART_ROWS = 50,000 (enforced in `render_chart_impl` for every entry point), so all of these are far below 2^53 — never lossy. `count as f64` is the plotted rectangle height, and it is exact at these magnitudes; the binned x values themselves are f64 coordinates from the `measures` sidecar or `as_number`, not reconstructed by a cast here."
 )]
 fn draw_histogram<DB: DrawingBackend>(
     root: &DrawingArea<DB, plotters::coord::Shift>,
     rows: &[Value],
     opts: &ChartOptions,
     measures: Option<&[ChartMeasureValue]>,
-) -> Result<usize, McpError>
+) -> Result<DrawOutcome, McpError>
 where
     <DB as DrawingBackend>::ErrorType: 'static,
 {
@@ -2504,15 +2596,17 @@ where
         ));
     }
 
-    let bin_count = opts.bins.max(1) as usize;
+    // Clamp here, not just where the MCP tool builds `ChartOptions`:
+    // `bins` is a bare `pub u32` and the public `render_chart` API can set
+    // it to anything, so an unclamped value would reach the
+    // `vec![0u64; bin_count]` below (`u32::MAX` bins ≈ 34 GB).
+    let bin_count = usize::try_from(opts.bins.clamp(1, MAX_HISTOGRAM_BINS))
+        .expect("clamped to 1..=MAX_HISTOGRAM_BINS, which fits usize on every supported target");
     // Honor an explicit `x_range` as the bin extent, per the doc on
     // `ChartOptions::x_range` ("all frames/charts share the same x
     // extent" — useful for side-by-side comparisons or animation).
     // `render_chart_impl` already validated it's finite and strictly
-    // increasing. Values outside the range aren't rejected: the index
-    // clamp below folds them into the first/last bin, mirroring how
-    // line/scatter's `apply_ranges` silently clips out-of-range points
-    // rather than erroring.
+    // increasing.
     let (min, max) = match opts.x_range {
         Some([lo, hi]) => (lo, hi),
         None => (
@@ -2541,12 +2635,32 @@ where
     }
 
     let mut bins = vec![0u64; bin_count];
+    let mut excluded_out_of_range = 0usize;
     for v in &values {
+        // Values outside the requested extent are dropped, not folded into
+        // the edge bins. Folding would report observations in a bin they
+        // don't belong to — with 100 uniform values over 0..9 and
+        // `x_range = [4, 6]`, bin `[4, 5)` would absorb 0,1,2,3,4 and stand
+        // 5x taller than the truth, which reads as a real cluster. The
+        // exclusions are counted and reported so the caller can see data
+        // was dropped rather than inferring it from a suspicious shape.
+        //
+        // This is not what line/scatter do, and deliberately so: their
+        // `apply_ranges` only sets axis bounds, so plotters clips
+        // out-of-range geometry in place. A clipped point becomes
+        // invisible; it is never relocated to a position it didn't have.
+        // Excluding is the histogram equivalent of that.
+        if *v < min || *v > max {
+            excluded_out_of_range += 1;
+            continue;
+        }
         // Histogram bin index: `floor((v - min) / bin_width)` is finite and
-        // lies in `[0, bin_count)` for well-formed inputs; we still clamp
-        // with `.max(0).min(bin_count - 1)` to defend against NaN/rounding.
-        // The narrowing to `isize` / `usize` is therefore a reinterpret of a
-        // value we have just bounded to a small non-negative integer.
+        // lies in `[0, bin_count)` for every value that passed the range
+        // check above; we still clamp with `.max(0).min(bin_count - 1)` to
+        // defend against NaN/rounding and to put `v == max` in the last bin
+        // (the topmost bin is right-closed). The narrowing to `isize` /
+        // `usize` is therefore a reinterpret of a value we have just
+        // bounded to a small non-negative integer.
         #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
@@ -2595,7 +2709,12 @@ where
         .map_err(draw_err)?;
 
     root.present().map_err(draw_err)?;
-    Ok(values.len())
+    Ok(DrawOutcome {
+        // Only the binned values, so `rows_plotted` never implies more
+        // in-window observations than the chart actually shows.
+        rows_plotted: values.len() - excluded_out_of_range,
+        excluded_out_of_range,
+    })
 }
 
 fn log_measure_range(values: &[f64], explicit: Option<[f64; 2]>) -> Result<(f64, f64), McpError> {
@@ -2710,6 +2829,89 @@ mod tests {
 
     fn s(strs: &[&str]) -> Vec<String> {
         strs.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// The MCP path reaches `group_chart_series` with a typed `x_measures`
+    /// sidecar, and the sidecar is authoritative — so a `NULL` x arrives as
+    /// `ChartMeasureValue::Null` rather than as a raw JSON `null`.
+    /// `chart_measure_coordinate_and_label` maps that to `SchemaMismatch`,
+    /// so the NULL-skip has to recognize the sidecar spelling too. The
+    /// integration tests in `tests/chart_tests.rs` go through the public
+    /// `render_chart`, which builds no sidecar, and therefore only cover
+    /// the raw-JSON branch of that check.
+    #[test]
+    fn group_chart_series_skips_sidecar_null_x() {
+        let rows = vec![
+            serde_json::json!({"x": null, "y": 1}),
+            serde_json::json!({"x": 42, "y": 2}),
+        ];
+        let measures = vec![
+            ChartMeasureValue::Finite {
+                coordinate: 1.0,
+                display: "1".to_string(),
+            },
+            ChartMeasureValue::Finite {
+                coordinate: 2.0,
+                display: "2".to_string(),
+            },
+        ];
+        let x_measures = vec![
+            ChartMeasureValue::Null,
+            ChartMeasureValue::Finite {
+                coordinate: 42.0,
+                display: "42".to_string(),
+            },
+        ];
+
+        let groups = group_chart_series(
+            &rows,
+            "x",
+            "y",
+            None,
+            XMode::Numeric,
+            Some(&measures),
+            Some(&x_measures),
+        )
+        .expect("a sidecar NULL x must be skipped, not fail the chart");
+
+        let points = &groups[""];
+        assert_eq!(points.len(), 1, "only the non-NULL x row is plotted");
+        assert!((points[0].x - 42.0).abs() < f64::EPSILON);
+    }
+
+    /// The same skip applies to a temporal axis reached through the sidecar.
+    #[test]
+    fn group_chart_series_skips_sidecar_null_x_on_temporal_axis() {
+        let rows = vec![
+            serde_json::json!({"d": null, "v": 1}),
+            serde_json::json!({"d": "2026-01-01", "v": 2}),
+        ];
+        let measures = vec![
+            ChartMeasureValue::Finite {
+                coordinate: 1.0,
+                display: "1".to_string(),
+            },
+            ChartMeasureValue::Finite {
+                coordinate: 2.0,
+                display: "2".to_string(),
+            },
+        ];
+        // A temporal x column is textual, so its sidecar entries are
+        // `NonNumeric` for real dates and `Null` for a SQL NULL.
+        let x_measures = vec![ChartMeasureValue::Null, ChartMeasureValue::NonNumeric];
+
+        let groups = group_chart_series(
+            &rows,
+            "d",
+            "v",
+            None,
+            XMode::Temporal(TemporalKind::Date),
+            Some(&measures),
+            Some(&x_measures),
+        )
+        .expect("a sidecar NULL date must be skipped, not fail the chart");
+
+        assert_eq!(groups[""].len(), 1);
     }
 
     #[test]

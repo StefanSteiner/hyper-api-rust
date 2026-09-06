@@ -2741,6 +2741,59 @@ mod tests {
         );
     }
 
+    /// `is_attach_lock_conflict` has two independent triggers, and the real
+    /// engine message carries *both* — `server error (55006): ... The
+    /// database file is locked by another process` matches the SQLSTATE
+    /// check and the phrase fallback at once. Deleting either one alone is
+    /// therefore invisible to every test that uses a realistic message.
+    /// These two tests isolate the branches so each stays load-bearing.
+    ///
+    /// The SQLSTATE branch on its own: a `55006` with no lock wording must
+    /// still classify, which is what makes the classification independent
+    /// of hyperd's English.
+    #[test]
+    fn attach_lock_conflict_detects_sqlstate_without_lock_phrase() {
+        let upstream = hyperdb_api::Error::server(
+            Some("55006".to_string()),
+            "object cannot be modified in this state",
+            None,
+            None,
+        );
+        assert!(
+            !crate::error::is_resource_busy(&upstream.to_string()),
+            "the fixture must not also trip the phrase fallback, or it \
+             wouldn't isolate the SQLSTATE branch: {upstream}"
+        );
+
+        assert!(
+            is_attach_lock_conflict(&upstream),
+            "SQLSTATE 55006 alone must classify as an attach lock conflict"
+        );
+    }
+
+    /// The phrase branch on its own: older hyperd versions report attach
+    /// contention only in prose, with no structured SQLSTATE at all.
+    #[test]
+    fn attach_lock_conflict_detects_lock_phrase_without_sqlstate() {
+        let upstream = hyperdb_api::Error::server(
+            None,
+            "The database file is locked by another process",
+            None,
+            None,
+        );
+        assert_eq!(
+            upstream.sqlstate(),
+            None,
+            "the fixture must carry no SQLSTATE, or it wouldn't isolate the \
+             phrase branch"
+        );
+
+        assert!(
+            is_attach_lock_conflict(&upstream),
+            "a legacy lock phrase with no SQLSTATE must still classify"
+        );
+    }
+
     /// An unrelated `55006` from ordinary SQL (not an attach) must keep its
     /// generic mapping even through the attach-context mapper — only genuine
     /// attach-lock phrasing / the attach call site should reclassify.

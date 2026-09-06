@@ -108,6 +108,17 @@ histograms are unsupported, and an explicit range must contain every
 plotted value. Explicit `x_range` and `y_range` bounds must also be finite,
 strictly increasing, and representable.
 
+`x_range` means something different per chart type. On line/scatter it sets
+the axis bounds only: out-of-range points are still counted in
+`rows_plotted` but render invisibly (clipped), never moved. On a histogram
+it is the binning extent, and values outside it are **excluded from the
+bins** rather than folded into the edge bins, so `rows_plotted` counts only
+the values actually binned and `excluded_out_of_range` appears in the stats
+block reporting how many were dropped. A histogram `x_range` containing no
+data renders empty at the requested extent instead of erroring. Bar charts
+ignore `x_range` entirely (their x positions are categorical). `bins` is
+clamped to 1..=500.
+
 Line/scatter DATE, TIMESTAMP, and TIMESTAMPTZ x values use a proportional
 time axis automatically. TEXT is categorical; set `x_as_category=true`
 to deliberately give temporal observations even spacing. Bars always
