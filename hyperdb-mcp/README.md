@@ -237,7 +237,14 @@ describe({ database: "persistent" })
 sample({ table: "customers", database: "persistent" })
 ```
 
-The `database` parameter is available on `query`, `execute`, `load_data`, `load_file`, `load_files`, `watch_directory`, `describe`, `sample`, `chart`, `export`, and `set_table_metadata`. The shorthand `persist: true` (sugar for `database: "persistent"`) is available on `load_data`, `load_file`, `load_files`, and `watch_directory`. Read tools generally accept a read-only user attachment; write tools require a writable one. The exception is the KV family: every `kv_*` call to a user attachment requires it to be writable because the backing table may need initialization.
+The `database` parameter is available on `query`, `execute`, `load_data`,
+`load_file`, `load_files`, `watch_directory`, `describe`, `sample`, `chart`,
+`export`, and `set_table_metadata`. The shorthand `persist: true` (sugar for
+`database: "persistent"`) is available on `load_data`, `load_file`,
+`load_files`, and `watch_directory`. Read tools generally accept a read-only
+user attachment; write tools require a writable one. The exception is the KV
+family: every `kv_*` call to a user attachment requires it to be writable
+because the backing table may need initialization.
 
 Every successful database-routed response includes the canonical
 `resolved_database`: `"local"`, `"persistent"`, or the lowercase attached
@@ -332,7 +339,7 @@ If hyperd repeatedly fails to start (3 attempts within 60 seconds — e.g., misc
 
 Ingest inline data and run a SQL query in a single call.
 
-```
+```text
 query_data(data: '[{"region":"West","revenue":1200},...]', sql: 'SELECT region, SUM(revenue) FROM data GROUP BY region')
 ```
 
@@ -348,7 +355,7 @@ query_data(data: '[{"region":"West","revenue":1200},...]', sql: 'SELECT region, 
 
 Ingest a file and run a SQL query in a single call. Streams from disk — handles files of any size.
 
-```
+```text
 query_file(path: '/tmp/sales.parquet', sql: 'SELECT TOP 10 * FROM sales ORDER BY amount DESC')
 ```
 
@@ -365,7 +372,7 @@ query_file(path: '/tmp/sales.parquet', sql: 'SELECT TOP 10 * FROM sales ORDER BY
 
 Load inline data into a named local, persistent, or attached-database table.
 
-```
+```text
 load_data(table: 'customers', data: '[{"id":1,"name":"Alice"},...]')
 ```
 
@@ -381,7 +388,7 @@ load_data(table: 'customers', data: '[{"id":1,"name":"Alice"},...]')
 
 Load a file into a named local, persistent, or attached-database table.
 
-```
+```text
 load_file(table: 'orders', path: '/tmp/orders.csv')
 ```
 
@@ -404,7 +411,7 @@ local table. Pass the absolute path to the Iceberg table root (the
 directory containing `metadata/` and `data/`); hyperd's native Iceberg
 reader derives the schema and resolves the snapshot.
 
-```
+```text
 load_iceberg(table: 'sales', path: '/lake/warehouse/db/sales')
 ```
 
@@ -423,7 +430,7 @@ Iceberg table metadata.
 
 Run a **read-only** SQL query against local (default), persistent, or an attached database. Accepts `SELECT`, `WITH`, `EXPLAIN`, `SHOW`, `VALUES`. For DDL/DML use `execute`.
 
-```
+```text
 query(sql: 'SELECT c.name, SUM(o.amount) FROM orders o JOIN customers c ON o.customer_id = c.id GROUP BY c.name')
 ```
 
@@ -431,7 +438,7 @@ query(sql: 'SELECT c.name, SUM(o.amount) FROM orders o JOIN customers c ON o.cus
 
 Execute one or more **mutating** SQL statements as an atomic batch: `CREATE TABLE`, `INSERT`, `UPDATE`, `DELETE`, `DROP TABLE`, `ALTER`, `COPY`, etc. `sql` is an array of statements; multi-element batches run inside a transaction (all commit or all roll back). Single-element batches auto-commit, same as a one-off statement. Returns the per-statement affected row counts plus a total. Disabled in read-only mode.
 
-```
+```text
 // Single statement (auto-commit)
 execute(sql: ['CREATE TABLE archived_orders AS SELECT * FROM orders WHERE year < 2024'])
 
@@ -459,7 +466,7 @@ List all tables in the selected database with their schemas, column types, and r
 
 Return the schema, total row count, and first N rows of a table in a single call.
 
-```
+```text
 sample(table: 'orders', n: 10)
 ```
 
@@ -483,7 +490,7 @@ Use it **before** `load_file` whenever you are unsure about types, or **after** 
 reported `type` + `min` / `max` directly into a partial `schema` override on the
 subsequent `load_file` call.
 
-```
+```text
 inspect_file(path: '/tmp/owid-population.csv')
 ```
 
@@ -531,7 +538,7 @@ only for the lifetime of the server process.
 
 #### `save_query`
 
-```
+```text
 save_query(name: 'top_5_customers', sql: 'SELECT customer, SUM(amount) AS total FROM orders GROUP BY customer ORDER BY total DESC LIMIT 5', description: 'Biggest spenders this year')
 ```
 
@@ -547,7 +554,7 @@ first if you intend to overwrite. Non-read-only SQL is rejected with
 
 #### `delete_query`
 
-```
+```text
 delete_query(name: 'top_5_customers')
 ```
 
@@ -584,7 +591,7 @@ Nine tools cover the surface:
 | `kv_pop` | Destructively read-and-remove the lowest-keyed entry (atomic) | `store`, `database`, `persist` |
 | `kv_clear` | Delete all keys in a store (returns count removed) | `store`, `database`, `persist` |
 
-```
+```text
 kv_set(store: 'session', key: 'last_report', value: '{"rows": 4210}', database: 'persistent')
 kv_get(store: 'session', key: 'last_report')
 ```
@@ -607,7 +614,7 @@ Key properties:
 
 Write query results or a table to a file.
 
-```
+```text
 export(table: 'orders', path: '~/Desktop/orders.parquet', format: 'parquet')
 export(sql: 'SELECT ...', path: '~/Desktop/analysis.hyper', format: 'hyper')
 ```
@@ -630,7 +637,7 @@ destination and materializes every user table from the selected source into it.
 Render a bounded quick diagnostic from a SQL query. This convenience tool is
 for inspecting or sharing one chart, not for dashboard/layout composition.
 
-```
+```text
 chart(sql: 'SELECT product, SUM(revenue) as total FROM sales GROUP BY product', chart_type: 'bar', x: 'product', y: 'total', title: 'Revenue by Product')
 ```
 
@@ -684,7 +691,7 @@ bound, never zero.
 
 Monitor a directory for data files and auto-append them to a target table.
 
-```
+```text
 watch_directory(path: '/tmp/inbox', table: 'events')
 unwatch_directory(path: '/tmp/inbox')
 ```
@@ -899,7 +906,7 @@ Hyper uses the Salesforce Data Cloud SQL dialect (PostgreSQL-compatible with ext
 
 Hyper does **not** support `ON CONFLICT` or `INSERT ... ON DUPLICATE KEY`. Use the `execute` tool's atomic batch shape instead:
 
-```
+```text
 execute(sql: [
   "UPDATE settings SET value = 'dark' WHERE key = 'theme'",
   "INSERT INTO settings (key, value) SELECT 'theme', 'dark' \
@@ -927,7 +934,7 @@ Full reference: [Data Cloud SQL Reference](https://developer.salesforce.com/docs
 
 ## CLI Reference
 
-```
+```text
 hyperdb-mcp [OPTIONS] [COMMAND]
 
 Commands:

@@ -1,0 +1,33 @@
+// Directory-scoped rules for docs/superpowers/ (specs and plans).
+//
+// These are point-in-time planning artifacts: a spec and plan are written
+// before a feature, reviewed alongside the change that implements it, and then
+// left alone (AGENTS.md, "Documentation Conventions"). Reflowing prose or
+// re-indenting code blocks in a settled record is churn no reader benefits
+// from, and it is the riskiest place to do it -- these are the longest files in
+// the repo. So the two rules that would force a rewrite are off here:
+//
+//   MD013 line-length     -- plan prose runs to 1500+ characters per line
+//   MD046 code-block-style -- plans mix indented and fenced blocks
+//
+// Every other rule still applies, deliberately. New specs and plans are
+// written all the time, and MD040 (untagged fences) plus the heading rules are
+// the feedback worth having while authoring one. This is a relaxation, not an
+// exclusion: an exclusion would leave the editor silent on a directory that is
+// actively written to.
+//
+// "extends" is load-bearing, not decoration. A nested config REPLACES ancestor
+// configuration rather than merging with it -- verified empirically: without
+// this line, the root's `MD024.siblings_only` reverts to the default and fires
+// on plan files, and `MD060: false` would likewise be lost, re-enabling the
+// rule that was disabled for mangling links. Extending the root config keeps
+// all of it and overrides only the two rules below.
+//
+// Governs both tools from one file: markdownlint-cli2 resolves config per
+// directory, and the VS Code extension walks up from the file being edited
+// (".markdownlint.{jsonc,json,...} file in the same or parent directory").
+{
+  "extends": "../../.markdownlint.json",
+  "MD013": false,
+  "MD046": false
+}

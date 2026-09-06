@@ -38,7 +38,7 @@ survive hyperd crashes transparently.
 Example — JOIN across a scratch `.hyper` file and the primary
 workspace, then land the result:
 
-```
+```text
 attach_database(alias="src", kind="local_file", path="/tmp/scratch.hyper")
 copy_query(
   sql="SELECT s.id, s.name, p.amount FROM src.public.customers s JOIN orders p ON s.id = p.customer_id",
@@ -68,7 +68,7 @@ keep these workarounds in mind:
 1. **`.hyper` → `.hyper` export then load.** Single-table transfer.
    Fastest because `.hyper` is Hyper's native format.
 
-   ```
+   ```text
    # in HyperDB (sandbox)
    export(table="scratch_data", path="/tmp/scratch.hyper", format="hyper")
    # then in HyperDB-persistent

@@ -19,7 +19,7 @@ This package provides a native Node.js addon that gives JavaScript and TypeScrip
 
 ## Class Overview
 
-```
+```text
 HyperProcess ──creates──▶ Connection ──returns──▶ RowData
 ConnectionBuilder ─builds─▶ Connection ──returns──▶ QueryStream ──yields──▶ RowData
 ConnectionPool ──pools──▶ Connection ──returns──▶ ColumnarStream ──yields──▶ ColumnarChunk

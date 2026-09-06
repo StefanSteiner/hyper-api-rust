@@ -364,8 +364,10 @@ This workspace builds with Red Hat's **system-native Rust toolchain and no
 `rustup`**, which is how enterprise environments typically consume it. RHEL
 provides `rust-toolset` in AppStream as a rolling Application Stream:
 
-    dnf install -y rust-toolset gcc gcc-c++ fontconfig-devel unzip
-    cargo build --release
+```bash
+dnf install -y rust-toolset gcc gcc-c++ fontconfig-devel unzip
+cargo build --release
+```
 
 Notes for system-toolchain builds, all verified against `ubi9/ubi`:
 

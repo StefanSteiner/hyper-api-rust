@@ -43,7 +43,7 @@ This is a **pure-Rust implementation** of the Hyper database API, using the Post
 
 The codebase uses a **layered architecture**. The flagship user-facing crate is `hyperdb-api`; its implementation details live in `hyperdb-api-core`, which preserves three internal submodules (`types`, `protocol`, `client`) that contributors navigate independently. Two optional companion crates extend the public surface.
 
-```
+```text
 ┌─────────────────────────────────────────────────────┐
 │  hyperdb-api (High-level API, public)               │
 │  - Connection, AsyncConnection, HyperProcess        │
@@ -251,7 +251,7 @@ Three *other* crates do define features. `hyperdb-api` is flag-free; the workspa
 
 Tests are organized by crate:
 
-```
+```text
 hyperdb-api/tests/              # Integration tests (high-level API)
 hyperdb-api/tests/common/       # Shared test utilities
 hyperdb-api-core/tests/         # Client-level integration tests
@@ -519,7 +519,7 @@ All commit messages **must** follow the format `<type>(<scope>): <subject>` — 
  upstream/main:<path>` and re-lint — rather than assuming, or you will "fix"
  things that were never broken and miss the ones you introduced.
 
- Three traps that have actually bitten:
+ Four traps that have actually bitten:
 
 - **Duplicate `### Fixed` / `### Added` siblings under one `## [Unreleased]`**
  (MD024). Changelogs here often already have the section further down. Merge
@@ -533,6 +533,11 @@ All commit messages **must** follow the format `<type>(<scope>): <subject>` — 
  new block. This corrupted 176 fences across 22 files once. Any such pass must
  track fence state; prefer `markdownlint-cli2 --fix`, which is safe, and note
  that it cannot fix MD040 because choosing a language needs judgement.
+- **A nested `.markdownlint.json` replaces the root config rather than merging
+ with it**, so a new one must `extends` the root or every rule there reverts to
+ default. Dropping that line from `docs/superpowers/.markdownlint.json` turns 5
+ findings into 92 — 70 of them the MD060 disabled just below. It hides well: it
+ makes the *linter* wrong, not the document.
 
  Beware format-on-save: a Markdown formatter reformatting tables to satisfy
  MD060 once stripped the README's badge links (`[![CI](img)](target)` became
