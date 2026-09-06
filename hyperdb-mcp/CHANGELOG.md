@@ -340,6 +340,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   than losing scratch tables. Load with `persist: true` if data must survive a
   panicking tool call. Fixes
   [issue #266](https://github.com/tableau/hyper-api-rust/issues/266).
+- **`discover()` rejected a live daemon over an unrecognized `identity`
+  block, defeating forward compatibility.** The client fast path deserialized
+  the whole `DaemonRecord` (added in 0.7.3) — including the nested `identity`
+  object — and discarded the enrichment immediately after
+  (`record.info().clone()`), so the added strictness bought nothing while
+  costing compatibility across daemon/client version skew: a retyped
+  `identity`, a reshaped `executable_path`, or an `identity` missing
+  `executable_path` each made a well-formed, live daemon's `daemon.json` fail
+  to parse, and `discover()` returned `None` for a healthy process.
+  `wait_for_daemon` (`spawn.rs`) then timed out and silently fell back to a
+  private `hyperd`, `status_degraded` (`server.rs`) reported no daemon, and
+  `Engine::is_running` returned false. `discover()` now reads the file once
+  and parses those bytes twice: first as the strict `DaemonRecord`, which
+  remains the primary path, and — only when that fails — as a bare
+  `DaemonInfo`, which ignores unknown fields and never trips over a nested
+  object this fast path does not need. A record that only the tolerant
+  fallback could read is deliberately left on disk when its health check
+  fails, instead of being stale-cleaned: such a record is exactly what a
+  *newer* daemon looks like to an older client, the daemon rewrites
+  `daemon.json` only on `hyperd` restart, and deleting it over one failed
+  300 ms PING would hide a live daemon from every client on the machine, not
+  just this one. A strictly parsed record on a dead port is still cleaned up
+  as before. The doctor's separate raw reader is unaffected and keeps
+  the strict contract, since it deliberately surfaces a malformed `identity`
+  block as a diagnostic. Fixes
+  [issue #270](https://github.com/tableau/hyper-api-rust/issues/270).
+- **The "atomic" discovery-file write wasn't atomic, on the strength of a
+  false premise about Windows.** `write_discovery_record` deleted the
+  existing `daemon.json` before renaming the temp file into place, with a
+  comment claiming "`rename` fails if target exists" on Windows — but
+  `std::fs::rename` replaces an existing target on both Windows
+  (`MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`, falling back to
+  `SetFileInformationByHandle`) and Unix. The unnecessary delete opened a
+  window where the file did not exist at all; since `try_restart_hyperd`
+  rewrites this file on every `hyperd` restart, a concurrent `discover()`
+  could observe `Missing` mid-restart. The write is now a single `rename`,
+  matching what the function's doc comment already promised.
+- **An oversized-but-well-formed discovery record was reported as
+  `Malformed`.** The doctor's bounded raw reader rejected any file over 64
+  KiB before attempting to parse it, so a file that was perfectly valid JSON
+  — just unexpectedly large — sent the user to fix "invalid JSON" that
+  parsed fine. `RawDiscoveryRead` gained an `Oversized` variant so the doctor
+  reports what actually happened instead.
+- **A daemon peer that closed a health-command connection without writing
+  anything was reported as a successful, empty response.** `daemon_stop`
+  printed `Daemon responded:` with nothing after it and exited 0, which a
+  calling script would read as a successful stop. `send_command_with_timeout`
+  now returns `UnexpectedEof` when the connection ends before any bytes are
+  read. `doctor`'s separate `send_doctor_command` read loop had the same
+  shape and now classifies a silent close identically. This changes one
+  `doctor` warning: a recorded daemon candidate that accepts the connection
+  and then closes without answering is now reported as
+  `daemon_discovery_candidate_unreachable` ("did not return fresh enriched
+  STATUS") rather than `daemon_status_malformed` ("returned malformed or
+  unenriched STATUS"), which is what actually happened — the peer sent no
+  response to be malformed. Fixes 3 of the 5 items in
+  [issue #275](https://github.com/tableau/hyper-api-rust/issues/275).
+- **After restarting `hyperd`, the daemon advertised the new endpoint over the
+  health port before writing it to the discovery file.** `try_restart_hyperd`
+  copied the endpoint into the in-memory `DaemonInfo` that `STATUS` serves and
+  released that lock *before* rewriting `daemon.json`. Since
+  `discovery::discover()` — the path every client's `Engine::new` takes —
+  reads the file, a client discovering inside that window connected to the
+  `hyperd` the daemon had just dropped. The write failing was worse than the
+  window: the error return happened with the new endpoint already published to
+  `STATUS` and the replacement `HyperProcess` dropped on the way out, leaving
+  `STATUS` durably naming a `hyperd` the daemon itself had killed. The
+  discovery file is now persisted first and the `DaemonInfo` flipped second,
+  both under one lock, so observing the new endpoint through either channel
+  implies a live `hyperd` behind it and no `STATUS` reader can see an endpoint
+  the file has not committed. Fixes
+  [issue #284](https://github.com/tableau/hyper-api-rust/issues/284).
 
 ## [0.5.0] - 2026-06-07
 
