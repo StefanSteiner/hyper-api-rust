@@ -330,6 +330,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   existing behavior; values outside the range fold into the first/last bin
   rather than erroring, mirroring how line/scatter clip out-of-range points.
   Part of [issue #277](https://github.com/tableau/hyper-api-rust/issues/277).
+- **Corrected the justification on chart.rs's `cast_precision_loss`
+  suppression.** The file-wide `#![allow]` claimed values approaching 2^53
+  "would saturate to Infinity in the chart anyway" — they don't; `f64`
+  represents them finitely and merely stops distinguishing adjacent
+  integers, which is exactly why `ChartMeasureValue` (and this PR's x-axis
+  sidecar) exists. Replaced with `#[expect(clippy::cast_precision_loss)]` on
+  each of the eight functions that actually cast an integer to `f64`, each
+  with the true, function-specific reason: every one of those casts is a
+  bounded UI count/index/timestamp (categories, series, bin counts/indices,
+  or calendar epoch seconds) — never a plotted data value, which always
+  flows through `ChartMeasureValue`/`ChartPoint::y_label` as an already-typed
+  `f64` with its exact display text carried alongside, not reconstructed
+  from an integer cast. No behavior change; `#[expect]` (vs `#[allow]`) also
+  means the suppression itself is now checked for staying necessary. Part of
+  [issue #277](https://github.com/tableau/hyper-api-rust/issues/277).
 
 ## [0.5.0] - 2026-06-07
 

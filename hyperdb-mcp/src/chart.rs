@@ -32,11 +32,6 @@
 //! [`SVGBackend`]: plotters::prelude::SVGBackend
 //! [`ImageContent`]: rmcp::model::ImageContent
 
-#![allow(
-    clippy::cast_precision_loss,
-    reason = "chart rendering: rows/columns displayed to user; any values approaching 2^53 would saturate to Infinity in the chart anyway"
-)]
-
 use crate::engine::ChartMeasureValue;
 use crate::error::{ErrorCode, McpError};
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, TimeZone, Utc};
@@ -1072,6 +1067,10 @@ enum XMode {
 /// `DateTime` strings are treated as UTC for positioning purposes —
 /// they're naive by definition, so we have no other choice. The label
 /// formatter will reproduce the input format faithfully.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "`timestamp()` is Unix epoch seconds; every value chrono can represent (±262,000 years) is nowhere near 2^53, so the i64→f64 cast below never loses precision. The exact label a caller sees is the original date string, not a value reconstructed from this coordinate."
+)]
 fn parse_temporal(s: &str) -> Option<(TemporalKind, f64)> {
     const TZ_FORMATS: &[&str] = &[
         "%Y-%m-%d %H:%M:%S%:z",
@@ -1229,6 +1228,10 @@ fn group_series(
     })
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "`category_index.len()` is a synthetic sequential index bounded by MAX_CHART_ROWS (50,000), far below 2^53 — never lossy. The exact value for a numeric x is always sourced from `chart_measure_coordinate_and_label`/`ChartMeasureValue`, not this index."
+)]
 fn group_chart_series(
     rows: &[Value],
     x_col: &str,
@@ -1501,6 +1504,10 @@ fn linear_bar_baseline((lo, hi): (f64, f64)) -> f64 {
     }
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "category/series counts and the series index are UI layout quantities bounded by MAX_CHART_ROWS (50,000) and the color palette's practical use, far below 2^53 — never lossy. Plotted values themselves come from `ChartPoint::x`/`y`, not from these casts; their exact text lives separately in `ChartPoint::y_label`."
+)]
 fn draw_vertical_bar_linear<DB: DrawingBackend>(
     root: &DrawingArea<DB, plotters::coord::Shift>,
     groups: &ChartSeriesMap,
@@ -1564,6 +1571,10 @@ where
     Ok(total_plotted)
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "category/series counts and the series index are UI layout quantities bounded by MAX_CHART_ROWS (50,000) and the color palette's practical use, far below 2^53 — never lossy. Plotted values themselves come from `ChartPoint::x`/`y`, not from these casts; their exact text lives separately in `ChartPoint::y_label`."
+)]
 fn draw_vertical_bar_log<DB: DrawingBackend>(
     root: &DrawingArea<DB, plotters::coord::Shift>,
     groups: &ChartSeriesMap,
@@ -1632,6 +1643,10 @@ where
     Ok(total_plotted)
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "category/series counts and the series index are UI layout quantities bounded by MAX_CHART_ROWS (50,000) and the color palette's practical use, far below 2^53 — never lossy. Plotted values themselves come from `ChartPoint::x`/`y`, not from these casts; their exact text lives separately in `ChartPoint::y_label`."
+)]
 fn draw_horizontal_bar_linear<DB: DrawingBackend>(
     root: &DrawingArea<DB, plotters::coord::Shift>,
     groups: &ChartSeriesMap,
@@ -1695,6 +1710,10 @@ where
     Ok(total_plotted)
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "category/series counts and the series index are UI layout quantities bounded by MAX_CHART_ROWS (50,000) and the color palette's practical use, far below 2^53 — never lossy. Plotted values themselves come from `ChartPoint::x`/`y`, not from these casts; their exact text lives separately in `ChartPoint::y_label`."
+)]
 fn draw_horizontal_bar_log<DB: DrawingBackend>(
     root: &DrawingArea<DB, plotters::coord::Shift>,
     groups: &ChartSeriesMap,
@@ -1853,6 +1872,10 @@ where
         .map_err(draw_err)
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "TICK_COUNT/LAST_TICK are the fixed constants 7/6, and `index` ranges over them — orders of magnitude below 2^53, never lossy. This only positions log-scale tick marks; it never touches a plotted data value."
+)]
 fn bounded_log_key_points((lo, hi): (f64, f64)) -> Vec<f64> {
     const TICK_COUNT: usize = 7;
     const LAST_TICK: usize = TICK_COUNT - 1;
@@ -2427,6 +2450,10 @@ fn apply_ranges(
     Ok((final_x_min, final_x_max, final_y_min, final_y_max))
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "`bin_count` (≤500, clamped in `ChartOptions`), the bin loop index `i`, and each bin's `count`/`y_max` (bounded by MAX_CHART_ROWS = 50,000 total values) are all far below 2^53 — never lossy. The exact plotted values themselves came through the `measures` sidecar as `ChartMeasureValue::coordinate`, already an f64, not from a cast here."
+)]
 fn draw_histogram<DB: DrawingBackend>(
     root: &DrawingArea<DB, plotters::coord::Shift>,
     rows: &[Value],
