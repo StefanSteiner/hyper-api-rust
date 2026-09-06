@@ -7,8 +7,10 @@
 //! parameters for use with query_params(), validating against actual Hyper behavior.
 
 use hyperdb_api::{
-    AsyncConnection, CreateMode, Geography, HyperProcess, Interval, Numeric, Result, ToSqlParam,
+    AsyncConnection, CreateMode, Geography, HyperProcess, Interval, Numeric, Oid, Result,
+    ToSqlParam,
 };
+use hyperdb_api_core::types::oids;
 
 mod common;
 use common::TestConnection;
@@ -453,5 +455,188 @@ async fn test_async_geography_param() {
     assert_eq!(
         rows[0].get::<String>(0).as_deref(),
         Some("POINT(-122.4194000 37.7749000)")
+    );
+}
+
+// =============================================================================
+// Prepared-statement path
+//
+// `sql_oid()` is consulted only by the one-shot `query_params` /
+// `command_params` path. A prepared statement fixes its parameter OIDs at
+// `prepare_typed` time, so these tests pin what the two text-format types can
+// and cannot do there.
+// =============================================================================
+
+/// `Geography` works unchanged through `PreparedStatement`: it declares a
+/// concrete OID and always binds as text, so nothing depends on the value.
+#[test]
+fn test_geography_param_through_prepared_statement() {
+    let test = TestConnection::new().expect("Failed to create test connection");
+    let conn = &test.connection;
+
+    conn.execute_command("CREATE TABLE places (id INT, location GEOGRAPHY)")
+        .expect("CREATE TABLE failed");
+
+    let stmt = conn
+        .prepare_typed(
+            "INSERT INTO places VALUES ($1, $2)",
+            &[oids::INT, oids::GEOGRAPHY],
+        )
+        .expect("prepare_typed with a GEOGRAPHY parameter must succeed");
+
+    // Reuse across executions is the whole point of a prepared statement.
+    for (id, wkt) in [
+        (1_i32, "POINT(-122.4194 37.7749)"),
+        (2, "POINT(2.3522 48.8566)"),
+        (3, "LINESTRING(0 0, 1 1)"),
+    ] {
+        let geo = Geography::from_wkt(wkt).expect("valid WKT");
+        let inserted = stmt
+            .execute(&[&id as &dyn ToSqlParam, &geo as &dyn ToSqlParam])
+            .expect("Geography must bind through a prepared statement");
+        assert_eq!(inserted, 1);
+    }
+
+    let rows = conn
+        .execute_query("SELECT CAST(location AS TEXT) FROM places ORDER BY id")
+        .expect("query failed")
+        .collect_rows()
+        .expect("collect_rows failed");
+    let stored: Vec<String> = rows
+        .iter()
+        .map(|r| r.get::<String>(0).expect("non-NULL"))
+        .collect();
+    assert_eq!(stored[0], "POINT(-122.4194000 37.7749000)");
+    assert_eq!(stored[1], "POINT(2.3522000 48.8566000)");
+    // Hyper stores a linestring geodesically and hands back the densified
+    // vertex list, so only the endpoints are stable.
+    assert!(
+        stored[2].starts_with("LINESTRING(0.0000000 0.0000000, ")
+            && stored[2].ends_with("1.0000000 1.0000000)"),
+        "linestring endpoints must survive the round-trip: {}",
+        stored[2]
+    );
+}
+
+/// Async twin of `test_geography_param_through_prepared_statement`.
+#[tokio::test(flavor = "current_thread")]
+async fn test_async_geography_param_through_prepared_statement() {
+    let (_hyper, conn) = fresh_async_conn("async_geo_prepared")
+        .await
+        .expect("async connection");
+
+    conn.execute_command("CREATE TABLE places (id INT, location GEOGRAPHY)")
+        .await
+        .expect("CREATE TABLE failed");
+
+    let stmt = conn
+        .prepare_typed(
+            "INSERT INTO places VALUES ($1, $2)",
+            &[oids::INT, oids::GEOGRAPHY],
+        )
+        .await
+        .expect("prepare_typed with a GEOGRAPHY parameter must succeed");
+
+    let geo = Geography::from_wkt("POINT(-122.4194 37.7749)").expect("valid WKT");
+    let id = 1_i32;
+    let inserted = stmt
+        .execute(&[&id as &dyn ToSqlParam, &geo as &dyn ToSqlParam])
+        .await
+        .expect("Geography must bind through an async prepared statement");
+    assert_eq!(inserted, 1);
+
+    let rows = conn
+        .execute_query("SELECT CAST(location AS TEXT) FROM places")
+        .await
+        .expect("query failed")
+        .collect_rows()
+        .await
+        .expect("collect_rows failed");
+    assert_eq!(
+        rows[0].get::<String>(0).as_deref(),
+        Some("POINT(-122.4194000 37.7749000)")
+    );
+}
+
+/// A scaled `Numeric` binds through a prepared statement only when the
+/// statement declared the parameter OID as unspecified (`0`).
+///
+/// This documents a real limitation rather than asserting a bug: because
+/// parameter OIDs are fixed at `prepare_typed` time, before any value exists,
+/// no single declaration serves both scale classes. `query_params` picks the
+/// OID from the value and handles both — see `ToSqlParam for Numeric`.
+#[test]
+fn test_numeric_scale_classes_are_exclusive_on_the_prepared_path() {
+    let test = TestConnection::new().expect("Failed to create test connection");
+    let conn = &test.connection;
+
+    conn.execute_command("CREATE TABLE prices (amount NUMERIC(10,2))")
+        .expect("CREATE TABLE failed");
+
+    let whole = Numeric::new(7, 0);
+    let scaled = Numeric::new(123_456, 2); // 1234.56
+
+    // Unspecified OID: scaled values work, whole numbers do not.
+    let inferred = conn
+        .prepare_typed("INSERT INTO prices VALUES ($1)", &[Oid::new(0)])
+        .expect("prepare_typed failed");
+    assert_eq!(
+        inferred
+            .execute(&[&scaled as &dyn ToSqlParam])
+            .expect("a scaled Numeric must bind under an unspecified OID"),
+        1
+    );
+    let err = inferred
+        .execute(&[&whole as &dyn ToSqlParam])
+        .expect_err("a whole Numeric cannot bind under an unspecified OID");
+    assert!(
+        err.to_string().contains("0A000"),
+        "expected 0A000 truncation error, got: {err}"
+    );
+
+    // Declared NUMERIC: the mirror image.
+    let declared = conn
+        .prepare_typed("INSERT INTO prices VALUES ($1)", &[oids::NUMERIC])
+        .expect("prepare_typed failed");
+    assert_eq!(
+        declared
+            .execute(&[&whole as &dyn ToSqlParam])
+            .expect("a whole Numeric must bind under a declared NUMERIC OID"),
+        1
+    );
+    let err = declared
+        .execute(&[&scaled as &dyn ToSqlParam])
+        .expect_err("a scaled Numeric cannot bind under a declared NUMERIC OID");
+    assert!(
+        err.to_string().contains("22003"),
+        "expected 22003 numeric overflow, got: {err}"
+    );
+
+    // The one-shot path has no such split: it reads the OID off the value.
+    for value in [&whole, &scaled] {
+        conn.command_params(
+            "INSERT INTO prices VALUES ($1)",
+            &[value as &dyn ToSqlParam],
+        )
+        .expect("query_params handles both scale classes");
+    }
+}
+
+/// `Connection::prepare` passes an empty OID list, and Hyper does not infer
+/// parameter types at Parse time — so any `$N` is rejected outright.
+///
+/// Pinned because it is the first thing a user hits, and it is why
+/// `prepare_typed` is the only route for a parameterized prepared statement.
+#[test]
+fn test_untyped_prepare_rejects_parameters() {
+    let test = TestConnection::new().expect("Failed to create test connection");
+
+    let err = test
+        .connection
+        .prepare("SELECT $1")
+        .expect_err("untyped prepare cannot declare a parameter");
+    assert!(
+        err.to_string().contains("42601"),
+        "expected 42601 unexpected-parameter error, got: {err}"
     );
 }

@@ -301,6 +301,27 @@ Everything else keeps the binary fast path. When every parameter is binary the
 protocol broadcasts a lone code across all of them), so the common path
 allocates nothing for formats at all.
 
+Two conventions in that plumbing are easy to get backwards:
+
+- **An empty `param_formats` slice means "all binary", not "all text."** The
+  PostgreSQL protocol reads a zero-length format array as all-text, so the
+  translation happens in exactly one place — `bind_format_codes` in
+  `hyperdb-api-core/src/client/statement.rs`, which takes the parameter count
+  precisely so it can distinguish "no parameters" (a zero-length array is
+  correct) from "no format overrides" (broadcast binary). It rejects a
+  non-empty slice whose length doesn't match. Don't reimplement this at a call
+  site.
+- **`sql_oid()` is consulted only on the one-shot path.** `prepare_typed()`
+  fixes parameter OIDs before any value exists, so a `PreparedStatement`
+  cannot serve both `Numeric` scale classes from one statement — `NUMERIC`
+  rejects scaled values (`22003`), unspecified (`0`) rejects whole numbers
+  (`0A000`). `query_params()` re-parses per call and picks the OID from the
+  value, so it handles both. `Geography` declares a concrete OID and always
+  binds as text, so it is unaffected and works on either path. Note also that
+  `Connection::prepare()` passes an empty OID list and Hyper does not infer
+  parameter types at Parse time, so it rejects any `$N` with `42601` —
+  `prepare_typed()` is the only route to a parameterized prepared statement.
+
 ### Key-Value Store
 
 `KvStore` / `AsyncKvStore` (see `kv_store.rs` / `async_kv_store.rs`) are
