@@ -217,6 +217,91 @@ async fn async_pool_idle_timeout_retires_connection() {
     );
 }
 
+/// Regression test for [issue #263](https://github.com/tableau/hyper-api-rust/issues/263):
+/// a connection returned to the pool with an open transaction (left by a
+/// panicked or cancelled task holding an `AsyncTransaction`) must not be
+/// handed to the next borrower still mid-transaction.
+///
+/// `AsyncTransaction::drop` cannot issue an async `ROLLBACK` (Rust has no
+/// async `Drop`), so it only warns when dropped without an explicit
+/// `commit()`/`rollback()` — exactly what happens when the task holding the
+/// guard panics, mirroring the real call sites in `ingest.rs` /
+/// `ingest_arrow.rs`, which already catch the `tokio::spawn` join error and
+/// continue rather than propagating a panic. `max_size(1)` pins the pool to
+/// one physical connection, so the second `pool.get()` is guaranteed to be
+/// the exact connection the panicked task poisoned with an open transaction
+/// — proving the fix is `ConnectionManager::recycle`, not mere luck of
+/// getting a fresh connection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn async_pool_recycle_discharges_transaction_left_open_by_panicked_task() {
+    let (_hyper, endpoint) = fresh_server("pool_async_txn_leak").unwrap();
+    let config = PoolConfig::new(&endpoint, db_path("pool_async_txn_leak"))
+        .create_mode(CreateMode::CreateAndReplace)
+        .max_size(1);
+    let pool = create_pool(config).unwrap();
+
+    {
+        let conn = pool.get().await.expect("setup checkout");
+        conn.execute_command("CREATE TABLE leaked (v INT)")
+            .await
+            .unwrap();
+    }
+
+    // Simulate the defect: BEGIN, write a row, then panic before
+    // commit/rollback. The `AsyncTransaction` guard's `Drop` only warns; the
+    // transaction is still open on the physical connection when the pooled
+    // guard (`conn`) is itself dropped during the same unwind and returns
+    // that connection to deadpool's idle set.
+    let pool_for_task = pool.clone();
+    let join_result = tokio::spawn(async move {
+        let mut conn = pool_for_task.get().await.expect("panic-task checkout");
+        let txn = conn.transaction().await.expect("begin txn");
+        txn.execute_command("INSERT INTO leaked VALUES (999)")
+            .await
+            .expect("insert inside txn");
+        panic!("simulated tool handler bug mid-transaction");
+    })
+    .await;
+    assert!(
+        join_result.is_err(),
+        "spawned task should have panicked, mirroring the real join-error \
+         handling in load_files"
+    );
+
+    // `max_size(1)` guarantees this next checkout recycles the SAME physical
+    // connection the panicked task left mid-transaction, running it through
+    // `ConnectionManager::recycle`. Without the fix, the old `SELECT 1` probe
+    // succeeds despite the open transaction and this borrower silently
+    // inherits it; with the fix, `recycle` issues an unconditional
+    // `ROLLBACK` first.
+    let conn2 = pool.get().await.expect("checkout after panicking task");
+
+    // Prove the leaked row did NOT survive — i.e. `recycle` genuinely rolled
+    // it back, rather than merely succeeding without touching the
+    // transaction.
+    let count: i64 = conn2
+        .query_count("SELECT COUNT(*) FROM leaked WHERE v = 999")
+        .await
+        .expect("query after recycle");
+    assert_eq!(
+        count, 0,
+        "recycle must roll back a transaction leaked by a panicked task \
+         before handing the connection to the next borrower"
+    );
+
+    // And the connection must be immediately usable for ordinary work, not
+    // stuck mid-transaction from the next borrower's perspective.
+    conn2
+        .execute_command("INSERT INTO leaked VALUES (1)")
+        .await
+        .expect("connection must be usable, not wedged mid-transaction");
+    let total: i64 = conn2
+        .query_count("SELECT COUNT(*) FROM leaked")
+        .await
+        .unwrap();
+    assert_eq!(total, 1, "only the post-recycle insert should be present");
+}
+
 // ---------------------------------------------------------------------------
 // Sync pool
 // ---------------------------------------------------------------------------
