@@ -305,6 +305,34 @@ differences from standard PostgreSQL:
 - **`external(path, format => '...')`** — read Parquet / CSV / Iceberg
   directly from disk inside a query without first loading it as a
   table. Usable in the FROM clause.
+- **Physical `NullType` Parquet columns are unreadable** — what a writer
+  emits for an all-null optional column in one partition. Hyper rejects
+  the *whole file* with `42804` (\"a data type that cannot be read by
+  Hyper ... hinting at a corrupted file\"); the file is not corrupt, and
+  selecting only the other columns does not help. A `schema` override
+  cannot fix it either: the override becomes a cast in the projection,
+  which the engine never evaluates. Re-type the column at the writer
+  (e.g. cast it to DOUBLE) and regenerate. `inspect_file` reports such a
+  column as type `NULL`; `load_file`, `load_files`, and `query_file`
+  fail fast and name it.
+- **`to_char` is date/time only.** `to_char(TIMESTAMP '2020-01-02
+  03:04:05', 'YYYY-MM-DD')` → `2020-01-02` and `to_char(DATE
+  '2020-01-02', 'YYYY')` → `2020` both work. There is **no numeric
+  overload** — integer and NUMERIC arguments alike fail with `42601
+  unsupported data types in call to 'to_char'`, e.g.
+  `to_char(123.456, 'FM990.00')`. That is an argument-type error, not a
+  missing function: a function Hyper genuinely lacks returns `42883`, as
+  `format()` does.
+- **`expr::TEXT` is the numeric-formatting idiom** and preserves scale:
+  `CAST(9.5 AS NUMERIC(8,2))::TEXT` → `9.50`. Reach for this instead of
+  `to_char` on a number, and whenever you need exact decimal output.
+- **A NUMERIC too large for an `f64` comes back as a JSON string**, not a
+  number, so no precision is lost in the result: `99999999999999999.99`
+  arrives as `\"99999999999999999.99\"`. Values that fit an `f64` — which
+  includes anything with 15 or fewer significant digits — stay JSON
+  numbers, so `9.50` arrives as `9.5`. Parse such a field as a decimal
+  string rather than assuming a number, and note it may already be exact
+  text if you applied `::TEXT` above.
 - **`APPROX_COUNT_DISTINCT(expr)`** — approximate cardinality, 5-100x
   faster than `COUNT(DISTINCT ...)` at high cardinality, on TEXT as well
   as numeric keys. It accelerates the distinct step only, so a per-row

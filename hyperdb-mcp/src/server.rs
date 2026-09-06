@@ -4839,6 +4839,30 @@ IDENTIFIERS\n\
 - Unquoted identifiers are folded to lowercase; double-quote to preserve case or use special chars\n\
 - Quote names containing uppercase letters, digits at the start, or special characters\n\
 \n\
+FORMATTING\n\
+- to_char() is date/time only: to_char(TIMESTAMP '2020-01-02 03:04:05', 'YYYY-MM-DD') -> '2020-01-02',\n\
+  to_char(DATE '2020-01-02', 'YYYY') -> '2020'\n\
+- to_char() has NO numeric overload: to_char(123.456, 'FM990.00'), to_char(42, '999') and\n\
+  to_char(<numeric>, ...) all fail with 42601 \"unsupported data types in call to 'to_char'\".\n\
+  That is an argument-type error, not a missing function — a function Hyper genuinely lacks\n\
+  returns 42883, as format() does\n\
+- expr::TEXT is the numeric-formatting idiom and preserves scale:\n\
+  CAST(9.5 AS NUMERIC(8,2))::TEXT -> '9.50'. Use it instead of to_char() on a number, and\n\
+  whenever you need exact decimal output\n\
+- a NUMERIC too large for an f64 is returned as a JSON string so no precision is lost:\n\
+  99999999999999999.99 arrives as \"99999999999999999.99\". Values that fit an f64 (anything\n\
+  with 15 or fewer significant digits) stay JSON numbers, so 9.50 arrives as 9.5. Parse such\n\
+  a field as a decimal string rather than assuming a number\n\
+\n\
+READING PARQUET (external(...), load_file, load_files, query_file)\n\
+- Columns stored with the physical NullType are unreadable — this is what a writer emits for an\n\
+  optional column that is entirely null in one partition. Hyper rejects the WHOLE file with 42804\n\
+  (\"a data type that cannot be read ... hinting at a corrupted file\"); the file is not corrupt,\n\
+  and selecting only the other columns does not help. A `schema` override cannot fix it either:\n\
+  the override becomes a cast in the projection, which the engine never evaluates. Re-type the\n\
+  column where the file is written (e.g. cast it to DOUBLE) and regenerate the file.\n\
+  inspect_file reports such a column as type NULL; the load/query tools fail fast and name it\n\
+\n\
 NOT AVAILABLE IN HYPER (Data 360 / Data Cloud-only features)\n\
 - AI functions: AI_CLASSIFY, AI_SENTIMENT, and other Data Cloud AI scalar functions\n\
 - Data Cloud federation / streaming-specific functions\n\

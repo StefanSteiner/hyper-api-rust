@@ -543,6 +543,87 @@ fn engine_negative_sub_unit_numeric_keeps_sign() {
     assert!((val("d") - (-0.5)).abs() < 1e-9, "got {}", val("d"));
 }
 
+/// NUMERIC values that survive an `f64` round-trip keep the compact JSON
+/// number shape that consumers already depend on.
+///
+/// The guard here is against over-correcting the precision fix below: a
+/// *textual* round-trip check would flag `9.50` as lossy (it stringifies as
+/// `"9.50"`, becomes `9.5` as an `f64`, and formats back as `"9.5"`), pushing
+/// ordinary two-decimal money values into JSON strings. `2^53` is the sharp
+/// case — 16 significant digits, but exactly representable, so a rule that
+/// merely counted digits would stringify it needlessly.
+#[test]
+fn engine_f64_exact_numerics_stay_json_numbers() {
+    let te = TestEngine::new_ephemeral();
+
+    let rows = te
+        .engine
+        .execute_query_to_json(
+            "SELECT \
+                 CAST('9.50' AS NUMERIC(8,2))              AS money, \
+                 CAST('0.1' AS NUMERIC(8,1))               AS tenth, \
+                 CAST('0' AS NUMERIC(10,2))                AS zero, \
+                 CAST('-2.25' AS NUMERIC(10,2))            AS negative, \
+                 CAST('999999999999999' AS NUMERIC(15,0))  AS fifteen_digits, \
+                 CAST('9007199254740992' AS NUMERIC(16,0)) AS two_pow_53",
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+
+    let num = |k: &str| {
+        row[k]
+            .as_f64()
+            .unwrap_or_else(|| panic!("{k} must stay a JSON number, got {:?}", row[k]))
+    };
+    assert!((num("money") - 9.5).abs() < 1e-9, "got {}", num("money"));
+    assert!((num("tenth") - 0.1).abs() < 1e-9, "got {}", num("tenth"));
+    assert!((num("zero")).abs() < 1e-9, "got {}", num("zero"));
+    assert!(
+        (num("negative") - (-2.25)).abs() < 1e-9,
+        "got {}",
+        num("negative")
+    );
+    assert!((num("fifteen_digits") - 999_999_999_999_999_f64).abs() < 1.0);
+    assert!((num("two_pow_53") - 9_007_199_254_740_992_f64).abs() < 1.0);
+}
+
+/// NUMERIC values that an `f64` cannot represent must arrive as the exact
+/// decimal text rather than a silently rounded JSON number.
+///
+/// `CAST('99999999999999999.99' AS NUMERIC(19,2))` was emitted as `1e17`:
+/// `Numeric::to_string()` is exact, but the `parse::<f64>()` that followed
+/// discarded the low digits, and the string fallback never fired because
+/// `1e17` is a perfectly finite `f64`. `2^53 + 1` is the adjacent-value
+/// proof that the rule tracks representability rather than digit count —
+/// it differs from `two_pow_53` above by one, and only it is a string.
+#[test]
+fn engine_f64_lossy_numerics_render_as_exact_strings() {
+    let te = TestEngine::new_ephemeral();
+
+    let rows = te
+        .engine
+        .execute_query_to_json(
+            "SELECT \
+                 CAST('99999999999999999.99' AS NUMERIC(19,2))  AS big, \
+                 CAST('-99999999999999999.99' AS NUMERIC(19,2)) AS big_negative, \
+                 CAST('9007199254740993' AS NUMERIC(16,0))      AS two_pow_53_plus_1",
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+
+    assert_eq!(row["big"], serde_json::json!("99999999999999999.99"));
+    assert_eq!(
+        row["big_negative"],
+        serde_json::json!("-99999999999999999.99")
+    );
+    assert_eq!(
+        row["two_pow_53_plus_1"],
+        serde_json::json!("9007199254740993")
+    );
+}
+
 /// `resolve_log_dir` helper: persistent mode uses the workspace's parent,
 /// ephemeral mode uses the per-PID temp dir.
 #[test]

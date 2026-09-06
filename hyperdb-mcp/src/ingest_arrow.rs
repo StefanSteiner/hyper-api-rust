@@ -25,7 +25,10 @@
 //! cheap (footer-only metadata read) and lets us report the schema in
 //! [`IngestResult`] and apply user-supplied schema overrides by wrapping
 //! each overridden column in an explicit `::TYPE` cast inside the SELECT
-//! projection.
+//! projection. It is also where we reject the one column shape hyperd
+//! cannot read at all — a physical `NullType` column — rather than relaying
+//! the engine's "possibly corrupted file" 42804. See
+//! `reject_null_type_columns`.
 //!
 //! # Arrow IPC path: binary COPY via `ArrowInserter`
 //!
@@ -55,8 +58,16 @@ use std::path::Path;
 /// Unsigned integers are promoted to the next wider signed type (e.g.
 /// `UInt32` → `BIGINT`) because Hyper has no unsigned integer types.
 /// Unrecognized types fall back to `TEXT`.
+///
+/// [`DataType::Null`] is the one type that maps to something Hyper cannot
+/// create: the literal `"NULL"`, which [`crate::schema::map_hyper_type`]
+/// deliberately does not resolve. It used to fall through to `TEXT`, which
+/// made `inspect_file` advertise a readable `TEXT` column on a file hyperd
+/// rejects outright — and invited a `schema` override that cannot help. See
+/// `reject_null_type_columns`.
 fn arrow_type_to_hyper(dt: &DataType) -> String {
     match dt {
+        DataType::Null => "NULL".into(),
         DataType::Boolean => "BOOL".into(),
         DataType::Int8 | DataType::Int16 => "SMALLINT".into(),
         DataType::Int32 | DataType::UInt16 => "INT".into(),
@@ -90,6 +101,55 @@ pub fn arrow_schema_to_columns(schema: &ArrowSchema) -> Vec<ColumnSchema> {
             nullable: f.is_nullable(),
         })
         .collect()
+}
+
+/// Reject an exact-tier file that carries a physically `NullType` column,
+/// naming the offenders, before any SQL is issued.
+///
+/// hyperd cannot decode a `NullType` column and rejects the **whole file**
+/// with SQLSTATE 42804 ("a data type that cannot be read by Hyper ...
+/// hinting at a corrupted file"). That error is doubly unhelpful: it points
+/// at file corruption when the file is fine, and it arrives no matter what
+/// the caller does. Verified against the pinned engine:
+///
+/// * Selecting only the *other* columns still fails with 42804 — the reader
+///   rejects the file before it evaluates a projection.
+/// * A `schema` override does not rescue it either. The override is applied
+///   (it becomes a `::TYPE` cast in the projection, see
+///   `parquet_select_projection`), but the engine never gets far enough to
+///   run the cast.
+///
+/// Since nothing the caller can pass fixes the file, the only real remedy is
+/// upstream: give the column a concrete type in whatever wrote it. Files
+/// like this are common in the wild — an optional column that happens to be
+/// entirely null in one partition gets written as `NullType`.
+fn reject_null_type_columns(schema: &ArrowSchema, file_kind: &str) -> Result<(), McpError> {
+    let offenders: Vec<&str> = schema
+        .fields()
+        .iter()
+        .filter(|f| f.data_type() == &DataType::Null)
+        .map(|f| f.name().as_str())
+        .collect();
+    if offenders.is_empty() {
+        return Ok(());
+    }
+    Err(McpError::new(
+        ErrorCode::UnsupportedFormat,
+        format!(
+            "{file_kind} file has column(s) stored with the physical NullType: \
+             {offenders:?}. Hyper cannot read a NullType column and rejects the \
+             entire file (SQLSTATE 42804), even when you select only the other \
+             columns. A `schema` override cannot fix this — the override becomes \
+             a cast in the projection, which the engine never evaluates. Re-type \
+             the column where the file is written (e.g. cast it to DOUBLE) and \
+             regenerate the file."
+        ),
+    )
+    .with_suggestion(
+        "Re-type the all-null column(s) at the writer — e.g. cast to DOUBLE in the \
+         job that produced this file — then retry. Neither a `schema` override nor \
+         selecting a subset of columns works around it.",
+    ))
 }
 
 /// Serialize a slice of Arrow `RecordBatch`es to a single Arrow IPC Stream
@@ -134,6 +194,12 @@ fn record_batches_to_ipc_stream(batches: &[RecordBatch]) -> Result<Vec<u8>, McpE
 /// reporting the schema back to the caller and resolving schema overrides
 /// against real column names. It's cheap — the parquet crate only loads
 /// footer metadata, not row groups.
+///
+/// The footer is also where we catch physically `NullType` columns, which
+/// hyperd cannot read — see `reject_null_type_columns`. Failing here means
+/// every ingest path that goes through this function (`load_file`,
+/// `load_files`, `query_file`, the directory watcher) stops before issuing
+/// SQL instead of relaying the engine's misleading 42804.
 fn infer_parquet_schema(path: &str) -> Result<Vec<ColumnSchema>, McpError> {
     let file = std::fs::File::open(path)
         .map_err(|e| McpError::new(ErrorCode::FileNotFound, format!("Cannot open file: {e}")))?;
@@ -145,6 +211,7 @@ fn infer_parquet_schema(path: &str) -> Result<Vec<ColumnSchema>, McpError> {
             )
         })?;
     let arrow_schema = reader.schema();
+    reject_null_type_columns(arrow_schema, "Parquet")?;
     Ok(arrow_schema_to_columns(arrow_schema))
 }
 
@@ -276,8 +343,9 @@ async fn count_rows_async(conn: &AsyncConnection, table: &str) -> Result<u64, Mc
 ///
 /// - Propagates errors from `resolve_parquet_path` when `path` is
 ///   missing or not canonicalizable.
-/// - Propagates errors from `infer_parquet_schema` (malformed footer)
-///   or [`crate::schema::apply_schema_override`].
+/// - Propagates errors from `infer_parquet_schema` (malformed footer, or a
+///   physically `NullType` column hyperd cannot read — see
+///   `reject_null_type_columns`) or [`crate::schema::apply_schema_override`].
 /// - Propagates any transaction error from the `CREATE TABLE AS
 ///   SELECT` / `INSERT INTO ... SELECT` statement against hyperd.
 /// - Propagates any error from the post-ingest `COUNT(*)` in
@@ -530,7 +598,9 @@ fn read_arrow_ipc_file(path: &str) -> Result<(Vec<ColumnSchema>, Vec<RecordBatch
                 format!("Invalid Arrow IPC file: {e}"),
             )
         })?;
-        let inferred = arrow_schema_to_columns(&reader.schema());
+        let arrow_schema = reader.schema();
+        reject_null_type_columns(&arrow_schema, "Arrow IPC")?;
+        let inferred = arrow_schema_to_columns(&arrow_schema);
         let batches: Vec<RecordBatch> = reader.collect::<Result<Vec<_>, _>>().map_err(|e| {
             McpError::new(
                 ErrorCode::InternalError,
@@ -545,7 +615,9 @@ fn read_arrow_ipc_file(path: &str) -> Result<(Vec<ColumnSchema>, Vec<RecordBatch
                 format!("Invalid Arrow IPC stream: {e}"),
             )
         })?;
-        let inferred = arrow_schema_to_columns(&reader.schema());
+        let arrow_schema = reader.schema();
+        reject_null_type_columns(&arrow_schema, "Arrow IPC")?;
+        let inferred = arrow_schema_to_columns(&arrow_schema);
         let batches: Vec<RecordBatch> = reader.collect::<Result<Vec<_>, _>>().map_err(|e| {
             McpError::new(
                 ErrorCode::InternalError,
@@ -572,9 +644,11 @@ fn read_arrow_ipc_file(path: &str) -> Result<(Vec<ColumnSchema>, Vec<RecordBatch
 /// - Propagates [`ErrorCode::InvalidArgument`] from
 ///   `reject_ipc_schema_override` when `opts.schema_override` is set.
 /// - Returns [`ErrorCode::FileNotFound`] if `path` does not exist.
-/// - Returns [`ErrorCode::UnsupportedFormat`] or
-///   [`ErrorCode::InternalError`] when the file cannot be parsed as an
-///   Arrow IPC file or stream (see `read_arrow_ipc_file`).
+/// - Returns [`ErrorCode::UnsupportedFormat`] when the file cannot be
+///   parsed as an Arrow IPC file or stream, or carries a physically
+///   `NullType` column hyperd cannot read (see `read_arrow_ipc_file` and
+///   `reject_null_type_columns`), and [`ErrorCode::InternalError`] when a
+///   batch fails to decode.
 /// - Propagates transaction errors from [`Engine::create_table`] and
 ///   from [`hyperdb_api::ArrowInserter`] operations (COPY setup, batch
 ///   insert, or execute).
@@ -661,7 +735,9 @@ pub fn ingest_arrow_ipc_file(
 /// - Returns [`ErrorCode::InternalError`] if the spawn-blocking Arrow
 ///   decode task panics (join error).
 /// - Propagates Arrow decode errors from `read_arrow_ipc_file` /
-///   `record_batches_to_ipc_stream`.
+///   `record_batches_to_ipc_stream`, including the
+///   [`ErrorCode::UnsupportedFormat`] rejection of a physically `NullType`
+///   column (see `reject_null_type_columns`).
 /// - Propagates transaction errors from the async `CREATE TABLE` and
 ///   from [`hyperdb_api::AsyncArrowInserter`] operations.
 pub async fn ingest_arrow_ipc_file_async(
@@ -751,4 +827,124 @@ pub async fn ingest_arrow_ipc_file_async(
         schema: columns,
         stats,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::{ArrayRef, Int32Array, NullArray};
+    use arrow::datatypes::{Field, Schema};
+    use std::sync::Arc;
+
+    /// Write a one-batch Parquet file from `(name, nullable, array)` triples
+    /// into `dir` and return its path.
+    fn write_parquet(dir: &tempfile::TempDir, cols: Vec<(&str, bool, ArrayRef)>) -> String {
+        let schema = Arc::new(Schema::new(
+            cols.iter()
+                .map(|(name, nullable, array)| {
+                    Field::new(*name, array.data_type().clone(), *nullable)
+                })
+                .collect::<Vec<_>>(),
+        ));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            cols.into_iter().map(|(_, _, array)| array).collect(),
+        )
+        .expect("build record batch");
+        let path = dir.path().join("t.parquet");
+        let file = std::fs::File::create(&path).expect("create parquet");
+        let mut writer =
+            parquet::arrow::ArrowWriter::try_new(file, schema, None).expect("open writer");
+        writer.write(&batch).expect("write batch");
+        writer.close().expect("close writer");
+        path.to_string_lossy().into_owned()
+    }
+
+    /// A physical `NullType` column must be reported as `NULL`, not `TEXT`.
+    /// `TEXT` was a lie: it promised a readable column on a file hyperd
+    /// refuses outright, and `inspect_file`'s output is documented as safe to
+    /// feed back as a `schema` override.
+    #[test]
+    fn null_arrow_type_maps_to_null_not_text() {
+        assert_eq!(arrow_type_to_hyper(&DataType::Null), "NULL");
+
+        let schema = Schema::new(vec![
+            Field::new("a", DataType::Int32, false),
+            Field::new("congestion_surcharge", DataType::Null, true),
+        ]);
+        let columns = arrow_schema_to_columns(&schema);
+        assert_eq!(columns[0].hyper_type, "INT");
+        assert_eq!(columns[1].hyper_type, "NULL");
+    }
+
+    /// The reported `NULL` must stay unresolvable by
+    /// [`crate::schema::map_hyper_type`]. If it ever gained a mapping,
+    /// `build_table_def` would create a column for a type the engine cannot
+    /// read, and copying `inspect_file`'s output into a `schema` override
+    /// would look like it worked.
+    #[test]
+    fn null_is_not_a_resolvable_override_type() {
+        assert!(crate::schema::map_hyper_type("NULL").is_none());
+    }
+
+    /// Footer inspection must reject a physically `NullType` Parquet column,
+    /// naming it, before any SQL is built.
+    #[test]
+    fn parquet_footer_rejects_physical_null_type_column() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_parquet(
+            &dir,
+            vec![
+                ("a", false, Arc::new(Int32Array::from(vec![1, 2, 3]))),
+                ("congestion_surcharge", true, Arc::new(NullArray::new(3))),
+            ],
+        );
+
+        let err = infer_parquet_schema(&path).expect_err("NullType column must be rejected");
+        assert_eq!(err.code, ErrorCode::UnsupportedFormat);
+        assert!(
+            err.message.contains("congestion_surcharge"),
+            "must name the offending column: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("NullType"),
+            "must name the physical type: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("`schema` override cannot fix"),
+            "must say an override cannot rescue the file: {}",
+            err.message
+        );
+        let suggestion = err.suggestion.expect("suggestion");
+        assert!(
+            suggestion.contains("writer") && suggestion.contains("DOUBLE"),
+            "must point at re-typing upstream: {suggestion}"
+        );
+    }
+
+    /// The rejection must not fire on ordinary columns — including a
+    /// genuinely nullable one that happens to hold only nulls, which is a
+    /// normal typed column and reads fine.
+    #[test]
+    fn parquet_footer_accepts_typed_columns_holding_nulls() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_parquet(
+            &dir,
+            vec![
+                ("a", false, Arc::new(Int32Array::from(vec![1, 2, 3]))),
+                (
+                    "b",
+                    true,
+                    Arc::new(Int32Array::from(vec![None, None, None])),
+                ),
+            ],
+        );
+
+        let columns = infer_parquet_schema(&path).expect("typed columns must be accepted");
+        assert_eq!(columns.len(), 2);
+        assert_eq!(columns[1].hyper_type, "INT");
+        assert!(columns[1].nullable);
+    }
 }
