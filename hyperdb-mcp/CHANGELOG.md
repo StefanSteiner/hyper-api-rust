@@ -397,6 +397,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   unenriched STATUS"), which is what actually happened — the peer sent no
   response to be malformed. Fixes 3 of the 5 items in
   [issue #275](https://github.com/tableau/hyper-api-rust/issues/275).
+- **After restarting `hyperd`, the daemon advertised the new endpoint over the
+  health port before writing it to the discovery file.** `try_restart_hyperd`
+  copied the endpoint into the in-memory `DaemonInfo` that `STATUS` serves and
+  released that lock *before* rewriting `daemon.json`. Since
+  `discovery::discover()` — the path every client's `Engine::new` takes —
+  reads the file, a client discovering inside that window connected to the
+  `hyperd` the daemon had just dropped. The write failing was worse than the
+  window: the error return happened with the new endpoint already published to
+  `STATUS` and the replacement `HyperProcess` dropped on the way out, leaving
+  `STATUS` durably naming a `hyperd` the daemon itself had killed. The
+  discovery file is now persisted first and the `DaemonInfo` flipped second,
+  both under one lock, so observing the new endpoint through either channel
+  implies a live `hyperd` behind it and no `STATUS` reader can see an endpoint
+  the file has not committed. Fixes
+  [issue #284](https://github.com/tableau/hyper-api-rust/issues/284).
 
 ## [0.5.0] - 2026-06-07
 
