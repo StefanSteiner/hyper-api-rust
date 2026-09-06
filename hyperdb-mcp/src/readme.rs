@@ -326,6 +326,13 @@ differences from standard PostgreSQL:
 - **`expr::TEXT` is the numeric-formatting idiom** and preserves scale:
   `CAST(9.5 AS NUMERIC(8,2))::TEXT` → `9.50`. Reach for this instead of
   `to_char` on a number, and whenever you need exact decimal output.
+- **A NUMERIC too large for an `f64` comes back as a JSON string**, not a
+  number, so no precision is lost in the result: `99999999999999999.99`
+  arrives as `\"99999999999999999.99\"`. Values that fit an `f64` — which
+  includes anything with 15 or fewer significant digits — stay JSON
+  numbers, so `9.50` arrives as `9.5`. Parse such a field as a decimal
+  string rather than assuming a number, and note it may already be exact
+  text if you applied `::TEXT` above.
 - **`APPROX_COUNT_DISTINCT(expr)`** — approximate cardinality, 5-100x
   faster than `COUNT(DISTINCT ...)` at high cardinality, on TEXT as well
   as numeric keys. It accelerates the distinct step only, so a per-row

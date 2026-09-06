@@ -4849,6 +4849,10 @@ FORMATTING\n\
 - expr::TEXT is the numeric-formatting idiom and preserves scale:\n\
   CAST(9.5 AS NUMERIC(8,2))::TEXT -> '9.50'. Use it instead of to_char() on a number, and\n\
   whenever you need exact decimal output\n\
+- a NUMERIC too large for an f64 is returned as a JSON string so no precision is lost:\n\
+  99999999999999999.99 arrives as \"99999999999999999.99\". Values that fit an f64 (anything\n\
+  with 15 or fewer significant digits) stay JSON numbers, so 9.50 arrives as 9.5. Parse such\n\
+  a field as a decimal string rather than assuming a number\n\
 \n\
 READING PARQUET (external(...), load_file, load_files, query_file)\n\
 - Columns stored with the physical NullType are unreadable — this is what a writer emits for an\n\

@@ -152,6 +152,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   deliberately does not resolve, so an override copied from that report is
   rejected rather than silently becoming `TEXT`. Part of
   [issue #165](https://github.com/tableau/hyper-api-rust/issues/165).
+- **Behavior change for consumers parsing NUMERIC query results.** A NUMERIC
+  value that an `f64` cannot represent is now emitted as its exact decimal
+  **string** rather than a silently rounded JSON number, so a field that
+  previously always arrived as a number can now arrive as a string. Values an
+  `f64` *can* represent are unaffected and keep their JSON-number shape —
+  including two-decimal money values such as `9.50` → `9.5`, and every value
+  of 15 significant digits or fewer — so only results that were already wrong
+  change shape. `CAST('99999999999999999.99' AS NUMERIC(19,2))` was emitted as
+  `1e17`: `Numeric::to_string()` is exact, but the `parse::<f64>()` that
+  followed discarded the low digits, and the exact-string fallback never fired
+  because `1e17` is a perfectly finite `f64`. Loss is now detected by
+  round-tripping the `f64` back to a decimal at the value's own scale and
+  comparing `Numeric` values, which is deliberately *not* a textual
+  comparison: `9.50` stringifies as `"9.50"` but formats back from `f64` as
+  `"9.5"`, so a string rule would have pushed ordinary money values into
+  strings. Round-tripping is also exactly as tight as `f64` really is, rather
+  than approximating it with a significant-digit count — `2^53`
+  (`9007199254740992`, 16 digits) is exactly representable and stays a number,
+  while its neighbour `9007199254740993` was previously returned as
+  `9007199254740992` with nothing in the output to suggest a rounding had
+  occurred, and is now the exact string. Chart rendering is unchanged; it
+  already carried an `f64` coordinate and exact display text side by side.
+  Part of [issue #165](https://github.com/tableau/hyper-api-rust/issues/165).
 - Public documentation on `PersistentAttachOutcome`, `ensure_exists_in`,
   `list_in`, `upsert_stub_in`, `set_metadata_in` and `reconcile_in` no longer
   links to private items, which made `cargo doc` fail under

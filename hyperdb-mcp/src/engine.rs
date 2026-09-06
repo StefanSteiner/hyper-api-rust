@@ -1697,19 +1697,19 @@ fn row_value_to_json(row: &hyperdb_api::Row, idx: usize, sql_type: &SqlType) -> 
         // handled inside `hyperdb-api`; this function only needs to pick
         // the JSON shape.
         //
-        // `Numeric::to_string()` uses the decoded scale. Ordinary query
-        // results retain their established compact JSON shape: any value
-        // parseable as a finite `f64` becomes a JSON number, even when that
-        // conversion rounds, while values outside that domain remain exact
-        // strings. The chart-only materializer below retains the exact text
-        // separately for display labels.
+        // `Numeric::to_string()` uses the decoded scale and is exact.
+        // Ordinary query results retain their established compact JSON
+        // shape, but only while that shape is *faithful*: a value is
+        // emitted as a JSON number when it survives an `f64` round-trip
+        // (see `numeric_as_lossless_f64`) and as its exact decimal text
+        // when it does not. The chart-only materializer below is a
+        // separate concern — it always needs both an `f64` coordinate and
+        // exact display text, so it keeps the two in adjacent fields
+        // rather than choosing between them.
         return row.get::<Numeric>(idx).map_or(Value::Null, |n| {
-            let s = n.to_string();
-            s.parse::<f64>()
-                .ok()
+            numeric_as_lossless_f64(&n)
                 .and_then(serde_json::Number::from_f64)
-                .map(Value::Number)
-                .unwrap_or(Value::String(s))
+                .map_or_else(|| Value::String(n.to_string()), Value::Number)
         });
     }
     if oid_val == oids::DATE.0 {
@@ -1736,6 +1736,51 @@ fn row_value_to_json(row: &hyperdb_api::Row, idx: usize, sql_type: &SqlType) -> 
     // — add explicit branches above when those start appearing in
     // real queries.
     row.get::<String>(idx).map_or(Value::Null, Value::String)
+}
+
+/// The `f64` for `value`, but only when that `f64` still *is* `value`.
+///
+/// Returns `Some(f64)` when converting to `f64` and back to a decimal at
+/// `value`'s own scale reproduces `value` exactly, and `None` when the
+/// conversion loses information. Callers use `None` as the signal to emit
+/// the exact decimal text instead of a rounded JSON number.
+///
+/// # Why the comparison is numeric rather than textual
+///
+/// The tempting check — format the `f64` back to a string and compare it to
+/// `Numeric::to_string()` — is wrong here. `NUMERIC(8,2)` holding `9.50`
+/// stringifies as `"9.50"` (`Display` zero-pads to full scale), becomes
+/// `9.5` as an `f64`, and formats back as `"9.5"`: a string comparison
+/// reports loss where none occurred, and every ordinary two-decimal money
+/// value would turn into a JSON string. Comparing `Numeric` values instead
+/// sidesteps that, along with the `{}`-on-`f64` exponent notation (`1e17`)
+/// that a textual rule would additionally have to unpack.
+///
+/// Round-tripping at the original scale — rather than counting significant
+/// digits — also keeps the rule exactly as tight as `f64` actually is.
+/// 15 digits always survive and 18 never do, but the interesting cases sit
+/// in between: `2^53` (16 digits) is exactly representable and stays a
+/// number, while its immediate neighbour `2^53 + 1` is not and becomes a
+/// string. A digit-count gate would have to stringify both.
+///
+/// The fallible `try_from_f64` is deliberate: `from_f64` *panics* when the
+/// value coming back exceeds `Numeric`'s 38-digit ceiling, and an unscaled
+/// value above that ceiling is constructible, since neither `Numeric::new`
+/// nor `Numeric::decode` validates precision against the wire bytes. Here
+/// that error is simply treated as loss — which it is — so a degenerate
+/// value falls back to exact text instead of panicking a query result.
+///
+/// NaN and infinity need no branch of their own: `Numeric` is an `i128`
+/// plus a `u8` scale, and `10^scale` for a `u8` tops out at `1e255`, so the
+/// division in `to_f64` is always finite. The caller keeps its
+/// `Number::from_f64` check anyway, as that is the API's contract.
+fn numeric_as_lossless_f64(value: &hyperdb_api::Numeric) -> Option<f64> {
+    use hyperdb_api::Numeric;
+
+    let candidate = value.to_f64();
+    // Same scale on the way back, so `Numeric`'s derived `PartialEq`
+    // (unscaled value + scale) is a true numeric comparison here.
+    (Numeric::try_from_f64(candidate, value.scale()).ok()? == *value).then_some(candidate)
 }
 
 fn chart_measure_value(
@@ -2450,6 +2495,111 @@ mod tests {
         assert!(
             lower.contains("possible") && (lower.contains("owner") || lower.contains("process")),
             "guidance must describe a possible owner without accusing one: {guidance}"
+        );
+    }
+
+    /// The scale-preserving round-trip must accept every decimal an `f64`
+    /// can carry, including the ones a textual comparison would reject.
+    /// `9.50` is the load-bearing case: `Display` pads it to `"9.50"` while
+    /// the `f64` formats back as `"9.5"`, so a string rule would call it
+    /// lossy and turn ordinary money values into JSON strings.
+    #[test]
+    fn lossless_numerics_keep_their_f64() {
+        use hyperdb_api::Numeric;
+
+        let exact = [
+            (Numeric::new(950, 2), 9.5, "9.50 despite Display padding"),
+            (Numeric::new(1, 1), 0.1, "0.1 is not dyadic but round-trips"),
+            (Numeric::new(0, 2), 0.0, "zero"),
+            (Numeric::new(-225, 2), -2.25, "negative sub-unit"),
+            (
+                Numeric::new(999_999_999_999_999, 0),
+                999_999_999_999_999.0,
+                "15 digits always fit",
+            ),
+            (
+                Numeric::new(9_007_199_254_740_992, 0),
+                9_007_199_254_740_992.0,
+                "2^53: 16 digits, still exact",
+            ),
+        ];
+
+        for (value, want, why) in exact {
+            let got = numeric_as_lossless_f64(&value)
+                .unwrap_or_else(|| panic!("{value} must stay a number ({why})"));
+            assert!(
+                (got - want).abs() < f64::EPSILON * want.abs().max(1.0),
+                "{value} round-tripped to {got}, want {want} ({why})"
+            );
+        }
+    }
+
+    /// Values an `f64` cannot carry must report loss so the caller emits
+    /// exact text. `2^53 + 1` sits one unit from the accepted `2^53` above,
+    /// which is what makes this a representability rule and not a
+    /// digit-count rule.
+    #[test]
+    fn lossy_numerics_report_no_usable_f64() {
+        use hyperdb_api::Numeric;
+
+        let lossy = [
+            (
+                Numeric::new(9_999_999_999_999_999_999, 2),
+                "99999999999999999.99 — the 1e17 defect",
+            ),
+            (
+                Numeric::new(-9_999_999_999_999_999_999, 2),
+                "the same magnitude, negative",
+            ),
+            (Numeric::new(9_007_199_254_740_993, 0), "2^53 + 1"),
+            (
+                Numeric::new(i128::from(i64::MAX), 0),
+                "i64::MAX is 19 digits",
+            ),
+        ];
+
+        for (value, why) in lossy {
+            assert!(
+                numeric_as_lossless_f64(&value).is_none(),
+                "{value} must be reported lossy ({why}), got {:?}",
+                numeric_as_lossless_f64(&value)
+            );
+        }
+    }
+
+    /// A value past `Numeric`'s 38-digit ceiling must degrade to exact text
+    /// rather than panic. `Numeric::new` and `Numeric::decode` don't
+    /// validate precision, so such a value is constructible from the wire,
+    /// and `from_f64` would panic converting it back — which in this path
+    /// would take down a query result rather than mis-format one cell.
+    ///
+    /// Also pins the two facts that let the helper skip a NaN/infinity
+    /// branch: `10^scale` stays finite across the whole `u8` range, so
+    /// `to_f64` on any `Numeric` is finite. The extreme scale is *not*
+    /// lossy — `1e-255` recovers an unscaled `1` exactly — which is worth
+    /// asserting so nobody "fixes" it into the lossy bucket.
+    #[test]
+    fn out_of_ceiling_value_reports_loss_rather_than_panicking() {
+        use hyperdb_api::Numeric;
+
+        let past_ceiling = Numeric::new(i128::MAX, 0);
+        assert!(
+            past_ceiling.to_f64().is_finite(),
+            "Numeric can never hold NaN or infinity"
+        );
+        assert!(
+            numeric_as_lossless_f64(&past_ceiling).is_none(),
+            "a value past the 38-digit ceiling must degrade to exact text, not panic"
+        );
+
+        let extreme_scale = Numeric::new(1, 255);
+        assert!(
+            extreme_scale.to_f64().is_finite(),
+            "10^255 is finite, so to_f64 stays finite at any u8 scale"
+        );
+        assert!(
+            numeric_as_lossless_f64(&extreme_scale).is_some(),
+            "1e-255 round-trips exactly; an extreme scale is not itself loss"
         );
     }
 }
