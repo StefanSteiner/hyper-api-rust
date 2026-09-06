@@ -287,7 +287,9 @@ async fn hyperd_monitor(
 }
 
 /// Attempt one restart of hyperd. Drops the old process, spawns a new one,
-/// updates `DaemonInfo`, and rewrites the discovery file.
+/// rewrites the discovery file, and only then updates the `DaemonInfo` that
+/// STATUS serves — see the publish-order comment in the body for why that
+/// sequence is load-bearing rather than incidental.
 ///
 /// Every call (success or spawn-failure) consumes one slot from the rate-limit
 /// window — a broken hyperd binary should not spin forever.
@@ -317,16 +319,37 @@ fn try_restart_hyperd(
         .ok_or_else(|| RestartError::SpawnFailed("hyperd did not report endpoint".into()))?
         .to_string();
 
-    // Publish the new endpoint to STATUS readers and to the discovery file.
-    // We snapshot the updated DaemonInfo while holding info_arc's lock, then
-    // write the file outside the lock to keep the critical section small.
-    let snapshot = {
+    // Publish the new endpoint, discovery file first and STATUS second.
+    //
+    // Two independent channels advertise the endpoint: the `daemon.json`
+    // discovery file that `discovery::discover()` reads — the path every
+    // client's `Engine::new` takes — and the in-memory `DaemonInfo` that the
+    // health port's STATUS command serves. Updating STATUS first and the file
+    // afterwards left a window in which STATUS announced the freshly spawned
+    // `hyperd` while the file still named the one we just dropped, so a client
+    // discovering during that window connected to a dead port. Persisting
+    // first inverts that: whichever channel an observer reads, seeing the new
+    // endpoint now implies a live `hyperd` behind it.
+    //
+    // Both steps happen under a single `info_arc` lock so the pair is atomic
+    // to STATUS readers — no reader can catch STATUS already advertising an
+    // endpoint the file has not committed yet. The critical section is one
+    // small serialize-and-rename, and the only contender is `status_json`,
+    // whose own critical section is a single clone.
+    // `write_enriched_discovery_file` never touches `info_arc`, so holding it
+    // here cannot deadlock.
+    //
+    // Failing the write before mutating `DaemonInfo` also matters: the `?`
+    // below drops `new_hyper` on the way out, and STATUS must not be left
+    // advertising the endpoint of a `hyperd` this function just killed.
+    {
         let mut info_guard = info_arc.lock().expect("DaemonInfo mutex poisoned");
+        let mut snapshot = info_guard.clone();
+        snapshot.hyperd_endpoint.clone_from(&new_endpoint);
+        discovery::write_enriched_discovery_file(&snapshot)
+            .map_err(|e| RestartError::SpawnFailed(format!("discovery write: {e}")))?;
         info_guard.hyperd_endpoint.clone_from(&new_endpoint);
-        info_guard.clone()
-    };
-    discovery::write_enriched_discovery_file(&snapshot)
-        .map_err(|e| RestartError::SpawnFailed(format!("discovery write: {e}")))?;
+    }
 
     guard.hyper = Some(new_hyper);
     Ok(new_endpoint)

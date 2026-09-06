@@ -1378,8 +1378,9 @@ fn hyperd_monitor_detects_killed_hyperd_and_restarts() {
 
     // Wait up to 12 seconds for the monitor to fire and restart hyperd.
     // (5s monitor tick + spawn time + slack.)
-    let new_endpoint = wait_for_endpoint_change_or_recovery(daemon.info.health_port, 12)
-        .expect("daemon should restart hyperd within 12s");
+    let new_endpoint =
+        wait_for_live_hyperd_after_kill(daemon.info.health_port, &daemon.info.hyperd_endpoint, 12)
+            .expect("daemon should restart hyperd within 12s");
 
     // The new endpoint must be reachable. Don't assert it differs from the old —
     // port reuse is permitted by the OS.
@@ -1411,8 +1412,9 @@ fn client_report_triggers_restart_after_kill() {
     let response = health::send_command(daemon.info.health_port, "REPORT_HYPERD_ERROR").unwrap();
     assert_eq!(response.trim(), "OK");
 
-    let new_endpoint = wait_for_endpoint_change_or_recovery(daemon.info.health_port, 12)
-        .expect("daemon should restart hyperd within 12s after report");
+    let new_endpoint =
+        wait_for_live_hyperd_after_kill(daemon.info.health_port, &daemon.info.hyperd_endpoint, 12)
+            .expect("daemon should restart hyperd within 12s after report");
 
     let probe = std::net::TcpStream::connect_timeout(
         &new_endpoint.parse().expect("valid endpoint"),
@@ -1462,8 +1464,10 @@ fn engine_recovers_after_hyperd_killed() {
         find_hyperd_pid_for_endpoint(&daemon.info.hyperd_endpoint).expect("should find hyperd pid");
     kill_pid(pid);
 
-    // Wait for daemon-side restart (discovery file gets a new endpoint).
-    wait_for_endpoint_change_or_recovery(daemon.info.health_port, 12)
+    // Wait for daemon-side restart. The daemon persists `daemon.json` before
+    // it flips what STATUS serves, so a live endpoint from STATUS means the
+    // discovery file `Engine::new` reads below is already committed.
+    wait_for_live_hyperd_after_kill(daemon.info.health_port, &daemon.info.hyperd_endpoint, 12)
         .expect("daemon should restart hyperd within 12s");
 
     // Engine #2: post-restart. This mirrors what `with_engine` does after a
@@ -1858,12 +1862,48 @@ fn kill_pid(pid: u32) {
     assert!(status.success(), "kill -9 {pid} failed");
 }
 
-/// Poll the daemon's `STATUS` endpoint until the reported `hyperd_endpoint` is
-/// reachable (i.e. a fresh hyperd has been spawned after a kill). Returns the
-/// endpoint string, or `None` if the timeout expires.
+/// Wait for the daemon to advertise a *live* hyperd after the process serving
+/// `killed_endpoint` was killed, and return the endpoint it settled on, or
+/// `None` if the timeout expires.
+///
+/// Asking only "is the endpoint STATUS reports connectable?" is not enough,
+/// and was the cause of a ~20%-per-run failure on this file's restart tests.
+/// For a few milliseconds after `SIGKILL` the doomed hyperd's listening socket
+/// still completes inbound connections, so a single-phase gate polled
+/// immediately after the kill returns on its first attempt — carrying the
+/// *pre-kill* endpoint, because the daemon's 5s monitor tick has not fired and
+/// STATUS still advertises the old process. The caller then raced the kernel
+/// tearing that socket down and failed with `Connection refused` a few
+/// milliseconds later.
+///
+/// So gate on the old hyperd being observably gone first, then on the
+/// advertised endpoint being connectable. That ordering is also why this
+/// cannot simply require the endpoint to *change*: the OS is free to hand the
+/// replacement the same port, and a changed-endpoint gate would then wait out
+/// its whole timeout on a perfectly healthy restart.
 #[cfg(unix)]
-fn wait_for_endpoint_change_or_recovery(health_port: u16, timeout_secs: u64) -> Option<String> {
+fn wait_for_live_hyperd_after_kill(
+    health_port: u16,
+    killed_endpoint: &str,
+    timeout_secs: u64,
+) -> Option<String> {
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+
+    // Phase 1: the killed hyperd must stop accepting connections. Until it
+    // does, any endpoint we observe could still be its soon-to-close socket.
+    let killed_addr = killed_endpoint.parse::<std::net::SocketAddr>().ok()?;
+    loop {
+        if Instant::now() >= deadline {
+            return None;
+        }
+        if std::net::TcpStream::connect_timeout(&killed_addr, Duration::from_millis(500)).is_err() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    // Phase 2: whatever STATUS advertises now must be reachable. With the old
+    // socket proven down, a successful connect means a live replacement.
     while Instant::now() < deadline {
         if let Ok(response) = health::send_command(health_port, "STATUS")
             && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(response.trim())

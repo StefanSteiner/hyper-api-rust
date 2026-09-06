@@ -79,6 +79,32 @@ impl DaemonBuildIdentity {
     }
 }
 
+/// Bytes carried alongside a [`RawDiscoveryRead`] classification so a caller
+/// willing to try a looser shape can re-parse them without a second `read`.
+///
+/// `Debug` deliberately renders only the length. `RawDiscoveryRead` is
+/// `Debug`-formatted into diagnostics, and a discovery file this process could
+/// not parse may contain anything at all — a `Vec<u8>`'s derived `Debug` would
+/// echo every one of those bytes into a doctor report or log line, just as a
+/// decimal list rather than as text.
+pub(crate) struct DiscoveryBytes(Vec<u8>);
+
+impl DiscoveryBytes {
+    pub(crate) fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for DiscoveryBytes {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "<{} bytes>", self.0.len())
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum RawDiscoveryRead {
     Missing {
@@ -90,6 +116,23 @@ pub(crate) enum RawDiscoveryRead {
     },
     Malformed {
         path: crate::diagnostics::ReportedPath,
+        /// The bytes that failed to parse, carried so a caller willing to try
+        /// a looser shape (see [`discover`]) can do so without a second
+        /// `read` — which would cost redundant I/O and let a rewrite land
+        /// between the two parses.
+        contents: DiscoveryBytes,
+    },
+    /// The file exceeded [`MAX_DISCOVERY_FILE_BYTES`] before JSON parsing was
+    /// even attempted. Distinct from [`Self::Malformed`]: the content may be
+    /// perfectly well-formed JSON — it's merely larger than any legitimate
+    /// discovery record should be — so callers (the doctor) should report
+    /// what actually happened instead of sending the user to fix "invalid
+    /// JSON" that isn't.
+    Oversized {
+        path: crate::diagnostics::ReportedPath,
+        /// The bytes read before the cap was hit, carried for the same reason
+        /// as [`Self::Malformed`]'s.
+        contents: DiscoveryBytes,
     },
     Parsed {
         path: crate::diagnostics::ReportedPath,
@@ -139,14 +182,18 @@ pub(crate) fn read_discovery_file_raw(path: &Path) -> RawDiscoveryRead {
         };
     }
     if contents.len() > MAX_DISCOVERY_FILE_BYTES {
-        return RawDiscoveryRead::Malformed {
+        return RawDiscoveryRead::Oversized {
             path: reported_path,
+            contents: DiscoveryBytes::new(contents),
         };
     }
 
-    parse_discovery_contents(reported_path, &contents)
+    parse_discovery_contents(reported_path, contents)
 }
 
+/// Read the discovery file the way the client fast path does: follow
+/// symlinks and accept any valid record size (unlike the doctor's bounded,
+/// no-follow [`read_discovery_file_raw`]).
 fn read_discovery_file_legacy(path: &Path) -> RawDiscoveryRead {
     let reported_path = crate::diagnostics::ReportedPath::from_os_str(path.as_os_str());
     let contents = match std::fs::read(path) {
@@ -163,20 +210,21 @@ fn read_discovery_file_legacy(path: &Path) -> RawDiscoveryRead {
             };
         }
     };
-    parse_discovery_contents(reported_path, &contents)
+    parse_discovery_contents(reported_path, contents)
 }
 
 fn parse_discovery_contents(
     reported_path: crate::diagnostics::ReportedPath,
-    contents: &[u8],
+    contents: Vec<u8>,
 ) -> RawDiscoveryRead {
-    match serde_json::from_slice(contents) {
+    match serde_json::from_slice(&contents) {
         Ok(record) => RawDiscoveryRead::Parsed {
             path: reported_path,
             record,
         },
         Err(_) => RawDiscoveryRead::Malformed {
             path: reported_path,
+            contents: DiscoveryBytes::new(contents),
         },
     }
 }
@@ -254,8 +302,14 @@ fn write_discovery_record(record: &(impl Serialize + ?Sized)) -> io::Result<()> 
     let tmp_path = dir.join("daemon.json.tmp");
     let json = serde_json::to_string_pretty(record).map_err(|e| io::Error::other(e.to_string()))?;
     std::fs::write(&tmp_path, json.as_bytes())?;
-    // On Windows, rename fails if target exists. Remove stale target first.
-    let _ = std::fs::remove_file(&path);
+    // `std::fs::rename` already replaces an existing target atomically on
+    // both Unix (`rename(2)`) and Windows (`MoveFileExW` with
+    // `MOVEFILE_REPLACE_EXISTING`, falling back to `SetFileInformationByHandle`
+    // with `FILE_RENAME_FLAG_REPLACE_IF_EXISTS`). Pre-deleting the target here
+    // would reintroduce exactly the window this function's doc comment
+    // promises not to have: a concurrent `discover()` could observe the file
+    // as `Missing` mid-restart (see `try_restart_hyperd`, which rewrites this
+    // file on every `hyperd` restart).
     std::fs::rename(&tmp_path, &path)?;
     Ok(())
 }
@@ -263,12 +317,25 @@ fn write_discovery_record(record: &(impl Serialize + ?Sized)) -> io::Result<()> 
 /// Read the discovery file and validate that the daemon is still alive.
 /// Returns `None` if no daemon is running (file missing, stale, or unreachable).
 pub fn discover() -> Option<DaemonInfo> {
-    let path = discovery_file_path().ok()?;
+    let discovery_path = discovery_file_path().ok()?;
     // Preserve the historical client-discovery contract: normal discovery
     // follows symlinks and accepts any valid record size. Doctor uses the
     // separate bounded, no-follow raw reader above because it must never
     // mutate or block on a special file.
-    let record = match read_discovery_file_legacy(&path) {
+    //
+    // The `RawDiscoveryRead` classification below chooses a debug-log message
+    // and short-circuits a missing/unreadable file. It must never gate whether
+    // a *live* daemon is discovered: an unrecognized, reshaped, or absent
+    // `identity` block is forward-compatible noise to this fast path — see
+    // docs/superpowers/specs/2026-08-13-hyperdb-mcp-agent-ux-design.md
+    // ("Unknown fields remain forward compatible"). So when the strict
+    // `DaemonRecord` parse fails, we don't give up: we re-parse the bytes the
+    // classification already carries as a tolerant `DaemonInfo`, which ignores
+    // unknown fields and never fails on a nested object (like `identity`) that
+    // this fast path doesn't need. (The doctor's raw reader keeps the strict
+    // `DaemonRecord` contract because it deliberately wants to know about a
+    // malformed `identity` block.)
+    let (info, from_fallback) = match read_discovery_file_legacy(&discovery_path) {
         RawDiscoveryRead::Missing { path } => {
             tracing::debug!(encoding = ?path.encoding, "daemon discovery file is missing");
             return None;
@@ -277,25 +344,50 @@ pub fn discover() -> Option<DaemonInfo> {
             tracing::debug!(?kind, encoding = ?path.encoding, "daemon discovery file is unreadable");
             return None;
         }
-        RawDiscoveryRead::Malformed { path } => {
-            tracing::debug!(encoding = ?path.encoding, "daemon discovery file is malformed");
-            return None;
+        // `read_discovery_file_legacy` applies no size cap, so it does not
+        // produce `Oversized` today. Folding it in with `Malformed` keeps that
+        // from mattering: were this reader ever given a cap, a large-but-valid
+        // record would take the tolerant fallback rather than silently
+        // becoming an undiscoverable daemon — the exact defect this fallback
+        // exists to prevent.
+        RawDiscoveryRead::Oversized { path, contents }
+        | RawDiscoveryRead::Malformed { path, contents } => {
+            let Ok(info) = serde_json::from_slice::<DaemonInfo>(contents.as_slice()) else {
+                tracing::debug!(encoding = ?path.encoding, "daemon discovery file is malformed");
+                return None;
+            };
+            tracing::debug!(encoding = ?path.encoding, "daemon discovery file failed the strict parse; accepted as legacy DaemonInfo");
+            (info, true)
         }
         RawDiscoveryRead::Parsed { path, record } => {
-            tracing::debug!(encoding = ?path.encoding, "daemon discovery file parsed");
-            record
+            tracing::debug!(encoding = ?path.encoding, "daemon discovery file parsed (enriched)");
+            (record.info().clone(), false)
         }
     };
-    let info = record.info().clone();
 
     // Validate liveness by connecting to the health port
     if is_daemon_alive(info.health_port) {
-        Some(info)
-    } else {
-        // Stale file — daemon crashed. Clean up.
-        let _ = std::fs::remove_file(&path);
-        None
+        return Some(info);
     }
+
+    if from_fallback {
+        // Never stale-clean a record we could not strictly parse. This branch
+        // exists precisely because a *newer* daemon may write a record this
+        // client cannot fully understand, and a single failed 300 ms PING is
+        // not grounds for destroying it: the daemon rewrites `daemon.json`
+        // only on `hyperd` restart, so deleting here would hide a live newer
+        // daemon from every client, not just this one. Leaving it also keeps
+        // the promise doctor already makes to operators about a record it
+        // could not parse ("it was left unchanged").
+        tracing::debug!(
+            "leaving the leniently parsed discovery record in place after a failed health check"
+        );
+        return None;
+    }
+
+    // Stale file — daemon crashed. Clean up.
+    let _ = std::fs::remove_file(&discovery_path);
+    None
 }
 
 /// Remove the discovery file (called during graceful shutdown).
@@ -464,7 +556,7 @@ mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::{Arc, Mutex};
 
-    use serde_json::json;
+    use serde_json::{Value, json};
     use tempfile::TempDir;
 
     use crate::daemon::health::{DaemonState, HealthListener};
@@ -669,6 +761,228 @@ mod tests {
         );
     }
 
+    /// Exercises the actual scan, health check, and cleanup logic across a
+    /// process boundary so `discover()`'s `HYPERDB_STATE_DIR` env override
+    /// can't race other tests in this binary.
+    fn run_identity_forward_compat_scenario() {
+        assert!(
+            std::env::var_os("HYPERDB_STATE_DIR").is_some(),
+            "child scenario requires an isolated state directory"
+        );
+
+        // Three real-world shapes a client fast path must still discover a
+        // live daemon through, per the forward-compatibility contract in
+        // docs/superpowers/specs/2026-08-13-hyperdb-mcp-agent-ux-design.md
+        // ("Unknown fields remain forward compatible"). None of these is
+        // valid input for `DaemonBuildIdentity`, so a strict `DaemonRecord`
+        // parse of the whole file must fail for every one of them — that's
+        // asserted below as the fixture sanity check.
+        let shapes: [(&str, Value); 3] = [
+            ("identity retyped as a string", json!("not-an-object")),
+            (
+                "executable_path reshaped",
+                json!({
+                    "mcp_version": "0.7.0.rabc123",
+                    "executable_path": "/opt/hyperdb/bin/hyperdb-mcp"
+                }),
+            ),
+            (
+                "identity missing executable_path",
+                json!({ "mcp_version": "0.7.0.rabc123" }),
+            ),
+        ];
+
+        let mut failures = Vec::new();
+        for (index, (label, identity_json)) in shapes.into_iter().enumerate() {
+            let pid = 9_000 + u32::try_from(index).expect("fixture index fits in u32");
+            let health_listener = HealthListener::bind(0).unwrap();
+            let info = DaemonInfo {
+                pid,
+                hyperd_endpoint: "127.0.0.1:54321".to_string(),
+                health_port: health_listener.port,
+                started_at: "2026-08-13T12:34:56Z".to_string(),
+                version: "0.7.0".to_string(),
+            };
+
+            let wire = json!({
+                "pid": info.pid,
+                "hyperd_endpoint": info.hyperd_endpoint,
+                "health_port": info.health_port,
+                "started_at": info.started_at,
+                "version": info.version,
+                "identity": identity_json,
+            });
+
+            if serde_json::from_value::<DaemonRecord>(wire.clone()).is_ok() {
+                failures.push(format!(
+                    "{label}: fixture unexpectedly satisfied the strict DaemonRecord parse; \
+                     it no longer exercises the forward-compatibility regression"
+                ));
+            }
+
+            std::fs::create_dir_all(state_dir().unwrap()).unwrap();
+            let path = discovery_file_path().unwrap();
+            std::fs::write(&path, serde_json::to_vec(&wire).unwrap()).unwrap();
+
+            let health_state = Arc::new(DaemonState::new());
+            let health_info = Arc::new(Mutex::new(info.clone()));
+            let run_state = Arc::clone(&health_state);
+            let run_info = Arc::clone(&health_info);
+            let health_server =
+                std::thread::spawn(move || health_listener.run(run_state, run_info));
+
+            match discover() {
+                Some(discovered) if discovered == info => {}
+                Some(other) => failures.push(format!(
+                    "{label}: discover() returned different facts than the live daemon: {other:?}"
+                )),
+                None => failures.push(format!(
+                    "{label}: discover() returned None for a live, healthy daemon whose only \
+                     defect is an unrecognized `identity` block"
+                )),
+            }
+
+            health_state.request_shutdown();
+            health_server.join().unwrap();
+            let _ = std::fs::remove_file(&path);
+        }
+
+        assert!(
+            failures.is_empty(),
+            "identity forward-compatibility discover failures:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    #[test]
+    fn discover_tolerates_forward_incompatible_identity_shapes() {
+        const CHILD_SENTINEL_ENV: &str = "HYPERDB_MCP_IDENTITY_FORWARD_COMPAT_CHILD";
+        const TEST_NAME: &str =
+            "daemon::discovery::tests::discover_tolerates_forward_incompatible_identity_shapes";
+
+        let _process_guard = crate::diagnostics::real_network_test_guard();
+        if let Some(marker) = std::env::var_os(CHILD_SENTINEL_ENV) {
+            std::fs::write(std::path::PathBuf::from(marker), b"started").unwrap();
+            run_identity_forward_compat_scenario();
+            return;
+        }
+        run_discovery_compatibility_child(TEST_NAME, CHILD_SENTINEL_ENV);
+    }
+
+    /// Returns a port that nothing is listening on, by binding one and
+    /// releasing it immediately. Anything that later camps on it still fails
+    /// `ping_identified` (no PONG token), so the port reads as dead either way.
+    fn released_port() -> u16 {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.local_addr().unwrap().port()
+    }
+
+    fn run_lenient_stale_cleanup_scenario() {
+        assert!(
+            std::env::var_os("HYPERDB_STATE_DIR").is_some(),
+            "child scenario requires an isolated state directory"
+        );
+
+        let path = discovery_file_path().unwrap();
+        let mut failures = Vec::new();
+
+        // A record whose `identity` block this client cannot understand, but
+        // whose legacy fields are perfectly readable — exactly what a *newer*
+        // daemon looks like to an older client, which is the only reason the
+        // lenient fallback exists.
+        let lenient_wire = json!({
+            "pid": 9_100,
+            "hyperd_endpoint": "127.0.0.1:54321",
+            "health_port": released_port(),
+            "started_at": "2026-08-13T12:34:56Z",
+            "version": "0.7.0",
+            "identity": "not-an-object",
+        });
+        if serde_json::from_value::<DaemonRecord>(lenient_wire.clone()).is_ok() {
+            failures.push(
+                "fixture satisfied the strict DaemonRecord parse; it no longer reaches the \
+                 lenient fallback this test is about"
+                    .to_string(),
+            );
+        }
+        if serde_json::from_value::<DaemonInfo>(lenient_wire.clone()).is_err() {
+            failures.push(
+                "fixture is not readable as a legacy DaemonInfo either; it would be rejected \
+                 before the branch this test pins"
+                    .to_string(),
+            );
+        }
+
+        std::fs::create_dir_all(state_dir().unwrap()).unwrap();
+        let lenient_bytes = serde_json::to_vec(&lenient_wire).unwrap();
+        std::fs::write(&path, &lenient_bytes).unwrap();
+
+        if let Some(info) = discover() {
+            failures.push(format!(
+                "discover() reported a live daemon on a released port: {info:?}"
+            ));
+        }
+        // The pin: a failed health check must not destroy a record this
+        // client could only read leniently. The daemon rewrites `daemon.json`
+        // only on `hyperd` restart, so deleting it here would hide a live,
+        // newer daemon from every client on the machine.
+        match std::fs::read(&path) {
+            Ok(after) if after == lenient_bytes => {}
+            Ok(_) => {
+                failures.push("discover() changed the leniently parsed record's bytes".to_string());
+            }
+            Err(error) => failures.push(format!(
+                "discover() removed the leniently parsed discovery record it could not \
+                 strictly parse: {error}"
+            )),
+        }
+
+        // Contrast: a strictly parseable record on a dead port is still
+        // stale-cleaned, so the guard above is narrow rather than a blanket
+        // disabling of cleanup.
+        let mut strict_info = legacy_info();
+        strict_info.pid = 9_101;
+        strict_info.health_port = released_port();
+        write_discovery_file(&strict_info).unwrap();
+        if let Some(info) = discover() {
+            failures.push(format!(
+                "discover() reported a live daemon for the strict record on a released port: {info:?}"
+            ));
+        }
+        if path.exists() {
+            failures.push(
+                "discover() did not stale-clean a strictly parsed record on a dead port"
+                    .to_string(),
+            );
+        }
+
+        assert!(
+            failures.is_empty(),
+            "lenient stale-cleanup failures:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    /// A record that only the lenient `DaemonInfo` fallback could read must
+    /// survive a failed health check. Before the fallback existed, a strict
+    /// parse failure returned from `discover()` before ever reaching the
+    /// stale-cleanup `remove_file`, so tolerating the record must not also
+    /// start deleting it.
+    #[test]
+    fn discover_preserves_a_leniently_parsed_stale_record() {
+        const CHILD_SENTINEL_ENV: &str = "HYPERDB_MCP_LENIENT_STALE_CLEANUP_CHILD";
+        const TEST_NAME: &str =
+            "daemon::discovery::tests::discover_preserves_a_leniently_parsed_stale_record";
+
+        let _process_guard = crate::diagnostics::real_network_test_guard();
+        if let Some(marker) = std::env::var_os(CHILD_SENTINEL_ENV) {
+            std::fs::write(std::path::PathBuf::from(marker), b"started").unwrap();
+            run_lenient_stale_cleanup_scenario();
+            return;
+        }
+        run_discovery_compatibility_child(TEST_NAME, CHILD_SENTINEL_ENV);
+    }
+
     #[test]
     fn raw_discovery_read_is_non_mutating_and_distinguishes_io() {
         const SECRET_SENTINEL: &str = "RAW_DISCOVERY_SECRET_MUST_NOT_LEAK";
@@ -722,11 +1036,28 @@ mod tests {
 
         match catch_raw_read(&malformed_path) {
             Ok(state) => {
-                if format!("{state:?}").contains(SECRET_SENTINEL) {
+                let rendered = format!("{state:?}");
+                if rendered.contains(SECRET_SENTINEL) {
                     failures.push("malformed state leaked discovery contents".to_string());
                 }
+                // `Malformed` carries the unparsed bytes so `discover()` can
+                // retry them without a second `read`. A derived `Debug` on a
+                // `Vec<u8>` would print every byte as a decimal list — the same
+                // leak, merely unsearchable — so check for that form too.
+                let sentinel_as_debug_bytes = SECRET_SENTINEL
+                    .as_bytes()
+                    .iter()
+                    .map(u8::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if rendered.contains(&sentinel_as_debug_bytes) {
+                    failures.push(
+                        "malformed state leaked discovery contents as a debug byte list"
+                            .to_string(),
+                    );
+                }
                 match state {
-                    RawDiscoveryRead::Malformed { path }
+                    RawDiscoveryRead::Malformed { path, .. }
                         if path == ReportedPath::from_os_str(malformed_path.as_os_str()) => {}
                     other => failures.push(format!(
                         "malformed JSON was not reported as Malformed with its ReportedPath: {other:?}"
@@ -797,7 +1128,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_discovery_rejects_oversized_valid_json() {
+    fn raw_discovery_reports_oversized_valid_json_as_oversized() {
         const MAX_EXPECTED_DISCOVERY_BYTES: usize = 64 * 1024;
 
         let tmp = TempDir::new().unwrap();
@@ -845,10 +1176,10 @@ mod tests {
             )),
         }
         match read_discovery_file_raw(&oversized_path) {
-            RawDiscoveryRead::Malformed { path: reported }
+            RawDiscoveryRead::Oversized { path: reported, .. }
                 if reported == ReportedPath::from_os_str(oversized_path.as_os_str()) => {}
             other => failures.push(format!(
-                "oversized valid JSON was not rejected as malformed: {other:?}"
+                "oversized valid JSON was not honestly classified as Oversized (not Malformed): {other:?}"
             )),
         }
         for (label, path, expected) in [
@@ -908,7 +1239,7 @@ mod tests {
             )),
         }
         match read_discovery_file_raw(&path) {
-            RawDiscoveryRead::Malformed { path: reported }
+            RawDiscoveryRead::Oversized { path: reported, .. }
                 if reported == ReportedPath::from_os_str(path.as_os_str()) => {}
             RawDiscoveryRead::Missing { .. } => {
                 failures
@@ -918,6 +1249,12 @@ mod tests {
                 "doctor raw reader reported the oversized record unreadable: {kind:?}"
             )),
             RawDiscoveryRead::Malformed { .. } => {
+                failures.push(
+                    "doctor raw reader misclassified the well-formed oversized record as malformed"
+                        .to_string(),
+                );
+            }
+            RawDiscoveryRead::Oversized { .. } => {
                 failures.push("doctor raw reader reported the wrong oversized path".to_string());
             }
             RawDiscoveryRead::Parsed { .. } => {
