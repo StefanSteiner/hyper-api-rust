@@ -2478,8 +2478,21 @@ where
     }
 
     let bin_count = opts.bins.max(1) as usize;
-    let min = values.iter().copied().fold(f64::INFINITY, f64::min);
-    let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    // Honor an explicit `x_range` as the bin extent, per the doc on
+    // `ChartOptions::x_range` ("all frames/charts share the same x
+    // extent" — useful for side-by-side comparisons or animation).
+    // `render_chart_impl` already validated it's finite and strictly
+    // increasing. Values outside the range aren't rejected: the index
+    // clamp below folds them into the first/last bin, mirroring how
+    // line/scatter's `apply_ranges` silently clips out-of-range points
+    // rather than erroring.
+    let (min, max) = match opts.x_range {
+        Some([lo, hi]) => (lo, hi),
+        None => (
+            values.iter().copied().fold(f64::INFINITY, f64::min),
+            values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        ),
+    };
     let raw_span = max - min;
     if !raw_span.is_finite() {
         return Err(McpError::new(

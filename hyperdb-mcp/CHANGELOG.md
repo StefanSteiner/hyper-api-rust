@@ -321,6 +321,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   public `render_chart` API), and both detection and grouping skip leading
   `NULL`s instead of only inspecting the first row. Part of
   [issue #277](https://github.com/tableau/hyper-api-rust/issues/277).
+- **`x_range` was validated for every chart type but only honored by
+  line/scatter.** Bar charts are documented as ignoring it (unchanged); the
+  undocumented case was histogram, whose doc promised "all frames/charts
+  share the same x extent" while the renderer silently used the data's own
+  min/max regardless of what `x_range` said. `draw_histogram` now uses an
+  explicit `x_range` as the bin extent, matching that doc and line/scatter's
+  existing behavior; values outside the range fold into the first/last bin
+  rather than erroring, mirroring how line/scatter clip out-of-range points.
+  Part of [issue #277](https://github.com/tableau/hyper-api-rust/issues/277).
 
 ## [0.5.0] - 2026-06-07
 

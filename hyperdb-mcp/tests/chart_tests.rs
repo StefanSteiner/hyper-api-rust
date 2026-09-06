@@ -179,6 +179,58 @@ fn histogram_chart_counts_values() {
     assert_eq!(result.rows_plotted, 100);
 }
 
+/// Regression (issue #277, fix 3): `x_range` is validated for every chart
+/// type (`render_chart_impl`) but, before this fix, was silently ignored by
+/// histograms — the render was byte-for-byte identical no matter what
+/// `x_range` said, even though `ChartOptions::x_range`'s doc promises "all
+/// frames/charts share the same x extent." That promise now holds for
+/// histograms too (previously true only for line/scatter).
+#[test]
+fn histogram_honors_x_range() {
+    let rows: Vec<_> = (0..50).map(|i| json!({"v": f64::from(i % 10)})).collect();
+    let base_opts = ChartOptions {
+        chart_type: ChartType::Histogram,
+        x_column: Some("v".into()),
+        bins: 10,
+        format: ChartFormat::Svg,
+        ..ChartOptions::default()
+    };
+    let default_range = render_chart(&rows, &base_opts).unwrap();
+
+    let wide_range_opts = ChartOptions {
+        x_range: Some([-50.0, 50.0]),
+        ..base_opts
+    };
+    let wide_range = render_chart(&rows, &wide_range_opts).unwrap();
+
+    assert_ne!(
+        default_range.bytes, wide_range.bytes,
+        "an explicit x_range must change the rendered histogram axis extent, \
+         not be silently ignored"
+    );
+}
+
+/// An explicit `x_range` narrower than the data's actual span must not be
+/// rejected for histograms — out-of-range values fold into the first/last
+/// bin (via the existing index clamp), the same "clip rather than error"
+/// behavior `apply_ranges` already gives line/scatter charts for x_range.
+#[test]
+fn histogram_x_range_narrower_than_data_does_not_error() {
+    let rows: Vec<_> = (0..50).map(|i| json!({"v": f64::from(i % 10)})).collect();
+    let opts = ChartOptions {
+        chart_type: ChartType::Histogram,
+        x_column: Some("v".into()),
+        bins: 5,
+        x_range: Some([2.0, 6.0]),
+        ..ChartOptions::default()
+    };
+    let result = render_chart(&rows, &opts).unwrap();
+    assert_eq!(
+        result.rows_plotted, 50,
+        "every value should still be counted, just folded into edge bins"
+    );
+}
+
 /// Missing required x column returns a schema-mismatch error with a helpful message.
 #[test]
 fn missing_x_column_errors() {
