@@ -298,6 +298,37 @@ fn engine_status() {
         engine_info["daemon_health_port"].is_null(),
         "local engine has no daemon health port"
     );
+
+    // Decomposed connection forms (issue #124). The transport is whatever
+    // `HyperProcess` actually negotiated, so assert consistency rather than
+    // hardcoding TCP: host/port are populated only for TCP, socket_path only
+    // for the IPC transports, and the descriptor always re-attaches the
+    // scheme `hyperd` used.
+    let conn = &engine_info["connection"];
+    let endpoint = engine_info["hyperd_endpoint"].as_str().unwrap();
+    assert_eq!(
+        conn["endpoint"], endpoint,
+        "connection.endpoint must mirror hyperd_endpoint"
+    );
+    let descriptor = conn["connection_descriptor"]
+        .as_str()
+        .expect("a live engine's endpoint must classify into a descriptor");
+    match conn["transport"].as_str().unwrap() {
+        "tcp" => {
+            assert_eq!(descriptor, format!("tab.tcp://{endpoint}"));
+            assert!(conn["host"].is_string(), "TCP endpoint must report a host");
+            assert!(conn["port"].is_u64(), "TCP endpoint must report a port");
+            assert!(conn["socket_path"].is_null(), "TCP has no socket path");
+        }
+        "unix_domain_socket" | "named_pipe" => {
+            assert!(
+                conn["host"].is_null() && conn["port"].is_null(),
+                "an IPC endpoint has no host:port — reporting one would be fabricated"
+            );
+            assert_eq!(conn["socket_path"], endpoint);
+        }
+        other => panic!("unexpected transport {other} for endpoint {endpoint}"),
+    }
 }
 
 /// Regression test: calling `create_table` twice in append mode must be

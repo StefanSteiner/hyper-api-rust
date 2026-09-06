@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`status` — `engine.connection` block**
+  ([#124](https://github.com/tableau/hyper-api-rust/issues/124)) — reports the
+  `hyperd` endpoint in the forms another Hyper client needs: `transport`
+  (`tcp` / `unix_domain_socket` / `named_pipe` / `unknown`), `host` and `port`
+  (TCP only, otherwise `null`), `socket_path` (the IPC transports only,
+  otherwise `null`), and `connection_descriptor` — the scheme-qualified string
+  `hyperd` emits over its callback connection (`tab.tcp://host:port`,
+  `tab.domain://<dir>/domain/<name>`, `tab.pipe://<host>/pipe/<name>`). That
+  descriptor is the only spelling the Hyper API family accepts: verified
+  against `tableauhyperapi` 0.0.26479, `tab.tcp://127.0.0.1:<port>` connects
+  while both `tcp:127.0.0.1:<port>` and the bare `127.0.0.1:<port>` already in
+  `hyperd_endpoint` are rejected with *"The connection string must be of the
+  form `<scheme>://<rest>`"*. Transport is recovered from the endpoint's shape
+  rather than assumed, so an IPC session reports `host: null` / `port: null`
+  instead of a fabricated `host:port`, and an unrecognized endpoint is
+  `unknown` with a `null` descriptor. Present on the full and the
+  `engine_busy` degraded response alike (`null` there when no endpoint is
+  known yet). Every session is TCP on every platform today — the daemon sets
+  `TransportMode::Tcp` explicitly and `HyperProcess` defaults to it.
+- **`get_readme` — `QUALIFY` and `APPROX_COUNT_DISTINCT` dialect notes**
+  ([#164](https://github.com/tableau/hyper-api-rust/issues/164)) — the SQL
+  quick-reference now records that `QUALIFY` is absent from the grammar
+  (SQLSTATE `42601`, a syntax error, as distinct from `42883` for a missing
+  function) and gives the equivalent subquery/CTE rewrite, and that
+  `APPROX_COUNT_DISTINCT` accelerates the distinct step only, so a per-row
+  string concatenation in its argument is paid either way and can hide the
+  speedup.
 - **`kv_set_many` tool** — atomic batch write accepting an array of
   `{key, value}` entries. Validates all keys before opening the transaction; an
   invalid key aborts the whole batch without writing anything. Default behavior
