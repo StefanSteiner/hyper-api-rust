@@ -2341,6 +2341,112 @@ mod tests {
         );
     }
 
+    /// The `Display` algorithm exactly as it stood before the digit-insertion
+    /// rewrite, lifted verbatim from the parent commit so the differential
+    /// test below compares against the real thing rather than a
+    /// reconstruction. (`self.scale as usize` became `usize::from(scale)`,
+    /// which is the same value for a `u8` and satisfies the cast lint.)
+    ///
+    /// Valid only for `scale <= 38`: `10u128.pow(39)` overflows, which is the
+    /// defect the rewrite removed.
+    fn display_via_divisor(value: i128, scale: u8) -> String {
+        if scale == 0 {
+            format!("{value}")
+        } else {
+            let divisor = 10u128.pow(u32::from(scale));
+            let sign = if value < 0 { "-" } else { "" };
+            let abs = value.unsigned_abs();
+            let int_part = abs / divisor;
+            let frac_part = abs % divisor;
+            format!(
+                "{sign}{int_part}.{frac_part:0width$}",
+                width = usize::from(scale)
+            )
+        }
+    }
+
+    #[test]
+    fn test_numeric_display_matches_the_pre_rewrite_algorithm_byte_for_byte() {
+        // Totality (above) is a weaker property than byte-equality: it would
+        // not notice a dropped trailing zero, a missing leading `0`, or a
+        // misplaced sign. `Display` output is consumed as *data* — the MCP
+        // server serializes it into JSON, `to_sql_literal` embeds it in SQL —
+        // so the rewrite has to be output-identical wherever the old
+        // algorithm worked at all, which is every scale up to 38.
+
+        // Scale-independent boundaries: single digits, magnitudes that need
+        // left-padding, and several flavours of trailing zero.
+        const FIXED: &[i128] = &[
+            0,
+            1,
+            -1,
+            5,
+            -5,
+            9,
+            -9,
+            10,
+            -10,
+            42,
+            -42,
+            99,
+            -99,
+            100,
+            -100,
+            500,
+            -500,
+            999,
+            -999,
+            1_000,
+            -1_000,
+            10_500,
+            -10_500,
+            12_300,
+            -12_300,
+            123_456,
+            -123_456,
+            1_000_000,
+            -1_000_000,
+            i128::MAX,
+            i128::MIN,
+        ];
+
+        // The engine's 38-digit precision limit, included at every scale.
+        let max_precision = 10_i128.pow(38) - 1;
+
+        let mut comparisons = 0_usize;
+        for scale in 0..=38_u8 {
+            let mut values = FIXED.to_vec();
+            values.extend([max_precision, -max_precision]);
+
+            // Scale-relative boundaries. The integer part flips from zero to
+            // non-zero at exactly 10^scale; one below it, every fractional
+            // digit is significant and the leading `0` is load-bearing.
+            let pow10 = 10_i128.pow(u32::from(scale));
+            for boundary in [pow10 - 1, pow10, pow10 + 1, pow10 / 2] {
+                values.extend([boundary, -boundary]);
+            }
+            if scale > 0 {
+                // Fewer digits than `scale`, so the fraction needs padding.
+                values.extend([pow10 / 10, -(pow10 / 10)]);
+            }
+
+            for value in values {
+                assert_eq!(
+                    Numeric::new(value, scale).to_string(),
+                    display_via_divisor(value, scale),
+                    "rendering diverged from the pre-rewrite algorithm at \
+                     value={value} scale={scale}"
+                );
+                comparisons += 1;
+            }
+        }
+
+        assert_eq!(
+            comparisons, 1675,
+            "the comparison matrix changed size; update the count deliberately"
+        );
+    }
+
     #[test]
     fn test_numeric_from_binary_with_scale() {
         // Unscaled value 123 with scale 2 = 1.23
