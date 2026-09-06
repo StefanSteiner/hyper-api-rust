@@ -157,6 +157,12 @@ alias. `copy_query` also retains `target_database`.
 - `status` — plugin and native/API identity; daemon/Hyper connection facts;
   local/persistent paths; table count; disk usage; watchers; attachments;
   read-only flag.
+  `engine.connection` gives the `hyperd` endpoint in the forms another
+  Hyper client needs: `transport` (`tcp` / `unix_domain_socket` /
+  `named_pipe`), `host` + `port` (TCP only, else null), `socket_path`
+  (IPC only, else null), and `connection_descriptor` — the scheme-
+  qualified string `hyperd` emits and the Hyper API accepts, e.g.
+  `tab.tcp://host:port`. TCP on every platform today.
   Both full and degraded responses report `default_database: \"local\"`.
   When
   `engine_busy: true`, the response is partial and non-definitive:
@@ -299,7 +305,19 @@ differences from standard PostgreSQL:
 - **`external(path, format => '...')`** — read Parquet / CSV / Iceberg
   directly from disk inside a query without first loading it as a
   table. Usable in the FROM clause.
-- **`APPROX_COUNT_DISTINCT(expr)`** — fast approximate cardinality.
+- **`APPROX_COUNT_DISTINCT(expr)`** — approximate cardinality, 5-100x
+  faster than `COUNT(DISTINCT ...)` at high cardinality, on TEXT as well
+  as numeric keys. It accelerates the distinct step only, so a per-row
+  `a || '-' || b` inside `expr` is paid either way and can swamp the win:
+  prefer a numeric composite key (`a * 1000 + b`).
+- **No `QUALIFY`** — absent from the grammar, so it fails the statement
+  with SQLSTATE `42601` (syntax error; a missing *function* would be
+  `42883`). Wrap the window in a subquery or CTE and filter outside. The
+  rewrite is exactly equivalent and costs nothing measurable:
+  ```
+  SELECT * FROM (SELECT k, ROW_NUMBER() OVER (PARTITION BY p
+    ORDER BY c DESC) AS rnk FROM t) s WHERE rnk <= 5
+  ```
 - **Window functions:** all standard ones plus `modified_rank()` (like
   `rank()` but assigns the LOWEST rank on ties). `IGNORE NULLS` /
   `RESPECT NULLS` only on `last_value`.

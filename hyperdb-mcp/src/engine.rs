@@ -1583,7 +1583,9 @@ impl Engine {
         // if no endpoint is available at all, which `is_running` already
         // reflects — surface it as null rather than failing the whole status.
         let in_daemon_mode = self.daemon_endpoint.is_some();
-        let endpoint_value = self.hyperd_endpoint().map_or(Value::Null, Value::String);
+        let endpoint = self.hyperd_endpoint().ok();
+        let connection_value = endpoint.as_deref().map_or(Value::Null, describe_endpoint);
+        let endpoint_value = endpoint.map_or(Value::Null, Value::String);
         let health_port_value = self
             .daemon_health_port
             .map_or(Value::Null, |p| Value::Number(p.into()));
@@ -1598,11 +1600,15 @@ impl Engine {
             "disk_usage_bytes": disk_bytes,
             // Where this engine is talking to hyperd. `hyperd_endpoint` is the
             // libpq endpoint queries run against; `daemon_health_port` is the
-            // shared daemon's control/lock port (null in local mode).
+            // shared daemon's control/lock port (null in local mode);
+            // `connection` decomposes the endpoint into transport, host/port
+            // (TCP only), socket path (IPC only), and the scheme-qualified
+            // descriptor another Hyper client can connect with.
             "engine": {
                 "mode": if in_daemon_mode { "daemon" } else { "local" },
                 "hyperd_endpoint": endpoint_value,
                 "daemon_health_port": health_port_value,
+                "connection": connection_value,
             },
             // The MCP server and the `hyperdb-api` crate it's built on live in
             // the same Cargo workspace and ship from the same commit, so a
@@ -2071,6 +2077,93 @@ impl Drop for Engine {
     }
 }
 
+/// Decompose the libpq endpoint the engine is talking to into the several
+/// forms a caller might need, without guessing at the transport.
+///
+/// The input is whatever `hyperdb_api::HyperProcess::endpoint` (local mode)
+/// or the daemon's discovery file (daemon mode) holds. That string has
+/// already been through `parse_connection_descriptor`, which strips the
+/// scheme off the descriptor `hyperd` sends over its callback connection:
+///
+/// | `hyperd` descriptor                  | stored endpoint            |
+/// |--------------------------------------|----------------------------|
+/// | `tab.tcp://127.0.0.1:64687`          | `127.0.0.1:64687`          |
+/// | `tab.domain://<dir>/domain/hyper`    | `<dir>/domain/hyper`       |
+/// | `tab.pipe://./pipe/hyper-123`        | `\\.\pipe\hyper-123`       |
+///
+/// So the transport has to be recovered from the *shape* of the string. A
+/// Windows pipe path and a Unix socket path are both absolute-ish and
+/// neither parses as `host:port`, which makes the classification total:
+///
+/// 1. A `\\<host>\pipe\<name>` path is a named pipe.
+/// 2. An absolute POSIX path is a Unix domain socket.
+/// 3. Anything whose last `:`-delimited field parses as a port is TCP.
+/// 4. Anything else is reported as `unknown` rather than guessed at.
+///
+/// `connection_descriptor` re-attaches the scheme, reproducing the exact
+/// string `hyperd` emitted. That is the form the Hyper API family accepts as
+/// an endpoint (the Python API calls the same value
+/// `Endpoint.connection_descriptor`), so it is the one to hand to another
+/// Hyper client. `host`/`port` are populated for TCP only and `socket_path`
+/// for the two IPC transports only — a non-TCP endpoint reports `null` there
+/// instead of a fabricated `host:port`.
+#[must_use]
+pub fn describe_endpoint(endpoint: &str) -> Value {
+    // Windows named pipe: `\\<host>\pipe\<name>`, as rebuilt by
+    // `parse_connection_descriptor` from `tab.pipe://<host>/pipe/<name>`.
+    if let Some(rest) = endpoint.strip_prefix(r"\\")
+        && let Some((host, name)) = rest.split_once(r"\pipe\")
+    {
+        return json!({
+            "transport": "named_pipe",
+            "endpoint": endpoint,
+            "connection_descriptor": format!("tab.pipe://{host}/pipe/{name}"),
+            "host": Value::Null,
+            "port": Value::Null,
+            "socket_path": endpoint,
+        });
+    }
+
+    // Unix domain socket: the socket path, as rebuilt from
+    // `tab.domain://<dir>/domain/<name>`. Checked before the `host:port`
+    // rule because a hostname can never start with `/`.
+    if endpoint.starts_with('/') {
+        return json!({
+            "transport": "unix_domain_socket",
+            "endpoint": endpoint,
+            "connection_descriptor": format!("tab.domain://{endpoint}"),
+            "host": Value::Null,
+            "port": Value::Null,
+            "socket_path": endpoint,
+        });
+    }
+
+    // TCP: split on the *last* colon so a bracketed IPv6 literal
+    // (`[::1]:7483`) keeps its host intact.
+    if let Some((host, port)) = endpoint.rsplit_once(':')
+        && !host.is_empty()
+        && let Ok(port) = port.parse::<u16>()
+    {
+        return json!({
+            "transport": "tcp",
+            "endpoint": endpoint,
+            "connection_descriptor": format!("tab.tcp://{host}:{port}"),
+            "host": host,
+            "port": port,
+            "socket_path": Value::Null,
+        });
+    }
+
+    json!({
+        "transport": "unknown",
+        "endpoint": endpoint,
+        "connection_descriptor": Value::Null,
+        "host": Value::Null,
+        "port": Value::Null,
+        "socket_path": Value::Null,
+    })
+}
+
 /// Cheap liveness probe for a daemon-mode `hyperd`: attempt a short-timeout
 /// TCP connect to `endpoint` (`host:port`). Returns `true` if the connect
 /// succeeds (something is listening). A bare connect is sufficient here — we
@@ -2160,6 +2253,94 @@ mod statement_helper_tests {
             classify_statement("-- pretend to be readonly\nINSERT INTO t VALUES (1)"),
             StatementKind::Dml
         );
+    }
+}
+
+#[cfg(test)]
+mod endpoint_description_tests {
+    use super::*;
+
+    /// The TCP shape every `hyperdb-mcp` session uses today: both the daemon
+    /// (`daemon::run` sets `TransportMode::Tcp` explicitly) and the local
+    /// fallback (`HyperProcess` defaults to TCP on every platform) hand the
+    /// engine a `host:port` string. The descriptor must round-trip back to
+    /// the `tab.tcp://` form `hyperd` sent over its callback connection.
+    #[test]
+    fn tcp_endpoint_decomposes_into_host_port_and_descriptor() {
+        let described = describe_endpoint("127.0.0.1:64687");
+        assert_eq!(described["transport"], "tcp");
+        assert_eq!(described["endpoint"], "127.0.0.1:64687");
+        assert_eq!(
+            described["connection_descriptor"],
+            "tab.tcp://127.0.0.1:64687"
+        );
+        assert_eq!(described["host"], "127.0.0.1");
+        assert_eq!(described["port"], 64687);
+        assert!(described["socket_path"].is_null());
+    }
+
+    /// A bracketed IPv6 literal must keep its brackets: splitting on the
+    /// first colon instead of the last would report host `[` and drop the
+    /// address.
+    #[test]
+    fn tcp_endpoint_keeps_bracketed_ipv6_host_intact() {
+        let described = describe_endpoint("[::1]:7483");
+        assert_eq!(described["transport"], "tcp");
+        assert_eq!(described["host"], "[::1]");
+        assert_eq!(described["port"], 7483);
+    }
+
+    /// `Parameters::set_transport_mode(TransportMode::Ipc)` makes `hyperd`
+    /// listen on a Unix domain socket, and the endpoint becomes a filesystem
+    /// path with no port at all. Reporting a `host:port` here would be a
+    /// fabrication, so both fields stay null and the socket path is surfaced
+    /// instead.
+    #[test]
+    fn unix_domain_socket_endpoint_reports_path_and_no_port() {
+        let described = describe_endpoint("/tmp/hyper-4213/domain/hyper");
+        assert_eq!(described["transport"], "unix_domain_socket");
+        assert_eq!(
+            described["connection_descriptor"],
+            "tab.domain:///tmp/hyper-4213/domain/hyper"
+        );
+        assert!(described["host"].is_null());
+        assert!(described["port"].is_null());
+        assert_eq!(described["socket_path"], "/tmp/hyper-4213/domain/hyper");
+    }
+
+    /// The Windows IPC shape. `parse_connection_descriptor` turns
+    /// `tab.pipe://./pipe/hyper-4213` into `\\.\pipe\hyper-4213`, so the
+    /// descriptor has to be rebuilt by reversing that transformation.
+    #[test]
+    fn named_pipe_endpoint_rebuilds_its_descriptor() {
+        let described = describe_endpoint(r"\\.\pipe\hyper-4213");
+        assert_eq!(described["transport"], "named_pipe");
+        assert_eq!(
+            described["connection_descriptor"],
+            "tab.pipe://./pipe/hyper-4213"
+        );
+        assert!(described["host"].is_null());
+        assert!(described["port"].is_null());
+        assert_eq!(described["socket_path"], r"\\.\pipe\hyper-4213");
+    }
+
+    /// Anything that matches no known transport is reported as `unknown`
+    /// with a null descriptor. Emitting a `tab.tcp://` string for an
+    /// unparseable endpoint would hand the caller a connection string that
+    /// cannot work.
+    #[test]
+    fn unrecognized_endpoint_is_reported_as_unknown_not_guessed() {
+        for endpoint in ["", "localhost", "localhost:notaport", "localhost:99999"] {
+            let described = describe_endpoint(endpoint);
+            assert_eq!(
+                described["transport"], "unknown",
+                "`{endpoint}` should not be classified"
+            );
+            assert!(
+                described["connection_descriptor"].is_null(),
+                "`{endpoint}` must not get a fabricated descriptor"
+            );
+        }
     }
 }
 

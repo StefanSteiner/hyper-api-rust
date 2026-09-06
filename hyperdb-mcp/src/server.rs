@@ -1718,29 +1718,39 @@ impl HyperMcpServer {
         // daemon.json file + one PING to the known health port (~1ms if alive,
         // 300ms timeout if dead). find_running_daemon() adds a 16-port scan on
         // failure (up to 4.8s), which would defeat the "instant response" goal.
-        let (hyperd_running, engine_block) = if let Some(info) =
-            crate::daemon::discovery::discover()
-        {
-            (
-                true,
-                json!({
-                    "mode": "daemon",
-                    "hyperd_endpoint": info.hyperd_endpoint,
-                    "daemon_health_port": info.health_port,
-                }),
-            )
-        } else if self.no_daemon {
-            // Local mode; can't determine hyperd state without the engine.
-            (
-                false,
-                json!({ "mode": "local", "hyperd_endpoint": null, "daemon_health_port": null }),
-            )
-        } else {
-            (
-                false,
-                json!({ "mode": "daemon", "hyperd_endpoint": null, "daemon_health_port": null }),
-            )
-        };
+        let (hyperd_running, engine_block) =
+            if let Some(info) = crate::daemon::discovery::discover() {
+                (
+                    true,
+                    json!({
+                        "mode": "daemon",
+                        "hyperd_endpoint": info.hyperd_endpoint,
+                        "daemon_health_port": info.health_port,
+                        "connection": crate::engine::describe_endpoint(&info.hyperd_endpoint),
+                    }),
+                )
+            } else if self.no_daemon {
+                // Local mode; can't determine hyperd state without the engine.
+                (
+                    false,
+                    json!({
+                        "mode": "local",
+                        "hyperd_endpoint": null,
+                        "daemon_health_port": null,
+                        "connection": null,
+                    }),
+                )
+            } else {
+                (
+                    false,
+                    json!({
+                        "mode": "daemon",
+                        "hyperd_endpoint": null,
+                        "daemon_health_port": null,
+                        "connection": null,
+                    }),
+                )
+            };
 
         let persistent_path = self
             .workspace_path
