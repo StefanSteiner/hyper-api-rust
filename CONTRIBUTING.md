@@ -236,19 +236,20 @@ Summary:
    [`docs/GITHUB_OPERATIONS.md`](docs/GITHUB_OPERATIONS.md#cutting-a-release)
    for the exact `gh release create` invocation, including the `--prerelease`
    flag required for `-rc.N` tags.
-4. Wait for CI to pass, then **manually trigger** the publish workflows:
+4. **The publish workflows fire on their own** from the `release: published`
+   event that `gh release create` emits — creating the Release *is* the
+   publish trigger. `gh workflow run release.yml -f tag=vX.Y.Z` is for
+   re-running a failed publish against an existing tag, not part of the
+   normal path.
+5. Roll over the per-crate `CHANGELOG.md` files. release-please does not
+   manage them, so nothing else will — see
+   [`docs/GITHUB_OPERATIONS.md`](docs/GITHUB_OPERATIONS.md#rolling-over-the-per-crate-changelogs).
 
-   ```bash
-   gh workflow run release.yml -f tag=vX.Y.Z
-   gh workflow run npm-build-publish.yml -f tag=vX.Y.Z
-   ```
-
-   See [`docs/GITHUB_OPERATIONS.md`](docs/GITHUB_OPERATIONS.md#cutting-a-release)
-   for why this step is manual (GitHub Actions `GITHUB_TOKEN` limitation).
-
-For pre-releases (`-rc.N`, `-alpha.N`, `-beta.N`), include a `Release-As:`
-footer in a commit on `main` — see
-[`docs/GITHUB_OPERATIONS.md`](docs/GITHUB_OPERATIONS.md#pre-releases).
+For pre-releases (`-rc.N`, `-alpha.N`, `-beta.N`), a `Release-As:` footer on a
+commit on `main` is **required, not optional** — without one release-please
+computes a wrong-but-publishable version. Recent PRs are squash-merged, so the
+footer has to be in the squash commit body. See
+[`docs/GITHUB_OPERATIONS.md`](docs/GITHUB_OPERATIONS.md#every-rc-needs-its-own-footer).
 
 ### Published Crates
 

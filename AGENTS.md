@@ -489,6 +489,14 @@ All commit messages **must** follow the format `<type>(<scope>): <subject>` — 
 - **The nine per-crate `CHANGELOG.md` files — hand-maintained.** Each carries exactly one `## [Unreleased]` section and none appear in release-please's `packages` or `extra-files`. This reminder applies to these. `hyperdb-compile-check` is the ninth: it is published (`release.yml` does so explicitly, since it declares its own `[workspace]` and `--workspace` cannot see it) but was missing from this list, which is why it had no changelog until 1.0.0.
 - **The npm sub-package changelogs** under `hyperdb-api-node/npm/*/` and `hyperdb-mcp/npm/*/` — leave alone; they have no `## [Unreleased]` section.
 
+ Nothing rolls a per-crate `## [Unreleased]` section over into a dated one
+ when a release ships; that is a manual maintainer step
+ ([docs/GITHUB_OPERATIONS.md → Rolling over the per-crate
+ changelogs](docs/GITHUB_OPERATIONS.md#rolling-over-the-per-crate-changelogs)).
+ So an entry sitting under "Unreleased" does **not** mean the work is
+ unshipped — check the root `CHANGELOG.md` for that. Append your bullet to the
+ existing section rather than adding a second `### Fixed` sibling (MD024).
+
 1. **Never invent `hyperd` flags or engine parameters.** Obtain `hyperd` via
  `make download-hyperd` (it bootstraps the release pinned in
  `hyperdb-bootstrap/hyperd-version.toml`) and start servers through the
