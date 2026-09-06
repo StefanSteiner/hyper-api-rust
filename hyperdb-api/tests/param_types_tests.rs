@@ -6,7 +6,9 @@
 //! These tests verify that types implementing ToSqlParam correctly encode
 //! parameters for use with query_params(), validating against actual Hyper behavior.
 
-use hyperdb_api::{Interval, Numeric, ToSqlParam};
+use hyperdb_api::{
+    AsyncConnection, CreateMode, Geography, HyperProcess, Interval, Numeric, Result, ToSqlParam,
+};
 
 mod common;
 use common::TestConnection;
@@ -117,34 +119,339 @@ fn test_numeric_scale0_param() {
     );
 }
 
-/// Pins the documented scale>0 limitation: Hyper rejects binary NUMERIC
-/// params that carry a non-zero dscale.
+/// Scaled `Numeric` (scale > 0) params round-trip — issue #132.
 ///
-/// We encode the TRUE scale (dscale = 2 for `Numeric::new(123, 2)` == 1.23),
-/// so the value is represented faithfully on the wire — and Hyper then
-/// rejects it server-side with SQLSTATE `0A000` ("cannot handle truncation
-/// when reading numerics") rather than silently truncating it to a
-/// mis-scaled integer. This is fail-fast, not silent corruption.
+/// Before per-parameter format codes existed these were rejected with
+/// SQLSTATE `0A000` ("cannot handle truncation when reading numerics"),
+/// because every parameter went out as PG binary and Hyper has no binary
+/// input path for a scaled NUMERIC. They now bind as text.
 ///
-/// The error surfaces at `collect_rows()` time (when the Bind/Execute round
-/// trip completes), NOT at `query_params()` time. When scaled support lands
-/// (#132), this test flips to a success assertion.
+/// `CAST($1 AS NUMERIC(p,s))` is what pins the result type: a scaled
+/// `Numeric` binds with an unspecified OID (see `ToSqlParam for Numeric`),
+/// so a bare `SELECT $1` would come back as `TEXT`.
 #[test]
-fn test_numeric_scaled_rejected_fail_fast() {
+fn test_numeric_scaled_param_round_trip() {
     let test = TestConnection::new().expect("Failed to create test connection");
 
-    let numeric = Numeric::new(123, 2); // 1.23 — scale > 0
-    let result = test
-        .connection
-        .query_params("SELECT $1 AS v", &[&numeric as &dyn ToSqlParam])
-        .expect("query_params itself should not error");
+    // (unscaled, scale, precision, rendered) — scales 0, 2, 4 and 10, both signs.
+    let cases: &[(i128, u8, u8, &str)] = &[
+        (42, 0, 10, "42"),
+        (-42, 0, 10, "-42"),
+        (123_456, 2, 10, "1234.56"),
+        (-123_456, 2, 10, "-1234.56"),
+        (123_456_700, 4, 18, "12345.6700"),
+        (-987_654_321, 4, 18, "-98765.4321"),
+        (1, 10, 20, "0.0000000001"),
+        (-1, 10, 20, "-0.0000000001"),
+        (0, 2, 10, "0.00"),
+    ];
 
-    let err = result
+    for &(unscaled, scale, precision, rendered) in cases {
+        let numeric = Numeric::new(unscaled, scale);
+        assert_eq!(
+            numeric.to_string(),
+            rendered,
+            "test-vector sanity: Numeric({unscaled}, {scale})"
+        );
+
+        let rows = test
+            .connection
+            .query_params(
+                &format!("SELECT CAST($1 AS NUMERIC({precision},{scale})) AS v"),
+                &[&numeric as &dyn ToSqlParam],
+            )
+            .expect("query_params failed")
+            .collect_rows()
+            .unwrap_or_else(|e| panic!("scaled Numeric {rendered} must bind, got: {e}"));
+
+        assert_eq!(rows.len(), 1, "Expected exactly one row for {rendered}");
+        let returned: Numeric = rows[0]
+            .get::<Numeric>(0)
+            .unwrap_or_else(|| panic!("expected non-NULL NUMERIC for {rendered}"));
+        assert_eq!(
+            returned.to_string(),
+            rendered,
+            "Numeric({unscaled}, {scale}) should round-trip unchanged"
+        );
+        assert_eq!(returned.scale(), scale, "scale must survive the round trip");
+    }
+}
+
+/// A scaled `Numeric` param against a real `NUMERIC(10,2)` column — both as
+/// the INSERT value and as an equality predicate.
+///
+/// This is the case that actually needs the unspecified OID: the server
+/// infers the parameter's type (and therefore its scale) from the column.
+#[test]
+fn test_numeric_scaled_param_against_column() {
+    let test = TestConnection::new().expect("Failed to create test connection");
+    test.connection
+        .execute_command("CREATE TABLE prices (id INT, amount NUMERIC(10,2))")
+        .expect("CREATE TABLE failed");
+
+    let amount = Numeric::new(123_456, 2); // 1234.56
+    let inserted = test
+        .connection
+        .command_params(
+            "INSERT INTO prices VALUES (1, $1)",
+            &[&amount as &dyn ToSqlParam],
+        )
+        .expect("scaled Numeric must bind as an INSERT value");
+    assert_eq!(inserted, 1, "one row inserted");
+
+    let rows = test
+        .connection
+        .execute_query("SELECT amount FROM prices")
+        .expect("query failed")
         .collect_rows()
-        .expect_err("scale>0 Numeric must be rejected by the server, not silently truncated");
+        .expect("collect_rows failed");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].get::<Numeric>(0).expect("non-NULL").to_string(),
+        "1234.56",
+        "stored value must match what was bound"
+    );
+
+    // ...and the same value as a predicate must match the stored row.
+    let matched = test
+        .connection
+        .query_params(
+            "SELECT id FROM prices WHERE amount = $1",
+            &[&amount as &dyn ToSqlParam],
+        )
+        .expect("query_params failed")
+        .collect_rows()
+        .expect("scaled Numeric must bind in a WHERE clause");
+    assert_eq!(matched.len(), 1, "predicate should match the inserted row");
+    assert_eq!(matched[0].get::<i32>(0), Some(1));
+}
+
+/// A text-format param and binary-format params in the *same* Bind.
+///
+/// Hyper accepts a mixed per-parameter format-code array, which is what
+/// lets the binary fast path survive alongside text-only types. If the
+/// array were ever collapsed back to a single uniform code this fails.
+#[test]
+fn test_mixed_text_and_binary_params() {
+    let test = TestConnection::new().expect("Failed to create test connection");
+
+    let scaled = Numeric::new(123_456, 2); // text-format param
+    let count = 7_i32; // binary-format param
+    let label = "widget"; // binary-format param
+
+    let rows = test
+        .connection
+        .query_params(
+            "SELECT CAST($1 AS NUMERIC(10,2)) AS amount, $2 AS qty, $3 AS label",
+            &[
+                &scaled as &dyn ToSqlParam,
+                &count as &dyn ToSqlParam,
+                &label as &dyn ToSqlParam,
+            ],
+        )
+        .expect("query_params failed")
+        .collect_rows()
+        .expect("a mixed text/binary format array must be accepted");
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].get::<Numeric>(0).expect("non-NULL").to_string(),
+        "1234.56"
+    );
+    assert_eq!(rows[0].get::<i32>(1), Some(7));
+    assert_eq!(rows[0].get::<String>(2).as_deref(), Some("widget"));
+}
+
+/// `Geography` params round-trip as WKT — issue #133.
+///
+/// Previously impossible: Hyper has no PG-binary input function for
+/// `geography` (`42883`), and every param went out as binary.
+#[test]
+fn test_geography_param_round_trip() {
+    let test = TestConnection::new().expect("Failed to create test connection");
+
+    // Vertex-only geometries render back exactly; Hyper prints 7 fractional
+    // digits. (Geometries with edges are densified along the great circle —
+    // see the LINESTRING case below.)
+    let cases: &[(&str, &str)] = &[
+        ("POINT(-122.4194 37.7749)", "POINT(-122.4194000 37.7749000)"),
+        (
+            "MULTIPOINT(0 0, 1 1)",
+            "MULTIPOINT((0.0000000 0.0000000), (1.0000000 1.0000000))",
+        ),
+    ];
+
+    for &(wkt_in, expected) in cases {
+        let geo = Geography::from_wkt(wkt_in).expect("Failed to create geography from WKT");
+        let rows = test
+            .connection
+            .query_params("SELECT CAST($1 AS TEXT) AS wkt", &[&geo as &dyn ToSqlParam])
+            .expect("query_params failed")
+            .collect_rows()
+            .unwrap_or_else(|e| panic!("Geography {wkt_in} must bind as a param, got: {e}"));
+
+        assert_eq!(rows.len(), 1, "Expected exactly one row for {wkt_in}");
+        assert_eq!(
+            rows[0].get::<String>(0).as_deref(),
+            Some(expected),
+            "Geography should round-trip as the same geometry"
+        );
+    }
+
+    // A LINESTRING is a geodesic: Hyper interpolates intermediate vertices
+    // along the great circle, so only the endpoints are directly comparable.
+    let line = Geography::from_wkt("LINESTRING(0 0, 2 2)").expect("valid WKT");
+    let rows = test
+        .connection
+        .query_params(
+            "SELECT CAST($1 AS TEXT) AS wkt",
+            &[&line as &dyn ToSqlParam],
+        )
+        .expect("query_params failed")
+        .collect_rows()
+        .expect("LINESTRING Geography must bind as a param");
+    let rendered = rows[0].get::<String>(0).expect("non-NULL");
+    assert!(
+        rendered.starts_with("LINESTRING(0.0000000 0.0000000, ")
+            && rendered.ends_with("2.0000000 2.0000000)"),
+        "LINESTRING endpoints should survive the round trip, got: {rendered}"
+    );
+}
+
+/// A `Geography` param used as a predicate against a stored geography
+/// column, with the column populated through the (independent) inserter
+/// path — WKT in via `query_params`, matching the same geometry.
+#[test]
+fn test_geography_param_predicate() {
+    let test = TestConnection::new().expect("Failed to create test connection");
+    test.connection
+        .execute_command("CREATE TABLE places (id INT, loc TABLEAU.TABGEOGRAPHY)")
+        .expect("CREATE TABLE failed");
+
+    let sf = Geography::from_wkt("POINT(-122.4194 37.7749)").expect("valid WKT");
+    let nyc = Geography::from_wkt("POINT(-74.0060 40.7128)").expect("valid WKT");
+
+    test.connection
+        .command_params(
+            "INSERT INTO places VALUES (1, $1)",
+            &[&sf as &dyn ToSqlParam],
+        )
+        .expect("Geography must bind as an INSERT value");
+    test.connection
+        .command_params(
+            "INSERT INTO places VALUES (2, $1)",
+            &[&nyc as &dyn ToSqlParam],
+        )
+        .expect("Geography must bind as an INSERT value");
+
+    let rows = test
+        .connection
+        .query_params(
+            "SELECT id FROM places WHERE loc = $1",
+            &[&sf as &dyn ToSqlParam],
+        )
+        .expect("query_params failed")
+        .collect_rows()
+        .expect("Geography must bind in a WHERE clause");
+
+    assert_eq!(rows.len(), 1, "only the San Francisco row should match");
+    assert_eq!(rows[0].get::<i32>(0), Some(1));
+}
+
+/// A `Geography` in Hyper's legacy binary format has no client-side WKT
+/// rendering, so binding one must fail loudly rather than store garbage.
+#[test]
+fn test_geography_hyper_legacy_param_rejected() {
+    let test = TestConnection::new().expect("Failed to create test connection");
+
+    let legacy = Geography::from_bytes(vec![0x01, 0x02, 0x03]);
+    let err = test
+        .connection
+        .query_params("SELECT CAST($1 AS TEXT)", &[&legacy as &dyn ToSqlParam])
+        .expect("query_params itself should not error")
+        .collect_rows()
+        .expect_err("legacy-format Geography must be rejected, not silently bound");
+
     let msg = err.to_string();
     assert!(
-        msg.contains("0A000") || msg.contains("cannot handle truncation when reading numerics"),
-        "expected Hyper's NUMERIC truncation error (fail-fast), got: {msg}"
+        msg.contains("22P02") || msg.contains("invalid geography format"),
+        "expected Hyper's geography parse error (fail-fast), got: {msg}"
+    );
+}
+
+// =============================================================================
+// Async parity — the format-code array is plumbed through both stacks.
+// =============================================================================
+
+async fn fresh_async_conn(name: &str) -> Result<(HyperProcess, AsyncConnection)> {
+    let db_path = common::test_result_path(name, "hyper")?;
+    let params = common::test_hyper_params(name)?;
+    let hyper = HyperProcess::new(None, Some(&params))?;
+    let endpoint = hyper.require_endpoint()?.to_string();
+    let conn = AsyncConnection::connect(
+        &endpoint,
+        db_path.to_str().expect("path"),
+        CreateMode::CreateAndReplace,
+    )
+    .await?;
+    Ok((hyper, conn))
+}
+
+/// Async twin of `test_numeric_scaled_param_round_trip` / `_against_column`.
+#[tokio::test(flavor = "current_thread")]
+async fn test_async_numeric_scaled_param() {
+    let (_hyper, conn) = fresh_async_conn("async_numeric_scaled_param")
+        .await
+        .expect("async connection");
+
+    let amount = Numeric::new(123_456, 2); // 1234.56
+    let rows = conn
+        .query_params(
+            "SELECT CAST($1 AS NUMERIC(10,2)) AS v",
+            &[&amount as &dyn ToSqlParam],
+        )
+        .await
+        .expect("query_params failed")
+        .collect_rows()
+        .await
+        .expect("scaled Numeric must bind on the async path too");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].get::<Numeric>(0).expect("non-NULL").to_string(),
+        "1234.56"
+    );
+
+    conn.execute_command("CREATE TABLE prices (id INT, amount NUMERIC(10,2))")
+        .await
+        .expect("CREATE TABLE failed");
+    let inserted = conn
+        .command_params(
+            "INSERT INTO prices VALUES (1, $1)",
+            &[&amount as &dyn ToSqlParam],
+        )
+        .await
+        .expect("command_params must accept a scaled Numeric");
+    assert_eq!(inserted, 1);
+}
+
+/// Async twin of `test_geography_param_round_trip`.
+#[tokio::test(flavor = "current_thread")]
+async fn test_async_geography_param() {
+    let (_hyper, conn) = fresh_async_conn("async_geography_param")
+        .await
+        .expect("async connection");
+
+    let geo = Geography::from_wkt("POINT(-122.4194 37.7749)").expect("valid WKT");
+    let rows = conn
+        .query_params("SELECT CAST($1 AS TEXT) AS wkt", &[&geo as &dyn ToSqlParam])
+        .await
+        .expect("query_params failed")
+        .collect_rows()
+        .await
+        .expect("Geography must bind on the async path too");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].get::<String>(0).as_deref(),
+        Some("POINT(-122.4194000 37.7749000)")
     );
 }

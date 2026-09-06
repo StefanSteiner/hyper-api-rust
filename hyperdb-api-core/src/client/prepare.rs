@@ -26,8 +26,9 @@ use tracing::{trace, warn};
 use super::connection::RawConnection;
 use super::error::{Error, Result};
 use super::row::Row;
-use super::statement::Column;
+use super::statement::{Column, ParamFormat, all_binary_format_codes, bind_format_codes};
 use super::sync_stream::SyncStream;
+use std::borrow::Cow;
 
 // =============================================================================
 // SqlParam trait - Zero-cost parameter encoding
@@ -507,18 +508,39 @@ pub fn execute_prepared_no_result(
     statement: &PreparedStatement,
     params: &[Option<&[u8]>],
 ) -> Result<u64> {
+    execute_prepared_no_result_with_formats(connection, statement, params, &[])
+}
+
+/// Executes a prepared statement that doesn't return rows, with a
+/// caller-chosen wire format per parameter.
+///
+/// `param_formats` must be the same length as `params`, or empty to mean
+/// "every parameter is binary".
+///
+/// # Errors
+///
+/// Same failure modes as [`execute_prepared_no_result`].
+pub fn execute_prepared_no_result_with_formats(
+    connection: &Arc<Mutex<RawConnection<SyncStream>>>,
+    statement: &PreparedStatement,
+    params: &[Option<&[u8]>],
+    param_formats: &[ParamFormat],
+) -> Result<u64> {
     let mut conn = connection
         .lock()
         .map_err(|_| Error::connection("connection mutex poisoned"))?;
 
-    // Bind parameters
-    let param_formats: Vec<i16> = vec![1; params.len()];
+    let param_format_codes = if param_formats.is_empty() {
+        Cow::Borrowed(all_binary_format_codes(params.len()))
+    } else {
+        bind_format_codes(param_formats)
+    };
     let result_formats: Vec<i16> = vec![];
 
     frontend::bind(
         "",
         &statement.name,
-        &param_formats,
+        &param_format_codes,
         params,
         &result_formats,
         conn.write_buf(),

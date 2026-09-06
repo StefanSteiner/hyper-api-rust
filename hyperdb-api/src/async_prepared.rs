@@ -15,7 +15,7 @@ use crate::async_connection::AsyncConnection;
 use crate::async_result::AsyncRowset;
 use crate::async_transport::AsyncTransport;
 use crate::error::{Error, Result};
-use crate::params::ToSqlParam;
+use crate::params::{ParamFormat, ToSqlParam};
 use crate::result::{ResultColumn, ResultSchema, Row, RowValue};
 
 /// A handle to a server-side prepared statement (async).
@@ -85,12 +85,13 @@ impl<'conn> AsyncPreparedStatement<'conn> {
     ///   `Execute`.
     /// - Returns [`Error::Io`] on transport-level I/O failures.
     pub async fn query(&self, params: &[&dyn ToSqlParam]) -> Result<AsyncRowset<'conn>> {
-        let encoded = encode_params(params);
+        let (encoded, formats) = encode_params(params);
         let client = async_tcp_client(self.connection)?;
         let stream = client
-            .execute_prepared_streaming(
+            .execute_prepared_streaming_with_formats(
                 &self.inner,
                 encoded,
+                &formats,
                 crate::result::DEFAULT_BINARY_CHUNK_SIZE,
             )
             .await?;
@@ -107,10 +108,10 @@ impl<'conn> AsyncPreparedStatement<'conn> {
     ///   `Execute`.
     /// - Returns [`Error::Io`] on transport-level I/O failures.
     pub async fn execute(&self, params: &[&dyn ToSqlParam]) -> Result<u64> {
-        let encoded = encode_params(params);
+        let (encoded, formats) = encode_params(params);
         let client = async_tcp_client(self.connection)?;
         Ok(client
-            .execute_prepared_no_result(&self.inner, encoded)
+            .execute_prepared_no_result_with_formats(&self.inner, encoded, &formats)
             .await?)
     }
 
@@ -172,8 +173,15 @@ impl<'conn> AsyncPreparedStatement<'conn> {
     }
 }
 
-pub(crate) fn encode_params(params: &[&dyn ToSqlParam]) -> Vec<Option<Vec<u8>>> {
-    params.iter().map(|p| p.encode_param()).collect()
+/// Async twin of [`crate::prepared::encode_params`] — wire bytes plus the
+/// matching per-parameter format code, index for index.
+pub(crate) fn encode_params(
+    params: &[&dyn ToSqlParam],
+) -> (Vec<Option<Vec<u8>>>, Vec<ParamFormat>) {
+    params
+        .iter()
+        .map(|p| (p.encode_param(), p.param_format()))
+        .collect()
 }
 
 // =============================================================================
@@ -253,12 +261,13 @@ impl AsyncPreparedStatementOwned {
     ///   `Execute`, or raises a runtime error while streaming.
     /// - Returns [`Error::Io`] on transport-level I/O failures.
     pub async fn fetch_all(&self, params: &[&dyn ToSqlParam]) -> Result<Vec<Row>> {
-        let encoded = encode_params(params);
+        let (encoded, formats) = encode_params(params);
         let client = async_tcp_client_arc(&self.connection)?;
         let stream = client
-            .execute_prepared_streaming(
+            .execute_prepared_streaming_with_formats(
                 &self.inner,
                 encoded,
+                &formats,
                 crate::result::DEFAULT_BINARY_CHUNK_SIZE,
             )
             .await?;
@@ -275,10 +284,10 @@ impl AsyncPreparedStatementOwned {
     ///   `Execute`.
     /// - Returns [`Error::Io`] on transport-level I/O failures.
     pub async fn execute(&self, params: &[&dyn ToSqlParam]) -> Result<u64> {
-        let encoded = encode_params(params);
+        let (encoded, formats) = encode_params(params);
         let client = async_tcp_client_arc(&self.connection)?;
         Ok(client
-            .execute_prepared_no_result(&self.inner, encoded)
+            .execute_prepared_no_result_with_formats(&self.inner, encoded, &formats)
             .await?)
     }
 

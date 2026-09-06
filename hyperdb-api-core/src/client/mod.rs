@@ -310,7 +310,7 @@ pub use error::{Error, ErrorKind, Result};
 pub use notice::{Notice, NoticeReceiver};
 pub use prepare::{OwnedPreparedStatement, PreparedStatement, SqlParam};
 pub use row::{BatchRow, FromBinaryValue, Row, StreamRow};
-pub use statement::{Column, ColumnFormat};
+pub use statement::{Column, ColumnFormat, ParamFormat};
 
 // Re-exports - Async client
 pub use async_client::{AsyncClient, AsyncCopyInWriter, AsyncCopyInWriterOwned};

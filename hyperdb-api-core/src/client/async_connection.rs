@@ -16,6 +16,7 @@ use crate::protocol::message::{backend::Message, frontend};
 
 use super::auth::{self, AuthState};
 use super::error::{Error, Result};
+use super::statement::{ParamFormat, all_binary_format_codes, bind_format_codes};
 
 /// An async raw connection to a Hyper server.
 ///
@@ -456,20 +457,56 @@ where
         params: &[Option<&[u8]>],
         column_count: usize,
     ) -> Result<()> {
+        self.bind_execute_sync(
+            statement_name,
+            params,
+            all_binary_format_codes(params.len()),
+            column_count,
+        )
+        .await
+    }
+
+    /// Same as [`Self::start_execute_prepared`], but with a caller-chosen
+    /// wire format per parameter.
+    ///
+    /// Async mirror of
+    /// [`super::connection::RawConnection::start_execute_prepared_with_formats`].
+    /// `param_formats` must be the same length as `params`.
+    ///
+    /// # Errors
+    ///
+    /// Same failure modes as [`Self::start_execute_prepared`].
+    pub async fn start_execute_prepared_with_formats(
+        &mut self,
+        statement_name: &str,
+        params: &[Option<&[u8]>],
+        param_formats: &[ParamFormat],
+        column_count: usize,
+    ) -> Result<()> {
+        let codes = bind_format_codes(param_formats);
+        self.bind_execute_sync(statement_name, params, &codes, column_count)
+            .await
+    }
+
+    async fn bind_execute_sync(
+        &mut self,
+        statement_name: &str,
+        params: &[Option<&[u8]>],
+        param_format_codes: &[i16],
+        column_count: usize,
+    ) -> Result<()> {
         self.ensure_healthy()?;
         // Same rationale as `start_query_binary` for draining a pending
         // CopyFail before writing new extended-query bytes.
         self.drain_pending_copy_cancel().await?;
 
-        const PG_BINARY_FORMAT: i16 = 1;
         const HYPER_BINARY_FORMAT: i16 = 2;
-        let param_formats: Vec<i16> = vec![PG_BINARY_FORMAT; params.len()];
         let result_formats: Vec<i16> = vec![HYPER_BINARY_FORMAT; column_count];
 
         frontend::bind(
             "", // unnamed portal
             statement_name,
-            &param_formats,
+            param_format_codes,
             params,
             &result_formats,
             &mut self.write_buf,
@@ -992,17 +1029,40 @@ where
         statement_name: &str,
         params: &[Option<&[u8]>],
     ) -> Result<u64> {
+        self.execute_prepared_no_result_with_formats(statement_name, params, &[])
+            .await
+    }
+
+    /// Same as [`Self::execute_prepared_no_result`], but with a
+    /// caller-chosen wire format per parameter.
+    ///
+    /// `param_formats` must be the same length as `params`, or empty to mean
+    /// "every parameter is binary".
+    ///
+    /// # Errors
+    ///
+    /// Same failure modes as [`Self::execute_prepared_no_result`].
+    pub async fn execute_prepared_no_result_with_formats(
+        &mut self,
+        statement_name: &str,
+        params: &[Option<&[u8]>],
+        param_formats: &[ParamFormat],
+    ) -> Result<u64> {
         self.ensure_healthy()?;
         // See `execute_prepared` and `start_query_binary` for why we must
         // drain any pending COPY cancel before writing new bytes.
         self.drain_pending_copy_cancel().await?;
-        let param_formats: Vec<i16> = vec![1; params.len()];
+        let param_format_codes = if param_formats.is_empty() {
+            std::borrow::Cow::Borrowed(all_binary_format_codes(params.len()))
+        } else {
+            bind_format_codes(param_formats)
+        };
         let result_formats: Vec<i16> = vec![];
 
         frontend::bind(
             "",
             statement_name,
-            &param_formats,
+            &param_format_codes,
             params,
             &result_formats,
             &mut self.write_buf,

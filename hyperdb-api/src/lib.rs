@@ -214,7 +214,7 @@ pub use catalog::Catalog;
 pub use connection::{Connection, CreateMode, ScalarValue};
 pub use connection_builder::ConnectionBuilder;
 pub use error::{ColumnErrorKind, Error, Result};
-pub use params::ToSqlParam;
+pub use params::{ParamFormat, ToSqlParam};
 pub use prepared::PreparedStatement;
 // Re-export Notice for callback registrants. ErrorKind is intentionally
 // NOT re-exported — callers match directly on the flat `Error` enum.

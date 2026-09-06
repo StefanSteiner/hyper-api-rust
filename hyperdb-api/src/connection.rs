@@ -1225,9 +1225,13 @@ impl Connection {
         };
         let oids: Vec<crate::Oid> = params.iter().map(|p| p.sql_oid()).collect();
         let stmt = client.prepare_typed(query, &oids)?;
-        let encoded: Vec<Option<Vec<u8>>> = params.iter().map(|p| p.encode_param()).collect();
-        let stream =
-            client.execute_streaming(&stmt, encoded, crate::result::DEFAULT_BINARY_CHUNK_SIZE)?;
+        let (encoded, formats) = crate::prepared::encode_params(params);
+        let stream = client.execute_streaming_with_formats(
+            &stmt,
+            encoded,
+            &formats,
+            crate::result::DEFAULT_BINARY_CHUNK_SIZE,
+        )?;
         Ok(Rowset::from_prepared(stream).with_statement_guard(stmt))
     }
 
@@ -1273,8 +1277,8 @@ impl Connection {
         };
         let oids: Vec<crate::Oid> = params.iter().map(|p| p.sql_oid()).collect();
         let stmt = client.prepare_typed(query, &oids)?;
-        let encoded: Vec<Option<Vec<u8>>> = params.iter().map(|p| p.encode_param()).collect();
-        Ok(client.execute_no_result(&stmt, encoded)?)
+        let (encoded, formats) = crate::prepared::encode_params(params);
+        Ok(client.execute_no_result_with_formats(&stmt, encoded, &formats)?)
     }
 
     /// Executes multiple SQL statements in a single call.

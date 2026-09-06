@@ -278,12 +278,28 @@ cargo kani -p hyperdb-api
 ### Parameterized Queries
 
 `query_params()` and `command_params()` use the PostgreSQL extended query
-protocol (Parse/Bind/Execute): each `$N` placeholder is bound to a
-binary-encoded parameter via `ToSqlParam::sql_oid()` + `encode_param()`, routed
-through `Connection::prepare_typed()`. Parameters are never interpolated into
+protocol (Parse/Bind/Execute): each `$N` placeholder is bound via
+`ToSqlParam::sql_oid()` + `encode_param()` + `param_format()`, routed through
+`Connection::prepare_typed()`. Parameters are never interpolated into
 the SQL text, so there is no injection surface. gRPC transport does not support
 prepared statements and returns `Error::FeatureNotSupported`. See rustdoc on
 `Connection::query_params()` in `connection.rs`.
+
+`Bind` carries a **per-parameter** format-code array, and Hyper honours a mixed
+one. Parameters default to PostgreSQL binary (`ParamFormat::Binary`); the two
+types Hyper has no binary *input* function for bind as text instead:
+
+- a `Numeric` with `scale() > 0` — a binary `NUMERIC` whose `dscale` exceeds the
+  parameter's resolved scale is rejected with `0A000`, and a declared `numeric`
+  OID (which carries no type modifier) resolves server-side to `NUMERIC(1,0)`,
+  so every scaled value hits that check. These bind as text *and* leave the OID
+  unspecified so the server infers the scale from context.
+- `Geography` — binary binds fail with `42883`; WKT text works.
+
+Everything else keeps the binary fast path. When every parameter is binary the
+`Bind` message ships a single format code rather than one per parameter (the
+protocol broadcasts a lone code across all of them), so the common path
+allocates nothing for formats at all.
 
 ### Key-Value Store
 

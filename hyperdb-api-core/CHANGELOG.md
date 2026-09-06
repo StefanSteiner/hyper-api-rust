@@ -13,7 +13,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `ParamFormat` (`Text` / `Binary`) and a set of `*_with_formats` execution
+  methods that take a per-parameter format-code array: `Client::{execute_streaming,
+  execute_no_result}_with_formats`, `AsyncClient::{execute_prepared_streaming,
+  execute_prepared_no_result}_with_formats`,
+  `RawConnection::start_execute_prepared_with_formats`,
+  `AsyncRawConnection::{start_execute_prepared, execute_prepared_no_result}_with_formats`,
+  and `prepare::execute_prepared_no_result_with_formats`. Hyper accepts a mixed
+  format-code array, so a statement can bind the types with no PG-binary input
+  function (scaled `NUMERIC`, `geography`) as text while every other parameter
+  stays binary. The existing methods are unchanged and still bind everything as
+  binary.
+
 ### Changed
+
+- The all-binary `Bind` path now sends a **single** parameter format code
+  rather than one per parameter. The PostgreSQL protocol broadcasts a lone
+  format code across every parameter, so this is wire-compatible and drops the
+  per-execute `Vec<i16>` allocation from the hot path.
 
 - **BREAKING:** the optional `arrow` dependency moved from **58** to **59**,
   matching `hyperdb-api`. Only relevant with the `salesforce-auth` feature.
