@@ -137,8 +137,10 @@ enum Commands {
         /// (`HYPERDB_DAEMON_PORT` when valid, otherwise 7485) and does not scan.
         /// Auto-spawn performs bounded discovery from its configured base before
         /// launching. For stop/status, omitting the port uses discovery plus
-        /// scanning.
-        #[arg(long, global = true)]
+        /// scanning. Must be 1-65535: port 0 asks the OS for an *ephemeral*
+        /// port, which contradicts the exact bind promised here and leaves a
+        /// daemon on a port no client's scan can ever find.
+        #[arg(long, global = true, value_parser = clap::value_parser!(u16).range(1..))]
         port: Option<u16>,
 
         /// Idle timeout in seconds before the daemon shuts down

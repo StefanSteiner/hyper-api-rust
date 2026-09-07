@@ -526,6 +526,147 @@ fn resolve_port_scan_scans_when_env_unset() {
     assert_eq!(scan.span, hyperdb_mcp::daemon::DAEMON_PORT_SCAN_SPAN);
 }
 
+/// `"0".parse::<u16>()` succeeds, so port 0 slipped through the env chain's
+/// validity filter and pinned `PortScan { base: 0, span: 1 }` — a
+/// configuration nothing can satisfy. `bind` would take an OS-assigned
+/// ephemeral port instead of port 0, while every client's scan kept probing
+/// port 0 and read `ProbeResult::Refused` as "free", so each client that
+/// missed the discovery fast path spawned another daemon-and-`hyperd` pair on
+/// another unfindable port. It must fall back to the scanning default, exactly
+/// as unparseable input already does.
+#[test]
+fn resolve_port_scan_rejects_zero_and_falls_back_to_the_default_scan() {
+    let _lock = acquire_env_lock();
+    let _guard = EnvGuard::set("HYPERDB_DAEMON_PORT", "0");
+    let scan = discovery::resolve_port_scan();
+    assert_eq!(
+        scan,
+        PortScan {
+            base: hyperdb_mcp::daemon::DEFAULT_DAEMON_BASE_PORT,
+            span: hyperdb_mcp::daemon::DAEMON_PORT_SCAN_SPAN,
+        },
+        "HYPERDB_DAEMON_PORT=0 must fall back to the default scan, not pin an \
+         unsatisfiable base: 0 / span: 1"
+    );
+}
+
+/// The same rejection at the other entry point. Driven through the real
+/// binary because `Cli` lives in `main.rs` and is not reachable from a test
+/// crate; that also verifies the clap `value_parser` produces a usage error
+/// (exit 2) rather than something the daemon has to defend against later.
+///
+/// Two safety properties this test needs, both learned the hard way by
+/// running it against the unfixed binary:
+///
+/// - **It must not hang.** Without the `value_parser`, `daemon --port 0` is
+///   *accepted* and runs a foreground daemon forever, so a plain
+///   `Command::output()` never returns. Each child is therefore waited on
+///   against a deadline and killed if it outlives it — a reverted fix fails
+///   with a message instead of wedging the suite.
+/// - **It must not touch the real state directory.** That same accepted
+///   daemon writes `daemon.json`, which overwrote the developer's live
+///   discovery record. `HOME`/`USERPROFILE`/`HYPERDB_STATE_DIR` are pinned
+///   into a temp dir so the blast radius of a regression stays inside the
+///   test.
+#[test]
+fn daemon_cli_rejects_port_zero() {
+    /// Long enough that a loaded machine cannot mistake startup for a hang,
+    /// short enough that a regression reports promptly. A rejected port exits
+    /// in milliseconds; an accepted one never exits at all.
+    const CHILD_DEADLINE: Duration = Duration::from_secs(20);
+
+    let sandbox = TempDir::new().expect("temp state dir for port-0 CLI test");
+    let mut failures = Vec::new();
+
+    let run_bounded = |args: &[&str]| -> Result<(Option<i32>, String), String> {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_hyperdb-mcp"));
+        command.env_clear();
+        preserve_child_runtime_environment(&mut command);
+        command
+            .args(args)
+            .current_dir(sandbox.path())
+            .env("HOME", sandbox.path())
+            .env("USERPROFILE", sandbox.path())
+            .env("HYPERDB_STATE_DIR", sandbox.path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(hyperd) = std::env::var_os("HYPERD_PATH") {
+            command.env("HYPERD_PATH", hyperd);
+        }
+
+        let mut child = command.spawn().map_err(|error| error.to_string())?;
+        let deadline = Instant::now() + CHILD_DEADLINE;
+        loop {
+            match child.try_wait().map_err(|error| error.to_string())? {
+                Some(status) => {
+                    let output = child
+                        .wait_with_output()
+                        .map_err(|error| error.to_string())?;
+                    return Ok((
+                        status.code(),
+                        String::from_utf8_lossy(&output.stderr).into(),
+                    ));
+                }
+                None if Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "`hyperdb-mcp {}` was still running after {CHILD_DEADLINE:?}; \
+                         port 0 was accepted and started a foreground daemon instead of \
+                         being rejected",
+                        args.join(" ")
+                    ));
+                }
+                None => std::thread::sleep(Duration::from_millis(50)),
+            }
+        }
+    };
+
+    for args in [
+        ["daemon", "--port", "0"].as_slice(),
+        ["daemon", "stop", "--port", "0"].as_slice(),
+        ["daemon", "status", "--port", "0"].as_slice(),
+    ] {
+        match run_bounded(args) {
+            Ok((code, stderr)) => {
+                if code != Some(2) {
+                    failures.push(format!(
+                        "{args:?}: expected clap's usage-error exit 2, got {code:?} (stderr {stderr:?})"
+                    ));
+                }
+                if !stderr.contains("not in") {
+                    failures.push(format!(
+                        "{args:?}: stderr should name the rejected range, got {stderr:?}"
+                    ));
+                }
+            }
+            Err(message) => failures.push(format!("{args:?}: {message}")),
+        }
+    }
+
+    // A valid port must still parse. `--help` short-circuits before any bind,
+    // so this stays hermetic: no daemon is started and no port is taken.
+    match run_bounded(&["daemon", "--port", "7485", "--help"]) {
+        Ok((Some(0), _)) => {}
+        Ok((code, stderr)) => failures.push(format!(
+            "a valid --port must still be accepted; exit {code:?}, stderr {stderr:?}"
+        )),
+        Err(message) => failures.push(format!("valid --port: {message}")),
+    }
+
+    assert!(
+        !sandbox.path().join("daemon.json").exists(),
+        "no invocation in this test may publish a discovery record; \
+         port 0 was accepted and a daemon actually started"
+    );
+    assert!(
+        failures.is_empty(),
+        "port-0 rejection failures:\n{}",
+        failures.join("\n")
+    );
+}
+
 #[test]
 fn daemon_status_post_action_port_targets_explicit_listener() {
     let _lock = acquire_env_lock();
