@@ -416,10 +416,20 @@ pub struct PortScan {
 /// Resolve the daemon health port scan configuration from environment or default.
 /// If `HYPERDB_DAEMON_PORT` is set and valid, returns a pinned scan (span=1) at
 /// that exact port. Otherwise, returns the default base port with the full scan span.
+///
+/// `0` is not a valid value here even though `"0".parse::<u16>()` succeeds, and
+/// is rejected into the same default fallback as unparseable input. A pinned
+/// `PortScan { base: 0, span: 1 }` is unsatisfiable by construction: `bind`
+/// would take an OS-assigned *ephemeral* port rather than port 0, while every
+/// client's scan would keep probing port 0, get a connection error, and read
+/// `ProbeResult::Refused` as "free" — so each client that missed the discovery
+/// fast path would spawn another daemon-and-`hyperd` pair on another ephemeral
+/// port that no scan can find, accumulating them silently.
 pub fn resolve_port_scan() -> PortScan {
     if let Some(port) = std::env::var(super::ENV_DAEMON_PORT)
         .ok()
         .and_then(|v| v.parse::<u16>().ok())
+        .filter(|port| *port != 0)
     {
         PortScan {
             base: port,

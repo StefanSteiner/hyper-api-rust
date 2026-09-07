@@ -193,6 +193,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Daemon port `0` is now rejected at both entry points, instead of quietly
+  multiplying daemons.** `--port` promises an exact bind and
+  `"0".parse::<u16>()` succeeds, so `0` passed validation at both the flag and
+  `HYPERDB_DAEMON_PORT` and reached `TcpListener::bind`, which assigns an
+  *ephemeral* port rather than port 0. The failure then compounded rather than
+  surfacing: with the resulting `PortScan { base: 0, span: 1 }`, every client's
+  scan probed port 0, got a connection error, and read `ProbeResult::Refused`
+  as "this port is free" — so each client that missed the discovery fast path
+  concluded no daemon existed and started another daemon-and-`hyperd` pair, on
+  another ephemeral port no scan could find. The pairs accumulated silently.
+  `--port` now carries a `1..` range (clap reports a usage error, exit 2), and
+  the `HYPERDB_DAEMON_PORT` chain filters `0` into the same default fallback
+  that unparseable values already take. Part of
+  [issue #275](https://github.com/tableau/hyper-api-rust/issues/275).
+
+  **`--port 0` was previously accepted and is now a usage error.** It never
+  did what the help text promised, so nothing can have depended on it
+  deliberately, but a script passing `0` will now fail loudly rather than
+  leaking daemons.
 - **`export(format="hyper")` silently dropped every column constraint.** The
   copy ran on `CREATE TABLE AS SELECT`, which infers the destination schema
   from the query's result columns — types but no constraints — so a database
