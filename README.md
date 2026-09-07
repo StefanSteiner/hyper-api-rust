@@ -18,7 +18,11 @@ database files (`.hyper`) without any C library dependencies.
 >
 > As of **1.0.0** the public API is stable and follows [semantic versioning](https://semver.org/):
 > breaking changes require a major release, so the frequent churn of the `0.x`
-> line is behind us.
+> line is behind us. What counts as that public API is per-crate — see the
+> [Crate Overview](#crate-overview) for the two crates that scope it
+> differently: `hyperdb-api-core` is an internal implementation detail, and
+> `hyperdb-mcp` governs its MCP tool surface rather than its Rust library
+> target.
 >
 > Contributors and reviewers should, at a minimum, run an **AI code reviewer**
 > over any changes, following the conventions, layering rules, and patterns
@@ -225,7 +229,7 @@ async fn main() -> Result<()> {
 | **[hyperdb-api](hyperdb-api/README.md)** | High-level API — connections, inserters, catalog, Arrow, pooling | crates.io |
 | **[hyperdb-api-core](hyperdb-api-core/README.md)** | Internal implementation details (types, protocol, client). Not a public API — depend on `hyperdb-api` instead. | crates.io |
 | **[hyperdb-api-salesforce](hyperdb-api-salesforce/README.md)** | Salesforce Data Cloud OAuth authentication | crates.io |
-| **[hyperdb-mcp](hyperdb-mcp/README.md)** | MCP server for LLM-driven SQL analytics on `.hyper` files | crates.io |
+| **[hyperdb-mcp](hyperdb-mcp/README.md)** | MCP server for LLM-driven SQL analytics on `.hyper` files. Semver covers the MCP tool surface; the Rust library target is not a public API. | crates.io |
 | **[sea-query-hyperdb](sea-query-hyperdb/README.md)** | HyperDB dialect backend for sea-query | crates.io |
 | **[hyperdb-api-node](hyperdb-api-node/README.md)** | Node.js/TypeScript bindings via napi-rs | npm |
 | **[hyperdb-bootstrap](hyperdb-bootstrap/README.md)** | Download the `hyperd` executable from Tableau's release packages | crates.io |

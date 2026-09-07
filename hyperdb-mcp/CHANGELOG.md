@@ -111,6 +111,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **The Rust library target is not a supported API surface, and its 21 modules
+  are now `#[doc(hidden)]`.** `src/lib.rs` already carried a lint `reason`
+  saying the library "is not a documented API surface", while this crate's
+  `README.md` promised, without scope, that "the public API is stable and
+  follows semantic versioning". Against a crate where every module is `pub`,
+  that sentence promised semver stability on all 21 modules and every item in
+  them, which is why two incidental internals had to be written up as API
+  events: `DaemonState` gaining a private field ([#289]) and `state_perms`
+  becoming new public surface ([#295]). The README now scopes the promise to
+  the **MCP tool surface** — tool names, their parameters, and their behavior
+  as reached over the MCP protocol — and states that the library target is
+  excluded; the root `README.md` crate table says the same, alongside the
+  equivalent note that already existed for `hyperdb-api-core`.
+
+  **Not marked BREAKING, and nothing was privatised.** `pub(crate)` is not
+  available for any of the 21 modules: Cargo compiles the `hyperdb-mcp`
+  `[[bin]]`, each file under `tests/`, and `examples/demo.rs` as separate
+  crates that can only reach library items through the external
+  `hyperdb_mcp::` path, and every module is used by at least one of them
+  (`paths` by the binary alone, `stats`, `subscriptions` and `watcher` by one
+  test file each). So `pub` is load-bearing for compilation, not an API
+  commitment. `#[doc(hidden)]` removes the modules from published rustdoc and
+  signals intent; it does not affect name resolution, so no code that compiled
+  before stops compiling. Narrowing a module to `pub(crate)` later would be
+  source-breaking and would carry the marker — this does not.
+
+[#289]: https://github.com/tableau/hyper-api-rust/pull/289
+[#295]: https://github.com/tableau/hyper-api-rust/pull/295
+
 <!-- The two entries below are retroactive. Both changes shipped in 0.7.3
      (commit 44bdf1e, PR #243) and were missing from this file; this crate's
      `## [Unreleased]` section has not been rolled over since 0.5.0, so the
