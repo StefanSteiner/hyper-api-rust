@@ -898,6 +898,10 @@ fn run_engine_report_child() {
 
 // ─── Unit tests: idle timeout logic (no env vars) ─────────────────────────────
 
+/// Covers the idle *arithmetic* only — it drives a bare `DaemonState` with its
+/// own monitor and never binds a `HealthListener`, so it stays green no matter
+/// what the accept loop does. `idle_timeout_stops_a_real_health_listener`
+/// below covers the composition this one cannot see.
 #[test]
 fn daemon_idle_timeout_shuts_down_daemon() {
     let idle_timeout = Duration::from_secs(2);
@@ -936,6 +940,93 @@ fn daemon_idle_timeout_shuts_down_daemon() {
     assert!(
         elapsed < idle_timeout * 2,
         "idle shutdown took {elapsed:?}, far beyond the {idle_timeout:?} timeout"
+    );
+}
+
+/// The full idle-shutdown composition, end to end: a real bound
+/// `HealthListener` sitting with no clients, a real idle timeout firing
+/// against the `DaemonState` it shares, the wake that has to reach the accept
+/// loop, and the `join()` that `run_daemon`'s step 7 performs on the listener
+/// thread actually returning.
+///
+/// Coverage was piecewise before this — `daemon_idle_timeout_shuts_down_daemon`
+/// mocks the arithmetic with no listener, and the health unit tests drive
+/// `request_shutdown` directly with no idle path — so nothing failed if the two
+/// halves stopped composing. Red if the wake is lost *and* the accept loop's
+/// readiness floor is removed: `run` then never returns and the join hangs
+/// forever, which is what the daemon would do in production.
+///
+/// Needs no state-directory isolation: the listener takes an ephemeral port
+/// rather than the daemon port, and nothing here writes a discovery record or
+/// otherwise touches `$HOME`.
+#[test]
+fn idle_timeout_stops_a_real_health_listener() {
+    const IDLE_TIMEOUT: Duration = Duration::from_millis(500);
+    const MONITOR_TICK: Duration = Duration::from_millis(25);
+    // Generous against the ~500 ms the idle path needs, and still far short of
+    // the unbounded wait a broken accept loop would produce.
+    const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(15);
+
+    let listener = HealthListener::bind(0).expect("bind real health listener");
+    let port = listener.port;
+    let state = Arc::new(DaemonState::new());
+    let info = Arc::new(Mutex::new(DaemonInfo {
+        pid: std::process::id(),
+        hyperd_endpoint: "127.0.0.1:0".to_string(),
+        health_port: port,
+        started_at: "2026-09-06T00:00:00Z".to_string(),
+        version: "0.0.0-test".to_string(),
+    }));
+
+    let run_state = Arc::clone(&state);
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    let health_thread = std::thread::spawn(move || {
+        listener.run(run_state, info);
+        let _ = finished_tx.send(());
+    });
+
+    // PING rather than HEARTBEAT: it proves the listener is really serving
+    // before the clock matters, without resetting the idle timer the test is
+    // about.
+    let pong = health::send_command(port, "PING").expect("real health listener must answer PING");
+    assert!(pong.starts_with("PONG"), "unexpected PING reply: {pong:?}");
+
+    // The same decision `run.rs`'s `idle_monitor` makes, at a tick that suits a
+    // test: no activity for `IDLE_TIMEOUT` ⇒ request shutdown.
+    let monitor_state = Arc::clone(&state);
+    let monitor = std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(MONITOR_TICK);
+            if monitor_state.should_shutdown() {
+                return;
+            }
+            if monitor_state.idle_duration() >= IDLE_TIMEOUT {
+                monitor_state.request_shutdown();
+                return;
+            }
+        }
+    });
+
+    let started_at = Instant::now();
+    let stopped = finished_rx.recv_timeout(SHUTDOWN_DEADLINE);
+    let elapsed = started_at.elapsed();
+
+    monitor.join().expect("idle monitor must not panic");
+    assert!(
+        stopped.is_ok(),
+        "the health listener was still running {elapsed:?} after an idle timeout fired; \
+         run_daemon joins this thread, so an accept loop that cannot be stopped is a \
+         permanent hang rather than a slow shutdown"
+    );
+    health_thread
+        .join()
+        .expect("health listener thread must not panic");
+
+    assert!(state.should_shutdown());
+    assert!(
+        elapsed >= IDLE_TIMEOUT,
+        "the listener stopped after {elapsed:?}, before the {IDLE_TIMEOUT:?} idle period \
+         elapsed — something other than the idle path shut it down"
     );
 }
 
