@@ -217,9 +217,13 @@ async fn run_daemon_mode(
     port: u16,
     idle_timeout: Option<u64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Daemon logs go to ~/.hyperdb/logs/
-    let log_dir = discovery::state_dir()?.join("logs");
-    std::fs::create_dir_all(&log_dir)?;
+    // Daemon logs go to ~/.hyperdb/logs/. They record the hyperd endpoint, so
+    // both the state directory and the log directory inside it are restricted
+    // to the owning user, as `daemon.json` is.
+    let state_dir = discovery::state_dir()?;
+    daemon::state_perms::ensure_owner_only_dir(&state_dir)?;
+    let log_dir = state_dir.join("logs");
+    daemon::state_perms::ensure_owner_only_dir(&log_dir)?;
 
     let file_appender = tracing_appender::rolling::never(&log_dir, "hyperdb-daemon.log");
     let (file_writer, _file_guard) = tracing_appender::non_blocking(file_appender);

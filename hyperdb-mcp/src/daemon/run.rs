@@ -196,8 +196,16 @@ pub fn try_record_restart_attempt(history: &mut Vec<Instant>, now: Instant) -> R
 
 /// Build the Parameters used for every hyperd spawn (initial start and restarts).
 fn build_params() -> std::io::Result<Parameters> {
-    let log_dir = discovery::state_dir()?.join("logs");
-    std::fs::create_dir_all(&log_dir)?;
+    // The state directory holds `daemon.json`; `logs/` holds `hyperd`'s own
+    // diagnostic logs, which name the endpoint just as `daemon.json` does.
+    // `hyperd` is a separate process writing under its own umask, so
+    // restricting the directory is what covers those files. Both levels are
+    // restricted here so the daemon's own startup establishes the invariant
+    // instead of it depending on the later discovery-file write.
+    let state_dir = discovery::state_dir()?;
+    super::state_perms::ensure_owner_only_dir(&state_dir)?;
+    let log_dir = state_dir.join("logs");
+    super::state_perms::ensure_owner_only_dir(&log_dir)?;
 
     let mut params = Parameters::new();
     params.set("log_file_max_count", "2");

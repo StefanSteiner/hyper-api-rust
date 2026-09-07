@@ -100,6 +100,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `bar_orientation`, `label_values`, `show_legend`, and positive-only
   `y_scale`, while preserving the public Rust `ChartOptions` surface and
   existing rendering defaults.
+- **`daemon::state_perms` module, with `state_perms::ensure_owner_only_dir`.**
+  New public surface on the library target: the single place that decides how
+  the daemon's state directory and the files in it are created and tightened
+  (see Security, below). It is public because `hyperdb-mcp`'s `[[bin]]` is a
+  separate crate to Cargo and sets up the daemon's log directory itself;
+  `pub(crate)` would not reach it. Like the rest of `daemon::*` it is plumbing
+  for the binary rather than an API to build on — the library target "is not a
+  documented API surface" — so it may be narrowed without a breaking change.
 
 ### Changed
 
@@ -280,6 +288,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **On Windows, the daemon state directory now resolves from `%USERPROFILE%`
+  before `HOME`.** `discovery::state_dir` documented `~` as "`HOME` on Unix,
+  `USERPROFILE` on Windows" but `home_dir()` tried `HOME` first on every
+  platform. MSYS2, Cygwin and Git Bash routinely set `HOME` to a path of their
+  own outside the user profile, so under those shells the state directory
+  landed outside `%USERPROFILE%` and did not inherit its ACL — the only thing
+  restricting these files on Windows — without the user having set
+  `HYPERDB_STATE_DIR` or otherwise asked for it. Windows now prefers
+  `USERPROFILE`, keeps `HOME` as a last resort so a machine that resolved
+  before still resolves, and matches `paths::persistent_home_dir`. Unix
+  resolution is unchanged. **Behaviour change on Windows:** a shell that sets
+  both to different paths now gets the profile-relative state directory, so a
+  daemon started before this change may not be discovered by a client started
+  after it until the old one is stopped.
 - **Daemon port `0` is now rejected at both entry points, instead of quietly
   multiplying daemons.** `--port` promises an exact bind and
   `"0".parse::<u16>()` succeeds, so `0` passed validation at both the flag and
@@ -631,6 +653,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   implies a live `hyperd` behind it and no `STATUS` reader can see an endpoint
   the file has not committed. Fixes
   [issue #284](https://github.com/tableau/hyper-api-rust/issues/284).
+
+### Security
+
+- **Daemon state files are now restricted to the owning user.** The state
+  directory (`~/.hyperdb`, or `HYPERDB_STATE_DIR`) is created `0700` and
+  `daemon.json` `0600` on Unix, where previously both took their mode from the
+  process umask — commonly `0755` and `0644`. `daemon.json` names the `hyperd`
+  endpoint, so it is owner-only from the moment it exists: the mode is set on
+  the atomic write's temp file *before* any content is written, and the
+  subsequent `rename` replaces the target's inode, which also tightens a record
+  an earlier release left readable. `logs/` gets the same `0700` treatment,
+  since `hyperd` writes its own diagnostic logs there under its own umask and
+  those records name the endpoint too — restricting the directory covers a
+  file this process does not own and has not seen yet. Directories and the
+  regular files directly inside them are both corrected when an earlier run
+  left them loose, rather than accepted as-is: closing the directory does
+  nothing about a log file already in it, and `logs/` is where the daemon's own
+  log and `hyperd`'s rotated logs sit. The sweep is one level deep, skips
+  anything that is not a regular file, and warns rather than failing, so it
+  cannot follow a link out of the directory or walk into whatever
+  `HYPERDB_STATE_DIR` names.
+- **The discovery file's temp file is created exclusively, so the mode always
+  applies to a file of our own.** `write_discovery_record` wrote
+  `daemon.json.tmp` with a plain create, which opens whatever already bears
+  that name and leaves the intended mode dependent on what that turns out to
+  be — a leftover temp file kept its own mode, and a name that resolved
+  somewhere else was written through. It is now unlinked and recreated with
+  `O_CREAT | O_EXCL` and `O_NOFOLLOW`, so the record always lands on a regular
+  file inside the state directory, created with the mode it is meant to have;
+  if the name cannot be created cleanly the write fails rather than publishing
+  anyway.
+- **A filesystem that cannot represent Unix modes no longer costs the daemon
+  its discovery file.** `chmod` is refused outright on a mount whose
+  permissions come from `fmask`/`dmask` rather than from each file — SMB or
+  NFS, exFAT or vfat, some container bind-mounts. Tightening the *directory*
+  already warned and carried on there, but setting the mode on `daemon.json`
+  propagated the refusal, so on exactly those filesystems the daemon warned
+  about the directory and then could not publish a record at all — turning a
+  working-if-loose setup into a startup failure. A refusal is now reconciled
+  against the mode actually on disk: if the file already reads back with
+  nothing granted to group or other, the record is protected and is published;
+  if it reads back wider, the error stands and nothing is published. Windows
+  relies on the ACL that `%USERPROFILE%` subdirectories inherit, which already
+  excludes other interactive users.
 
 ## [0.5.0] - 2026-06-07
 
