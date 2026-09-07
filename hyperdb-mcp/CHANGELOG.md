@@ -103,6 +103,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+<!-- The two entries below are retroactive. Both changes shipped in 0.7.3
+     (commit 44bdf1e, PR #243) and were missing from this file; this crate's
+     `## [Unreleased]` section has not been rolled over since 0.5.0, so the
+     version each landed in is stated inline rather than implied by a heading.
+     See issue #276. -->
+
+- **BREAKING (landed in 0.7.3):
+  `daemon::health::report_hyperd_error_to_daemon` changed from `fn()` to
+  `fn(health_port: u16)`.** The behavior change was correct — the old body
+  reported to `discovery::resolve_port().base`, the *configured* base port,
+  which is the wrong target whenever the daemon scanned past its base to find
+  a free one, so the report went to nothing or to a foreign listener and the
+  daemon never learned its `hyperd` had died. Taking the port from the
+  discovered daemon is the fix, and
+  `report_hyperd_error_targets_discovered_health_port` pins it. What was
+  missing is the record: the entry that shipped sat under `### Fixed`, named
+  no function, and carried no breaking marker, so nothing warned a downstream
+  library consumer that `0.7.2 → 0.7.3` — a compatible update under `^0.7.2`
+  — required a source change. **Callers pass the health port of the daemon
+  they discovered**, e.g. `discovery::discover().map(|info| info.health_port)`,
+  rather than relying on the function to resolve it.
+- **BREAKING (landed in 0.7.3): `daemon::health::send_command_with_timeout`
+  kept its signature but changed what two of its arguments mean.** Nothing a
+  compiler can catch, which is why it needs to be written down:
+  - `read_timeout` was a **per-read** timeout — set once as `SO_RCVTIMEO`, so
+    each underlying `read` syscall inside a `BufReader::read_line` got the
+    full duration, and the write phase was not bounded at all. It is now an
+    **absolute deadline** covering the whole write-and-read exchange. A caller
+    passing `Duration::from_millis(200)` for a multi-read exchange used to get
+    200 ms per read and now gets 200 ms in total. **Callers should size this
+    as a budget for the entire round trip**, not per read, and can now rely on
+    the write phase being bounded too, which it previously was not.
+  - Responses are now capped at **64 KiB**, returning
+    `io::ErrorKind::InvalidData` rather than growing without limit while
+    waiting for a newline.
+
+  Both were undocumented; `AGENTS.md` reminder 8 requires a per-crate entry
+  for any change to a publishable crate's public API surface.
 - **Histograms now honor an explicit `x_range`, and exclude the values that
   fall outside it.** `x_range` was validated for every chart type but read
   by line/scatter only. Bar charts are documented as ignoring it
