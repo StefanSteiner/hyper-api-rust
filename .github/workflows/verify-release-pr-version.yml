@@ -1,0 +1,42 @@
+name: verify-release-pr-version
+
+# Backstop for issue #308: a release-please PR must never move the manifest
+# version backward (e.g. propose 1.0.0-rc.2 after 1.0.0-rc.3 shipped). The
+# primary fix is the `release: published` re-trigger in release-please.yml;
+# this guard fails loudly and pre-merge if a regression slips through anyway.
+# See docs/GITHUB_OPERATIONS.md and .github/scripts/verify-release-pr-version.py.
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  version-forward:
+    # The job ALWAYS runs so it reports a definite success on every PR — safe to
+    # mark as a required status check. Only the release-please PR carries a
+    # version bump worth guarding, so the real work is gated at the step level.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        if: startsWith(github.head_ref, 'release-please--branches--')
+        with:
+          fetch-depth: 0
+
+      - name: Compare proposed manifest version against main
+        if: startsWith(github.head_ref, 'release-please--branches--')
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$BASE_REF"
+          BASE=$(git show "origin/${BASE_REF}:.release-please-manifest.json" | jq -r '."."')
+          HEAD=$(jq -r '."."' .release-please-manifest.json)
+          echo "main manifest:      $BASE"
+          echo "release-PR manifest: $HEAD"
+          python3 .github/scripts/verify-release-pr-version.py "$BASE" "$HEAD"
