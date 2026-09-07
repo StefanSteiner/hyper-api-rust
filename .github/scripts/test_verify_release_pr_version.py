@@ -47,6 +47,18 @@ class TestCompare(unittest.TestCase):
     def test_build_metadata_ignored(self):
         self.assertEqual(compare("1.0.0+abc", "1.0.0+xyz"), 0)
 
+    def test_numeric_identifier_below_alphanumeric(self):
+        # semver 2.0: a numeric prerelease identifier has LOWER precedence than
+        # an alphanumeric one, so 1.0.0-9 < 1.0.0-a.
+        self.assertEqual(compare("1.0.0-9", "1.0.0-a"), -1)
+        self.assertEqual(compare("1.0.0-a", "1.0.0-9"), 1)
+
+    def test_longer_identifier_list_wins(self):
+        # semver 2.0: when the shared prefix is equal, the LONGER identifier
+        # list has higher precedence, so 1.0.0-rc.1.1 > 1.0.0-rc.1.
+        self.assertEqual(compare("1.0.0-rc.1.1", "1.0.0-rc.1"), 1)
+        self.assertEqual(compare("1.0.0-rc.1", "1.0.0-rc.1.1"), -1)
+
 
 class TestForwardRule(unittest.TestCase):
     def test_is_forward(self):
