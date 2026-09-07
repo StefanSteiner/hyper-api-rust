@@ -39,9 +39,17 @@ const ENGINE_REPORT_TEST_NAME: &str = "report_hyperd_error_targets_discovered_he
 /// 45 s keeps ~40 s of headroom past the detection tick, comfortably absorbing a
 /// slow runner while still bounding a genuinely wedged daemon (which would never
 /// republish and would fail at the deadline regardless). This is a budget bump,
-/// not a coverage change: the tests still run on Linux/Windows. See issue #305
+/// not a coverage change: the restart tests still run on Linux. See issue #305
 /// for the standing daemon-test timing decision (which now spans Linux, not just
 /// the macOS-ignored set).
+///
+/// `#[cfg(unix)]` because its only use sites are the `#[cfg(unix)]` restart
+/// tests (`hyperd_monitor_detects_killed_hyperd_and_restarts`,
+/// `client_report_triggers_restart_after_kill`,
+/// `engine_recovers_after_hyperd_killed`) and their Unix-only helpers. Without
+/// the gate the constant is dead code on Windows, which `clippy -D warnings`
+/// rejects.
+#[cfg(unix)]
 const RESTART_READINESS_BUDGET_SECS: u64 = 45;
 
 fn acquire_env_lock() -> std::sync::MutexGuard<'static, ()> {
