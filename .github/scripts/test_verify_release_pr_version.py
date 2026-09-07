@@ -1,7 +1,9 @@
 """Unit tests for the release-PR version-forward guard.
 
-Run: python3 -m unittest .github/scripts/test_verify_release_pr_version.py
-(or: cd .github/scripts && python3 -m unittest test_verify_release_pr_version)
+Run: python3 .github/scripts/test_verify_release_pr_version.py
+(the `-m unittest <path>` form fails here: the leading dot in `.github` is read
+as a relative-module reference. Use the path directly, or from the script dir:
+cd .github/scripts && python3 -m unittest test_verify_release_pr_version)
 """
 import importlib.util
 import unittest

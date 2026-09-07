@@ -649,7 +649,7 @@ manual-tag runbook, verify the release PR's label is promoted to
 [Manual tag step](#manual-tag-step-after-release-please-pr-merge)) so the
 `release: published` re-run anchors instead of aborting. The
 [backward-version guard](#the-backward-version-guard)'s own comparator has unit
-tests: `python3 -m unittest .github/scripts/test_verify_release_pr_version.py`.
+tests: `python3 .github/scripts/test_verify_release_pr_version.py`.
 
 ### Lockstep versioning
 
