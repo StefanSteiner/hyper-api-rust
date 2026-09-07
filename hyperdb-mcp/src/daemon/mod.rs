@@ -7,6 +7,7 @@ pub mod discovery;
 pub mod health;
 pub mod run;
 pub mod spawn;
+pub mod state_perms;
 
 /// Default base TCP port for the daemon health listener. When no env var is set,
 /// the daemon scans `[base, base + DAEMON_PORT_SCAN_SPAN)` to find a free port.

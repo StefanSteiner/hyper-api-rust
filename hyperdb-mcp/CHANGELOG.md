@@ -632,6 +632,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the file has not committed. Fixes
   [issue #284](https://github.com/tableau/hyper-api-rust/issues/284).
 
+### Security
+
+- **Daemon state files are now restricted to the owning user.** The state
+  directory (`~/.hyperdb`, or `HYPERDB_STATE_DIR`) is created `0700` and
+  `daemon.json` `0600` on Unix, where previously both took their mode from the
+  process umask — commonly `0755` and `0644`. `daemon.json` names the `hyperd`
+  endpoint, so it is owner-only from the moment it exists: the mode is set on
+  the atomic write's temp file *before* any content is written, and the
+  subsequent `rename` replaces the target's inode, which also tightens a record
+  an earlier release left readable. `logs/` gets the same `0700` treatment,
+  since `hyperd` writes its own diagnostic logs there under its own umask and
+  those records name the endpoint too — restricting the directory covers files
+  this process does not own. A directory left loose by an earlier run is
+  corrected rather than accepted; when the `chmod` itself fails (a state
+  directory on a filesystem without Unix modes, say) the daemon warns and
+  carries on, but a `daemon.json` whose permissions could not be set is never
+  published. Windows relies on the ACL that `%USERPROFILE%` subdirectories
+  inherit, which already excludes other interactive users. Exposes
+  `daemon::state_perms::ensure_owner_only_dir` so the binary target can share
+  the helper with the library.
+
 ## [0.5.0] - 2026-06-07
 
 ### Added

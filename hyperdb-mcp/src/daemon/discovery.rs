@@ -296,22 +296,25 @@ pub(super) fn write_enriched_discovery_file(info: &DaemonInfo) -> io::Result<()>
 
 fn write_discovery_record(record: &(impl Serialize + ?Sized)) -> io::Result<()> {
     let dir = state_dir()?;
-    std::fs::create_dir_all(&dir)?;
+    super::state_perms::ensure_owner_only_dir(&dir)?;
 
     let path = dir.join("daemon.json");
     let tmp_path = dir.join("daemon.json.tmp");
     let json = serde_json::to_string_pretty(record).map_err(|e| io::Error::other(e.to_string()))?;
-    std::fs::write(&tmp_path, json.as_bytes())?;
-    // `std::fs::rename` already replaces an existing target atomically on
-    // both Unix (`rename(2)`) and Windows (`MoveFileExW` with
+    // Writes into `tmp_path` and renames it onto `path`. `std::fs::rename`
+    // already replaces an existing target atomically on both Unix
+    // (`rename(2)`) and Windows (`MoveFileExW` with
     // `MOVEFILE_REPLACE_EXISTING`, falling back to `SetFileInformationByHandle`
-    // with `FILE_RENAME_FLAG_REPLACE_IF_EXISTS`). Pre-deleting the target here
+    // with `FILE_RENAME_FLAG_REPLACE_IF_EXISTS`). Pre-deleting the target
     // would reintroduce exactly the window this function's doc comment
     // promises not to have: a concurrent `discover()` could observe the file
     // as `Missing` mid-restart (see `try_restart_hyperd`, which rewrites this
     // file on every `hyperd` restart).
-    std::fs::rename(&tmp_path, &path)?;
-    Ok(())
+    //
+    // The rename is also what tightens a record an earlier release left
+    // world-readable, because it replaces the target's inode rather than
+    // rewriting it in place.
+    super::state_perms::write_owner_only_atomic(&path, &tmp_path, json.as_bytes())
 }
 
 /// Read the discovery file and validate that the daemon is still alive.
@@ -1560,5 +1563,107 @@ mod tests {
             "FIFO raw discovery failures:\n{}",
             failures.join("\n")
         );
+    }
+
+    /// The state directory and the discovery file in it both name the `hyperd`
+    /// endpoint, so both must be restricted to the owning user — including when
+    /// an earlier release already created them under the process umask.
+    ///
+    /// Asserts the mode actually on disk rather than that a `chmod` was
+    /// attempted, since only the former is what another local account sees.
+    #[cfg(unix)]
+    fn run_state_permissions_scenario() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        assert!(
+            std::env::var_os("HYPERDB_STATE_DIR").is_some(),
+            "child scenario requires an isolated state directory"
+        );
+
+        fn mode_of(path: &Path) -> u32 {
+            std::fs::metadata(path)
+                .unwrap_or_else(|error| panic!("{} should exist: {error}", path.display()))
+                .permissions()
+                .mode()
+                & 0o777
+        }
+
+        let dir = state_dir().unwrap();
+        let path = discovery_file_path().unwrap();
+        let mut failures = Vec::new();
+
+        // A state directory and discovery file created from nothing.
+        write_discovery_file(&legacy_info()).unwrap();
+        let fresh_dir_mode = mode_of(&dir);
+        if fresh_dir_mode != 0o700 {
+            failures.push(format!(
+                "a newly created state directory was left at {fresh_dir_mode:04o} instead of \
+                 0700, so another local account can traverse it"
+            ));
+        }
+        let fresh_file_mode = mode_of(&path);
+        if fresh_file_mode != 0o600 {
+            failures.push(format!(
+                "a newly written discovery file was left at {fresh_file_mode:04o} instead of \
+                 0600, so it hands the hyperd endpoint to any local reader"
+            ));
+        }
+
+        // Permissions left loose by an earlier release must be corrected on the
+        // next write rather than accepted as they are.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            (mode_of(&dir), mode_of(&path)),
+            (0o755, 0o644),
+            "fixture must start world-readable or it does not exercise the correction"
+        );
+
+        write_discovery_file(&legacy_info()).unwrap();
+        let corrected_dir_mode = mode_of(&dir);
+        if corrected_dir_mode != 0o700 {
+            failures.push(format!(
+                "a pre-existing world-readable state directory stayed at {corrected_dir_mode:04o} \
+                 instead of being tightened to 0700"
+            ));
+        }
+        let corrected_file_mode = mode_of(&path);
+        if corrected_file_mode != 0o600 {
+            failures.push(format!(
+                "a pre-existing world-readable discovery file stayed at {corrected_file_mode:04o} \
+                 instead of being tightened to 0600"
+            ));
+        }
+
+        // The record must still be readable and intact afterwards: tightening
+        // permissions is worthless if it breaks the daemon's own discovery.
+        match serde_json::from_slice::<DaemonInfo>(&std::fs::read(&path).unwrap()) {
+            Ok(parsed) if parsed == legacy_info() => {}
+            Ok(_) => failures.push("the restricted record did not round-trip".to_string()),
+            Err(error) => {
+                failures.push(format!("the restricted record was unreadable: {error}"));
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "daemon state permission failures:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn state_directory_and_discovery_file_are_owner_only() {
+        const CHILD_SENTINEL_ENV: &str = "HYPERDB_MCP_STATE_PERMISSIONS_CHILD";
+        const TEST_NAME: &str =
+            "daemon::discovery::tests::state_directory_and_discovery_file_are_owner_only";
+
+        if let Some(marker) = std::env::var_os(CHILD_SENTINEL_ENV) {
+            std::fs::write(std::path::PathBuf::from(marker), b"started").unwrap();
+            run_state_permissions_scenario();
+            return;
+        }
+        run_discovery_compatibility_child(TEST_NAME, CHILD_SENTINEL_ENV);
     }
 }
