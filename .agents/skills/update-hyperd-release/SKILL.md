@@ -169,8 +169,8 @@ than merely that the CDN serves *something* at that path.
 
 ### 6. Run the full test suite against the NEW engine
 
-Point `HYPERD_PATH` at the freshly downloaded binary — do **not** rely on the
-workstation default (`~/dev/bin/hyperd`), which may be an old or unversioned build.
+Point `HYPERD_PATH` at the freshly downloaded binary — do **not** rely on an
+ad-hoc `hyperd` elsewhere on the machine, which may be an old or unversioned build.
 
 ```bash
 export HYPERD_PATH="$PWD/.hyperd/current/hyperd"

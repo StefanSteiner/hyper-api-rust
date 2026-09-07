@@ -8,7 +8,7 @@ with configurable resource limits, transport modes, and seed-based deterministic
 
 ```bash
 # Default run (5 min, 3 databases, 9 user threads):
-HYPERD_PATH=~/dev/bin/hyperd \
+HYPERD_PATH="$PWD/.hyperd/current" \
   cargo test -p hyperdb-api --test stress_test -- --ignored --nocapture
 
 # High-load 2-minute run:
@@ -17,13 +17,13 @@ STRESS_DURATION=120 STRESS_DATABASES=5 STRESS_INSERTER_USERS=8 \
   STRESS_THINK_MIN_MS=0 STRESS_THINK_MAX_MS=5 \
   STRESS_BATCH_MIN=1000 STRESS_BATCH_MAX=50000 \
   STRESS_OUTPUT_DIR=/tmp/stress_run \
-  HYPERD_PATH=~/dev/bin/hyperd \
+  HYPERD_PATH="$PWD/.hyperd/current" \
   cargo test -p hyperdb-api --test stress_test stress_test_tcp_hyperbinary -- --ignored --nocapture
 
 # Replay a previous run:
 STRESS_REPLAY_FILE=/tmp/stress_run/replay.json \
   STRESS_OUTPUT_DIR=/tmp/stress_replay \
-  HYPERD_PATH=~/dev/bin/hyperd \
+  HYPERD_PATH="$PWD/.hyperd/current" \
   cargo test -p hyperdb-api --test stress_test stress_test_replay -- --ignored --nocapture
 ```
 

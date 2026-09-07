@@ -14,7 +14,7 @@
 //! deliberately:
 //!
 //! ```text
-//! HYPERD_PATH=~/dev/bin/hyperd cargo test -p hyperdb-mcp \
+//! HYPERD_PATH="$PWD/.hyperd/current" cargo test -p hyperdb-mcp \
 //!     --test health_idle_cost_tests --release -- --ignored --nocapture
 //! ```
 //!
