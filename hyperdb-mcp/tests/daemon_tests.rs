@@ -1643,8 +1643,8 @@ fn hyperd_monitor_detects_killed_hyperd_and_restarts() {
         &daemon.info.hyperd_endpoint,
         RESTART_READINESS_BUDGET_SECS,
     )
-    .unwrap_or_else(|| {
-        panic!("daemon should restart hyperd within {RESTART_READINESS_BUDGET_SECS}s")
+    .unwrap_or_else(|why| {
+        panic!("daemon should restart hyperd within {RESTART_READINESS_BUDGET_SECS}s — {why}")
     });
 
     // The new endpoint must be reachable. Don't assert it differs from the old —
@@ -1681,8 +1681,11 @@ fn client_report_triggers_restart_after_kill() {
         &daemon.info.hyperd_endpoint,
         RESTART_READINESS_BUDGET_SECS,
     )
-    .unwrap_or_else(|| {
-        panic!("daemon should restart hyperd within {RESTART_READINESS_BUDGET_SECS}s after report")
+    .unwrap_or_else(|why| {
+        panic!(
+            "daemon should restart hyperd within \
+             {RESTART_READINESS_BUDGET_SECS}s after report — {why}"
+        )
     });
 
     assert!(
@@ -1740,8 +1743,8 @@ fn engine_recovers_after_hyperd_killed() {
         &daemon.info.hyperd_endpoint,
         RESTART_READINESS_BUDGET_SECS,
     )
-    .unwrap_or_else(|| {
-        panic!("daemon should restart hyperd within {RESTART_READINESS_BUDGET_SECS}s")
+    .unwrap_or_else(|why| {
+        panic!("daemon should restart hyperd within {RESTART_READINESS_BUDGET_SECS}s — {why}")
     });
 
     // Engine #2: post-restart. This mirrors what `with_engine` does after a
@@ -2101,31 +2104,40 @@ impl Drop for TestDaemon {
     }
 }
 
-/// Locate the `hyperd` process serving a daemon endpoint via `lsof`. Over IPC
-/// the endpoint is a Unix domain socket path (`<state>/sockets/hyper`), so
-/// match the process holding that socket file open; for a TCP `host:port`
-/// endpoint, match the process listening on the port. Returns the PID of
-/// whichever process owns it. Unix-only.
+/// Locate the `hyperd` process serving a daemon endpoint. Returns its PID.
+/// Unix-only.
+///
+/// Over IPC the endpoint is a Unix domain socket path
+/// (`<state>/sockets/hyper`), and `hyperd` guards that socket with a sibling
+/// PID file holding its own PID — `<socket path>.pid`, written with `O_EXCL`
+/// before the bind and unlinked on clean exit. Reading it names the one
+/// process serving *this* endpoint, which is what the restart tests need: they
+/// kill the returned PID, so a wrong answer kills an unrelated process and the
+/// behavior under test never happens.
+///
+/// Deliberately not `lsof -c hyperd <socket path>`: `lsof` ORs its
+/// list-selection options unless `-a` is passed, so that form matches every
+/// process whose command begins with `hyperd` *in addition to* the socket's
+/// owner. `lsof -t` prints PIDs lowest-first, so on a host running more than
+/// one `hyperd` — every CI job, where each test starts its own daemon and the
+/// previous one's engine is still shutting down — it reliably returns the
+/// *oldest* `hyperd` instead of this endpoint's. That is issue #310: over TCP
+/// the equivalent selection (`-iTCP:<port> -sTCP:LISTEN`) is unambiguous
+/// because the port pins one listener, which is why the same tests passed
+/// before the transport moved to a socket path shared across restarts.
 #[cfg(unix)]
 fn find_hyperd_pid_for_endpoint(endpoint: &str) -> Option<u32> {
-    use std::process::Command;
-
-    // `lsof -t` prints just the PID(s). A socket path is passed as a
-    // positional file argument; a TCP endpoint selects the listening socket by
-    // port. On the socket-path branch, constrain to command `hyperd` (`-c
-    // hyperd`) so a client sharing the socket can't be the PID the caller then
-    // kills — the TCP branch already narrows to the listener via `-sTCP:LISTEN`.
-    let output = if endpoint.starts_with('/') {
-        Command::new("lsof")
-            .args(["-nP", "-t", "-c", "hyperd", endpoint])
-            .output()
-    } else {
-        let port = endpoint.rsplit(':').next()?.parse::<u16>().ok()?;
-        Command::new("lsof")
-            .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-t"])
-            .output()
+    if endpoint.starts_with('/') {
+        return hyperd_pid_from_pid_file(&format!("{endpoint}.pid"));
     }
-    .ok()?;
+
+    // TCP: the listening port identifies exactly one process, so `-i` alone is
+    // already a precise selection.
+    let port = endpoint.rsplit(':').next()?.parse::<u16>().ok()?;
+    let output = std::process::Command::new("lsof")
+        .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-t"])
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -2136,6 +2148,34 @@ fn find_hyperd_pid_for_endpoint(endpoint: &str) -> Option<u32> {
         .map(str::trim)
         .find(|s| !s.is_empty())
         .and_then(|s| s.parse::<u32>().ok())
+}
+
+/// Read the PID out of a `hyperd` socket PID file and confirm it still names a
+/// live `hyperd`. Unix-only.
+///
+/// The file holds a bare decimal PID and no newline. `hyperd` only unlinks it
+/// on a clean exit, so after a `SIGKILL` a leftover file can name a dead — or,
+/// once the OS recycles the number, an unrelated live — process. Callers kill
+/// what this returns, so confirm identity rather than just liveness.
+#[cfg(unix)]
+fn hyperd_pid_from_pid_file(path: &str) -> Option<u32> {
+    let pid: u32 = std::fs::read_to_string(path).ok()?.trim().parse().ok()?;
+
+    // `ps -o comm=` prints the accounting name on Linux and the executable's
+    // full path on macOS; compare on the final path component to cover both.
+    let output = std::process::Command::new("ps")
+        .args(["-o", "comm=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .rsplit('/')
+        .next()
+        .is_some_and(|name| name.starts_with("hyperd"))
+        .then_some(pid)
 }
 
 /// Whether `endpoint` currently accepts a connection, over whichever transport
@@ -2164,8 +2204,11 @@ fn kill_pid(pid: u32) {
 }
 
 /// Wait for the daemon to advertise a *live* hyperd after the process serving
-/// `killed_endpoint` was killed, and return the endpoint it settled on, or
-/// `None` if the timeout expires.
+/// `killed_endpoint` was killed, and return the endpoint it settled on. On
+/// timeout, `Err` names the phase that expired and what it last observed —
+/// without that, a failure here is a bare "didn't restart in time" that says
+/// nothing about whether the kill, the detection, or the respawn is at fault
+/// (exactly how issue #310 stayed unexplained across two CI runs).
 ///
 /// Asking only "is the endpoint STATUS reports connectable?" is not enough,
 /// and was the cause of a ~20%-per-run failure on this file's restart tests.
@@ -2187,7 +2230,7 @@ fn wait_for_live_hyperd_after_kill(
     health_port: u16,
     killed_endpoint: &str,
     timeout_secs: u64,
-) -> Option<String> {
+) -> Result<String, String> {
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
 
     // Phase 1: the killed hyperd must stop accepting connections. Until it
@@ -2197,7 +2240,12 @@ fn wait_for_live_hyperd_after_kill(
     // in which the path refuses a connection before the replacement binds it.
     loop {
         if Instant::now() >= deadline {
-            return None;
+            return Err(format!(
+                "phase 1: {killed_endpoint} still accepts connections, so the hyperd serving \
+                 it is still alive and was never killed; that endpoint's pid file now names \
+                 {:?}",
+                find_hyperd_pid_for_endpoint(killed_endpoint)
+            ));
         }
         if !endpoint_accepts_connection(killed_endpoint) {
             break;
@@ -2207,17 +2255,30 @@ fn wait_for_live_hyperd_after_kill(
 
     // Phase 2: whatever STATUS advertises now must be reachable. With the old
     // socket proven down, a successful connect means a live replacement.
+    let mut last_seen = "no STATUS response".to_string();
     while Instant::now() < deadline {
-        if let Ok(response) = health::send_command(health_port, "STATUS")
-            && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(response.trim())
-            && let Some(endpoint) = parsed["hyperd_endpoint"].as_str()
-            && endpoint_accepts_connection(endpoint)
-        {
-            return Some(endpoint.to_string());
+        match health::send_command(health_port, "STATUS") {
+            Ok(response) => {
+                let endpoint = serde_json::from_str::<serde_json::Value>(response.trim())
+                    .ok()
+                    .and_then(|parsed| parsed["hyperd_endpoint"].as_str().map(ToString::to_string));
+                match endpoint {
+                    Some(endpoint) if endpoint_accepts_connection(&endpoint) => {
+                        return Ok(endpoint);
+                    }
+                    Some(endpoint) => {
+                        last_seen = format!("STATUS advertised {endpoint}, unreachable");
+                    }
+                    None => last_seen = format!("unparseable STATUS: {}", response.trim()),
+                }
+            }
+            Err(e) => last_seen = format!("STATUS request failed: {e}"),
         }
         std::thread::sleep(Duration::from_millis(250));
     }
-    None
+    Err(format!(
+        "phase 2: the killed hyperd went down but no live replacement was advertised ({last_seen})"
+    ))
 }
 
 /// RAII guard that sets/removes an environment variable and restores it on drop.
