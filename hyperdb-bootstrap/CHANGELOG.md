@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.0-rc.3] - 2026-09-07
+
 ### Changed
 
 - **BREAKING: `hyperd` is now downloaded from the PyPI `tableauhyperapi`
