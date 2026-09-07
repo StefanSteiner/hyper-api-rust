@@ -35,6 +35,36 @@ fn contains_any(text: &str, alternatives: &[&str]) -> bool {
         .any(|candidate| text.contains(candidate))
 }
 
+/// The changelog's *current release window*: the `## [Unreleased]` section plus
+/// the single most-recent dated release section, concatenated.
+///
+/// When a release ships, a `docs:` rollover (see PR #307) moves every bullet
+/// out of `## [Unreleased]` into a fresh dated `## [x.y.z]` section. Asserting
+/// documentation claims against the `## [Unreleased]` slice alone therefore
+/// breaks silently the moment that rollover lands — which is exactly what
+/// happened to `smoke_demo_and_changelog_contract`. Searching this window
+/// instead keeps the contract's intent ("these claims are documented for the
+/// current release candidate") stable across the rollover: before a release the
+/// claims live under `## [Unreleased]`, after it they live under the newest
+/// dated section, and the window spans both. Only the *most-recent* dated
+/// section is included — older historical sections are deliberately excluded so
+/// a stale token in an ancient entry cannot satisfy a check for a claim that was
+/// actually deleted.
+///
+/// `changelog_lower` must already be lowercased (the headings are matched
+/// case-insensitively by lowercasing the whole document at the call site).
+fn current_release_window(changelog_lower: &str) -> String {
+    let unreleased = markdown_section(changelog_lower, "## [unreleased]", "\n## [");
+    // Everything after the `## [Unreleased]` heading begins with the newest
+    // dated section's header; `markdown_section` then bounds it to that one
+    // section (up to the following `## [` heading).
+    let after_unreleased = changelog_lower
+        .split_once("## [unreleased]")
+        .map_or(changelog_lower, |(_, rest)| rest);
+    let latest_release = markdown_section(after_unreleased, "## [", "\n## [");
+    format!("{unreleased}\n{latest_release}")
+}
+
 fn markdown_bullet(text: &str, needle: &str) -> String {
     let mut lines = Vec::new();
     let mut capturing = false;
@@ -767,8 +797,9 @@ fn public_docs_database_and_read_only_contract() {
 fn smoke_demo_and_changelog_contract() {
     let smoke = SMOKE_TESTS.to_lowercase();
     let demo = DEMO.to_lowercase();
-    let unreleased =
-        markdown_section(&CHANGELOG.to_lowercase(), "## [unreleased]", "\n## [").to_owned();
+    // Assert against the current release window (`## [Unreleased]` + the newest
+    // dated section) so the release rollover (#307) can't silently rebreak this.
+    let release_window = current_release_window(&CHANGELOG.to_lowercase());
     let batch_section = markdown_section(
         &smoke,
         "## 2. create / read / overwrite (upsert)",
@@ -932,14 +963,14 @@ fn smoke_demo_and_changelog_contract() {
     }
 
     for heading in ["### added", "### fixed", "### changed"] {
-        let section = markdown_section(&unreleased, heading, "\n### ");
+        let section = markdown_section(&release_window, heading, "\n### ");
         if section.is_empty()
             || !section
                 .lines()
                 .any(|line| line.trim_start().starts_with("- "))
         {
             failures.push(format!(
-                "crate ## [Unreleased] must contain at least one bullet under {heading}"
+                "crate current release window must contain at least one bullet under {heading}"
             ));
         }
     }
@@ -954,14 +985,14 @@ fn smoke_demo_and_changelog_contract() {
         "show_legend",
         "y_scale",
     ] {
-        if !unreleased.contains(token) {
+        if !release_window.contains(token) {
             failures.push(format!(
-                "crate ## [Unreleased] does not account for {token:?}"
+                "crate current release window does not account for {token:?}"
             ));
         }
     }
 
-    let hyper_export = markdown_bullet(&unreleased, "hyper-format export");
+    let hyper_export = markdown_bullet(&release_window, "hyper-format export");
     if !(hyper_export.contains("source")
         && contains_any(
             &hyper_export,

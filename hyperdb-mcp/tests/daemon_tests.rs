@@ -25,6 +25,25 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 const ENGINE_REPORT_CHILD_ENV: &str = "HYPERDB_MCP_ENGINE_REPORT_CHILD";
 const ENGINE_REPORT_TEST_NAME: &str = "report_hyperd_error_targets_discovered_health_port";
 
+/// Seconds a crash-recovery test waits for the daemon to bring a fresh `hyperd`
+/// back to a reachable state after the running engine is killed.
+///
+/// Derivation: the liveness monitor polls on a 5 s tick
+/// (`daemon::run::HYPERD_POLL_INTERVAL`), so a kill landing just after a tick
+/// costs up to ~5 s just to be *noticed*. Recovery then has to drop the dead
+/// process, cold-spawn a new `hyperd`, rebind, and republish STATUS. On a
+/// loaded shared CI runner (`ubuntu-latest`) a cold engine spawn alone can eat
+/// several seconds, so the previous 12 s budget (~5 s detection + ~7 s slack)
+/// tripped as a *false* timeout even though recovery was progressing — these
+/// tests pass 4/4 locally and the third restart test passes on the same CI run.
+/// 45 s keeps ~40 s of headroom past the detection tick, comfortably absorbing a
+/// slow runner while still bounding a genuinely wedged daemon (which would never
+/// republish and would fail at the deadline regardless). This is a budget bump,
+/// not a coverage change: the tests still run on Linux/Windows. See issue #305
+/// for the standing daemon-test timing decision (which now spans Linux, not just
+/// the macOS-ignored set).
+const RESTART_READINESS_BUDGET_SECS: u64 = 45;
+
 fn acquire_env_lock() -> std::sync::MutexGuard<'static, ()> {
     ENV_LOCK
         .lock()
@@ -1608,11 +1627,17 @@ fn hyperd_monitor_detects_killed_hyperd_and_restarts() {
     // the next 5s tick and restart hyperd.
     kill_pid(pid_before);
 
-    // Wait up to 12 seconds for the monitor to fire and restart hyperd.
-    // (5s monitor tick + spawn time + slack.)
-    let new_endpoint =
-        wait_for_live_hyperd_after_kill(daemon.info.health_port, &daemon.info.hyperd_endpoint, 12)
-            .expect("daemon should restart hyperd within 12s");
+    // Wait for the monitor to fire and restart hyperd. The budget is generous
+    // (5s monitor tick + cold spawn + slack) so a loaded CI runner doesn't trip
+    // a false timeout; see RESTART_READINESS_BUDGET_SECS.
+    let new_endpoint = wait_for_live_hyperd_after_kill(
+        daemon.info.health_port,
+        &daemon.info.hyperd_endpoint,
+        RESTART_READINESS_BUDGET_SECS,
+    )
+    .unwrap_or_else(|| {
+        panic!("daemon should restart hyperd within {RESTART_READINESS_BUDGET_SECS}s")
+    });
 
     // The new endpoint must be reachable. Don't assert it differs from the old —
     // port reuse is permitted by the OS.
@@ -1644,9 +1669,14 @@ fn client_report_triggers_restart_after_kill() {
     let response = health::send_command(daemon.info.health_port, "REPORT_HYPERD_ERROR").unwrap();
     assert_eq!(response.trim(), "OK");
 
-    let new_endpoint =
-        wait_for_live_hyperd_after_kill(daemon.info.health_port, &daemon.info.hyperd_endpoint, 12)
-            .expect("daemon should restart hyperd within 12s after report");
+    let new_endpoint = wait_for_live_hyperd_after_kill(
+        daemon.info.health_port,
+        &daemon.info.hyperd_endpoint,
+        RESTART_READINESS_BUDGET_SECS,
+    )
+    .unwrap_or_else(|| {
+        panic!("daemon should restart hyperd within {RESTART_READINESS_BUDGET_SECS}s after report")
+    });
 
     let probe = std::net::TcpStream::connect_timeout(
         &new_endpoint.parse().expect("valid endpoint"),
@@ -1699,8 +1729,14 @@ fn engine_recovers_after_hyperd_killed() {
     // Wait for daemon-side restart. The daemon persists `daemon.json` before
     // it flips what STATUS serves, so a live endpoint from STATUS means the
     // discovery file `Engine::new` reads below is already committed.
-    wait_for_live_hyperd_after_kill(daemon.info.health_port, &daemon.info.hyperd_endpoint, 12)
-        .expect("daemon should restart hyperd within 12s");
+    wait_for_live_hyperd_after_kill(
+        daemon.info.health_port,
+        &daemon.info.hyperd_endpoint,
+        RESTART_READINESS_BUDGET_SECS,
+    )
+    .unwrap_or_else(|| {
+        panic!("daemon should restart hyperd within {RESTART_READINESS_BUDGET_SECS}s")
+    });
 
     // Engine #2: post-restart. This mirrors what `with_engine` does after a
     // ConnectionLost — drop the old engine (already done above) and create a
