@@ -215,29 +215,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   1.81, and the crate is compiled with **edition 2024**. 1.88 is the version
   Red Hat Enterprise Linux 9.7 ships as `rust-toolset`.
 - **The daemon's health listener no longer polls for connections.** The accept
-  loop used a non-blocking listening socket and a 5 ms sleep, so that
-  `DaemonState::should_shutdown` could be re-checked between
-  accepts. That put the whole cost of shutdown responsiveness on an idle
-  daemon, and made every connection pay a share of the sleep before it was
-  even read. The listener is now left blocking, `accept()` parks in the
-  kernel, and `request_shutdown` wakes it with a throwaway loopback
-  connection; the loop re-checks the flag after every `accept()` and drops the
-  wake connection unread. Measured on an Apple M3 Max over a 10 s idle window,
+  loop slept 5 ms between attempts on a non-blocking listening socket, so that
+  `DaemonState::should_shutdown` could be re-checked between accepts. That put
+  the whole cost of shutdown responsiveness on an idle daemon, and made every
+  connection pay a share of the sleep before it was even read. The loop now
+  waits for the socket to become *readable* instead of sleeping on a timer, so
+  an arriving connection is accepted with no added latency, and
+  `request_shutdown` returns that wait immediately with a throwaway loopback
+  connection; the loop re-checks the flag on every pass and drops the wake
+  connection unread. Measured on an Apple M3 Max over a 10 s idle window,
   release build, with `getrusage(RUSAGE_SELF)` around a real listener thread:
   context switches fell from **1736 (174/s) to 1**, idle CPU from
   **16 985 µs to 35 µs**, PING round-trip median from **4670 µs to 659 µs**,
   and shutdown latency from **5385 µs to 456 µs** — so both halves of the
   original trade improved rather than one being chosen over the other. `EINTR`
-  from a parked `accept()` is now handled as a benign retry instead of being
+  from the accept loop is now handled as a benign retry instead of being
   logged as an accept error and penalized with a 500 ms sleep
   ([#274](https://github.com/tableau/hyper-api-rust/issues/274)).
 
-  **`DaemonState` gained a private field** (`wake_port`), so it can no longer
-  be built with a struct literal from outside the crate. `DaemonState::new()`
-  and `Default` are unaffected and are what every in-tree caller already
-  uses. `HealthListener::bind` also no longer returns a listener in
-  non-blocking mode; nothing outside this module can observe that, since the
-  socket is private and `run` is its only consumer.
+  **The readiness wait still times out, once per second, and that cadence is a
+  deliberate correctness floor rather than a leftover.** The wake is what makes
+  shutdown prompt, but it can be lost — an unregistered wake port, a second
+  listener sharing one `DaemonState`, a connect that never lands — and since
+  every `request_shutdown` caller in the tree follows it with a `join()`, a
+  purely wake-driven loop turns any lost wake into a permanent hang rather than
+  a slow shutdown. One second bounds that unconditionally while still costing
+  ~1 wakeup/s against the ~174/s the 5 ms sleep cost. Windows keeps the 5 ms
+  interval, because the readiness wait there is a plain sleep that an arriving
+  connection cannot cut short, so the interval doubles as the accept latency.
+
+  **The idle cost is now reproducible rather than asserted.**
+  `tests/health_idle_cost_tests.rs` holds the `getrusage` measurement behind
+  `#[ignore]`, and doubles as a regression guard that fails if a busy poll ever
+  returns. It reports 5 s of idle costing **8 context switches (1.6/s) and
+  231 µs of CPU**, against **962 (192.4/s) and 21.3 ms** for the same harness
+  at the old 5 ms cadence. Run it with
+  `cargo test -p hyperdb-mcp --test health_idle_cost_tests --release -- --ignored --nocapture`.
+
+  **`DaemonState`'s fields are now private** — `last_activity`, `shutdown` and
+  `restart_requested` alongside the new `wake_port` — so the struct can no
+  longer be built with a struct literal or mutated field-by-field from outside
+  the crate. `DaemonState::new()`, `Default`, and the existing accessor pairs
+  (`touch`/`idle_duration`, `request_shutdown`/`should_shutdown`,
+  `request_restart`/`consume_restart_request`) are unaffected and are what
+  every in-tree caller already uses. `shutdown` is the one that mattered:
+  `state.shutdown.store(true, ...)` is what a public field invites, it reads
+  back through `should_shutdown()` exactly like `request_shutdown()`, and it
+  skips the wake — so it left the listener waiting out a full interval instead
+  of returning at once.
 - **KV attachment/read-only clarification (supersedes the shorthand in the
   Added notes above).** The global `--read-only` guard leaves the four KV
   readers available, but every `kv_*` call targeting a user attachment still

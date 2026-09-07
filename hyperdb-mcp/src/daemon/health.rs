@@ -31,11 +31,43 @@ use super::discovery::{DaemonInfo, DaemonRecord};
 /// port is owned by a hyperdb-mcp daemon (not a foreign service).
 pub const PONG_TOKEN: &str = "hyperdb-mcp";
 
-/// Bound on the throwaway loopback connect that wakes a parked `accept()`.
-/// Generous only as a hang guard — the kernel completes a loopback connection
-/// into the listen backlog without waiting for `accept()`, so in practice this
-/// returns in microseconds or fails fast with `ECONNREFUSED`.
+/// Bound on the throwaway loopback connect that wakes an accept loop waiting
+/// for readiness.
+///
+/// The common cases are fast: the kernel completes a loopback connection into
+/// the listen backlog without waiting for `accept()` (measured at ~140 µs), and
+/// a listener that has already gone away refuses the connection in ~8 ms. The
+/// worst case is *not* fast, though — with a full backlog the connect blocks
+/// for this entire duration rather than failing, measured at 251 ms on macOS
+/// against a `listen(1)` socket with nothing accepting. That is why
+/// [`DaemonState::wake_accept_loop`] runs the connect on a detached thread: a
+/// 250 ms stall must not land on the tokio worker that calls
+/// `request_shutdown`, nor delay the `STOPPING` reply that `handle_client`
+/// writes right after it.
 const WAKE_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// Upper bound on how long [`HealthListener::run`] waits for accept readiness
+/// before re-checking `should_shutdown` under its own power.
+///
+/// This is a deliberate correctness floor, not a leftover of the old 5 ms poll.
+/// [`DaemonState::request_shutdown`]'s wake connection is what makes shutdown
+/// *prompt* (sub-millisecond), but every wake can be lost — an unregistered
+/// `wake_port`, a listener sharing a `DaemonState` with another one, a connect
+/// that never lands. Since every `request_shutdown` caller in the tree follows
+/// it with a `join()`, a lost wake against a purely wake-driven loop is a
+/// permanent hang rather than a slow shutdown. One second bounds that
+/// unconditionally while still costing only one wakeup per second, versus the
+/// ~174/s the 5 ms poll cost (see issue #274 for the measurements).
+#[cfg(unix)]
+const ACCEPT_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Windows keeps the historical 5 ms cadence: [`wait_for_accept_readiness`]
+/// there is a plain sleep rather than a readiness wait, so this interval also
+/// bounds how long a real client waits to be accepted. Stretching it to a
+/// second would trade a shutdown bound for a second of accept latency, so
+/// Windows stays exactly where it shipped and only Unix takes the win.
+#[cfg(not(unix))]
+const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 /// Construct the PONG response with the identifying token and version.
 fn pong_response() -> String {
@@ -50,17 +82,30 @@ pub struct HealthListener {
 }
 
 /// Shared state between the health listener and the daemon main loop.
+///
+/// Every field is private and reached through the accessor pair that owns its
+/// invariant. `shutdown` in particular *must not* be settable directly: a bare
+/// `store(true)` looks identical to `request_shutdown()` through
+/// `should_shutdown()`, but skips the wake, so the listener stays in its
+/// readiness wait for a further `ACCEPT_POLL_INTERVAL` instead of returning
+/// at once. The other two are private for the same reason — one way in, one
+/// way out, so the pairing cannot be bypassed by a caller who only sees the
+/// field.
 #[derive(Debug)]
 pub struct DaemonState {
     /// Last time any client sent a heartbeat or query.
-    pub last_activity: Mutex<Instant>,
-    /// Signal to shut down the daemon.
-    pub shutdown: AtomicBool,
+    /// Read and written through [`Self::idle_duration`] and [`Self::touch`].
+    last_activity: Mutex<Instant>,
+    /// Signal to shut down the daemon. Written only by
+    /// [`Self::request_shutdown`], read only by [`Self::should_shutdown`].
+    shutdown: AtomicBool,
     /// Set by clients reporting that hyperd looks dead from over there;
-    /// consumed by the daemon's restart monitor.
-    pub restart_requested: AtomicBool,
+    /// consumed by the daemon's restart monitor. Written only by
+    /// [`Self::request_restart`], read-and-cleared only by
+    /// [`Self::consume_restart_request`].
+    restart_requested: AtomicBool,
     /// Loopback port to connect to in order to wake a [`HealthListener::run`]
-    /// loop parked in a blocking `accept()`. `0` is an unambiguous
+    /// loop waiting for accept readiness. `0` is an unambiguous
     /// "no listener registered" sentinel: [`HealthListener::bind`] resolves an
     /// ephemeral `bind(0)` through `local_addr()`, so a bound listener's port
     /// is never `0`.
@@ -99,51 +144,103 @@ impl DaemonState {
         self.last_activity.lock().expect("mutex poisoned").elapsed()
     }
 
-    /// Request shutdown and wake a health listener parked in `accept()`.
+    /// Request shutdown and wake a health listener waiting for accept
+    /// readiness.
     ///
     /// Every caller in the tree follows this with a `join()` on the listener
     /// thread (`run_daemon`'s step 7, and the test harnesses), so the wake is
-    /// not an optimization — without it a blocking `accept()` would never
-    /// return and the join would hang.
+    /// what makes that join return in microseconds rather than after a full
+    /// `ACCEPT_POLL_INTERVAL`.
+    ///
+    /// # Memory ordering
+    ///
+    /// The `SeqCst` here is load-bearing and must not be relaxed to
+    /// `Release`/`Acquire`. This half stores `shutdown` then loads
+    /// `wake_port`; [`HealthListener::run`] stores `wake_port` then loads
+    /// `shutdown`. That is Dekker's algorithm: each thread writes its own flag
+    /// and reads the other's. Release/Acquire orders store→store and
+    /// load→load, but says nothing about a store followed by a load of a
+    /// *different* location, so both loads may return stale values in the same
+    /// interleaving — `run` sees no shutdown and waits, while this sees no
+    /// wake port and connects to nobody. Only `SeqCst` gives the single total
+    /// order that rules the interleaving out.
+    ///
+    /// Both mainstream targets really do permit the reordering, which is worth
+    /// recording because the arm64 half is easy to get wrong. On x86-64 a
+    /// `Release` store is a plain `mov` with nothing between it and the
+    /// following load, so the store buffer may sink it past that load; a
+    /// `SeqCst` store is an `xchg`, which is a full barrier. On arm64 the
+    /// store is `stlr` either way — but LLVM lowers an `Acquire` load to
+    /// `ldapr` (RCpc) wherever FEAT_LRCPC is available, Apple Silicon
+    /// included, and `ldapr` is specifically *not* ordered against a preceding
+    /// `stlr`. Only the `ldar` (RCsc) that `SeqCst` emits carries that
+    /// guarantee. Both readings are from the assembly rustc actually emits for
+    /// this pairing, not from the reference manuals alone. The cost is one
+    /// `xchg` on two cold paths.
     pub fn request_shutdown(&self) {
-        self.shutdown.store(true, Ordering::Release);
+        self.shutdown.store(true, Ordering::SeqCst);
         self.wake_accept_loop();
     }
 
-    /// Nudge the listening socket so a blocked `accept()` returns and the loop
-    /// re-reads `should_shutdown`.
+    /// Nudge the listening socket so a waiting `accept()` becomes ready and
+    /// the loop re-reads `should_shutdown`.
     ///
-    /// The connection is completed by the kernel into the listen backlog, so
-    /// this does not itself wait on `accept()` and cannot deadlock against the
-    /// very loop it is waking. Every failure mode is benign and ignored: no
-    /// listener registered yet (the loop's pre-`accept` `should_shutdown`
-    /// check catches that), the listener already gone (connection refused), or
-    /// a full backlog — in which case the loop still wakes on one of the
-    /// queued connections and observes the flag. The wake makes shutdown
-    /// prompt; correctness rests on the flag check after `accept()` returns.
+    /// Runs on a detached thread. The connect is usually immediate, but its
+    /// worst case is a full [`WAKE_CONNECT_TIMEOUT`] (see that constant), and
+    /// this is called both from `run_daemon`'s async shutdown path — where it
+    /// would stall a tokio worker — and from the `STOP` handler, ahead of the
+    /// `STOPPING` reply. Neither can afford to wait on it, and nothing needs
+    /// the result: shutdown is bounded by the loop's own readiness timeout
+    /// whether or not the wake ever lands.
+    ///
+    /// Every failure mode is benign and ignored: no listener registered yet
+    /// (`wake_port == 0`, and the loop's pre-`accept` `should_shutdown` check
+    /// catches that), the listener already gone (connection refused), or a full
+    /// backlog — in which case the loop still becomes ready through one of the
+    /// queued connections. The wake makes shutdown prompt; correctness rests on
+    /// the flag check the loop performs on every pass.
     fn wake_accept_loop(&self) {
-        let port = self.wake_port.load(Ordering::Acquire);
+        // Read on the caller's thread, not the spawned one: this load is the
+        // second half of the `SeqCst` pairing documented on
+        // `request_shutdown`, and moving it off-thread would break it.
+        let port = self.wake_port.load(Ordering::SeqCst);
         if port == 0 {
             return;
         }
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-        let _ = TcpStream::connect_timeout(&addr, WAKE_CONNECT_TIMEOUT);
+        // `Builder::spawn` rather than `thread::spawn`: a best-effort wake must
+        // not panic its caller if the process is out of threads. Losing the
+        // wake costs at most one `ACCEPT_POLL_INTERVAL` of shutdown latency.
+        let spawned = std::thread::Builder::new()
+            .name("health-wake".to_string())
+            .spawn(move || {
+                let _ = TcpStream::connect_timeout(&addr, WAKE_CONNECT_TIMEOUT);
+            });
+        if let Err(error) = spawned {
+            debug!(%error, "could not spawn the health listener wake connection");
+        }
     }
 
     /// Point [`Self::wake_accept_loop`] at a live listening port. Called by
-    /// [`HealthListener::run`] before it parks in `accept()`.
+    /// [`HealthListener::run`] before its first `should_shutdown` check.
+    ///
+    /// `SeqCst` for the reason spelled out on [`Self::request_shutdown`]: this
+    /// store is the first half of the Dekker pairing whose second half is the
+    /// `shutdown` load in [`HealthListener::run`].
     fn register_wake_port(&self, port: u16) {
-        self.wake_port.store(port, Ordering::Release);
+        self.wake_port.store(port, Ordering::SeqCst);
     }
 
     /// Forget the wake port once the listener has stopped, so a later
     /// `request_shutdown` does not connect to whatever has since taken it.
     fn clear_wake_port(&self) {
-        self.wake_port.store(0, Ordering::Release);
+        self.wake_port.store(0, Ordering::SeqCst);
     }
 
+    /// `SeqCst` to match [`Self::request_shutdown`]'s store — see the memory
+    /// ordering note there.
     pub fn should_shutdown(&self) -> bool {
-        self.shutdown.load(Ordering::Acquire)
+        self.shutdown.load(Ordering::SeqCst)
     }
 
     /// Signal that hyperd appears to have died and a restart is needed.
@@ -161,11 +258,13 @@ impl DaemonState {
 impl HealthListener {
     /// Try to bind the health port.
     ///
-    /// The listener is left in blocking mode: [`Self::run`] parks in
-    /// `accept()` and is woken by [`DaemonState::request_shutdown`] rather
-    /// than by polling. Passing `0` binds an ephemeral port, which
-    /// `local_addr()` below resolves into [`Self::port`], so a bound
-    /// listener's port is never `0`.
+    /// The listening socket is non-blocking. [`Self::run`] waits for accept
+    /// readiness with a timeout rather than parking in `accept()` itself, so
+    /// that a lost shutdown wake costs one `ACCEPT_POLL_INTERVAL` instead of
+    /// blocking the loop in the kernel forever;
+    /// `bind_leaves_the_listening_socket_nonblocking` pins that precondition.
+    /// Passing `0` binds an ephemeral port, which `local_addr()` below
+    /// resolves into [`Self::port`], so a bound listener's port is never `0`.
     ///
     /// # Errors
     /// Returns `Err` if the port is already in use (another daemon is running)
@@ -173,6 +272,7 @@ impl HealthListener {
     pub fn bind(port: u16) -> std::io::Result<Self> {
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
         let listener = TcpListener::bind(addr)?;
+        listener.set_nonblocking(true)?;
         let port = listener.local_addr()?.port();
         Ok(Self { listener, port })
     }
@@ -184,14 +284,18 @@ impl HealthListener {
     /// *current* hyperd endpoint after a restart — the monitor task updates the
     /// same Arc once a new hyperd is running.
     ///
-    /// The loop blocks in `accept()` rather than polling a non-blocking socket
-    /// on a timer. It is woken by [`DaemonState::request_shutdown`], which
-    /// makes a throwaway loopback connection to this listener; the loop
-    /// re-checks `should_shutdown` after every `accept()` and drops the wake
-    /// connection unread. That leaves an idle daemon costing zero wakeups
-    /// while also giving a real client zero accept latency — the previous
-    /// 5 ms poll paid ~174 wakeups/second to make its own accept cost ~5 ms
-    /// (see issue #274 for the measurements).
+    /// The loop does not poll on a timer. It waits for the listening socket to
+    /// become readable — for up to `ACCEPT_POLL_INTERVAL` at a time — so an
+    /// arriving client is accepted with no added latency and an idle daemon
+    /// costs one wakeup per second instead of the ~174/s the old 5 ms sleep
+    /// cost (see issue #274 for the measurements).
+    ///
+    /// [`DaemonState::request_shutdown`] makes a throwaway loopback connection
+    /// to this listener, which returns the wait immediately; the loop
+    /// re-checks `should_shutdown` on every pass and drops the wake connection
+    /// unread. The readiness timeout is the floor underneath that: it bounds
+    /// shutdown at one interval even when the wake never arrives, which
+    /// matters because every `request_shutdown` caller joins this thread.
     #[expect(
         clippy::needless_pass_by_value,
         reason = "Arcs are cloned into per-connection threads"
@@ -199,8 +303,11 @@ impl HealthListener {
     pub fn run(self, state: Arc<DaemonState>, info: Arc<Mutex<DaemonInfo>>) {
         // Register before the first `should_shutdown` check, so a shutdown
         // racing this setup either finds the port (and wakes us) or is seen by
-        // the check below before we ever park.
-        state.register_wake_port(self.port);
+        // the check below before we ever wait. The guard clears it again on
+        // every exit path, including an unwind out of the loop — dropping
+        // `self.listener` frees the port, and a `wake_port` still naming it
+        // would send a later `request_shutdown` to whatever took it next.
+        let _wake_port = WakePortRegistration::register(&state, self.port);
 
         loop {
             if state.should_shutdown() {
@@ -229,14 +336,13 @@ impl HealthListener {
                     );
                 }
                 Err(ref error) if error.kind() == std::io::ErrorKind::Interrupted => {
-                    // A parked `accept()` is a prime EINTR target. Not an
-                    // error: loop round, re-check `should_shutdown`, re-park.
+                    // Not an error: loop round, re-check `should_shutdown`,
+                    // wait again.
                 }
                 Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    // Unreachable while `bind` leaves the listener blocking.
-                    // Kept as a backstop that cannot spin if some future
-                    // caller reintroduces a non-blocking listening socket.
-                    std::thread::sleep(Duration::from_millis(5));
+                    // Nothing queued. Sleep in the kernel until the socket is
+                    // readable or the interval expires, then re-check the flag.
+                    wait_for_accept_readiness(&self.listener, ACCEPT_POLL_INTERVAL);
                 }
                 Err(error) => {
                     warn!(error = %error, "health listener accept error");
@@ -244,9 +350,95 @@ impl HealthListener {
                 }
             }
         }
-        state.clear_wake_port();
         debug!("health listener shut down");
     }
+}
+
+/// Keeps [`DaemonState::wake_port`] pointing at a live listener for exactly as
+/// long as that listener is running.
+///
+/// A `Drop` impl rather than a call at the end of [`HealthListener::run`]:
+/// the loop can unwind (`std::thread::spawn` panics when the process is out of
+/// threads), and an unwind that skipped the clear would leave `wake_port`
+/// naming a port the dropped listener had just released.
+struct WakePortRegistration<'a> {
+    state: &'a DaemonState,
+}
+
+impl<'a> WakePortRegistration<'a> {
+    fn register(state: &'a DaemonState, port: u16) -> Self {
+        state.register_wake_port(port);
+        Self { state }
+    }
+}
+
+impl Drop for WakePortRegistration<'_> {
+    fn drop(&mut self) {
+        self.state.clear_wake_port();
+    }
+}
+
+/// Wait until `listener` has a connection queued, or `timeout` elapses.
+///
+/// Best-effort: the caller re-checks `should_shutdown` and retries `accept()`
+/// regardless of the outcome, so a spurious early return costs one extra
+/// `accept()` syscall and an error costs nothing. Returning early is always
+/// safe; returning *late* is what must not happen, because the shutdown bound
+/// documented on [`ACCEPT_POLL_INTERVAL`] rests on this call being finite.
+#[cfg(unix)]
+fn wait_for_accept_readiness(listener: &TcpListener, timeout: Duration) {
+    use std::os::fd::AsRawFd;
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return;
+        }
+
+        let mut poll_fd = libc::pollfd {
+            fd: listener.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // Saturating rather than wrapping: a timeout too large for a `c_int`
+        // becomes the longest wait `poll` can express, never a negative value,
+        // which `poll` reads as "block forever". Floored at 1 ms so a
+        // sub-millisecond remainder cannot round to a zero-timeout spin.
+        let timeout_ms = i32::try_from(remaining.as_millis())
+            .unwrap_or(i32::MAX)
+            .max(1);
+
+        // SAFETY: `poll_fd` is a single live, correctly initialized `pollfd`,
+        // and the `1` matches it; `listener` keeps the fd open for the whole
+        // call. `poll` only reads `fd`/`events` and writes `revents`.
+        if unsafe { libc::poll(&raw mut poll_fd, 1, timeout_ms) } >= 0 {
+            // Readable, or the interval expired. Either way the caller's next
+            // `accept()` decides what happened.
+            return;
+        }
+
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            // Nothing a retry fixes, and returning immediately would spin: the
+            // caller's `accept()` would come straight back with `WouldBlock`
+            // and call this again. Sleep out the rest of the interval so a
+            // persistently broken `poll` degrades to the old timer, keeping
+            // the shutdown bound while costing no more than the 5 ms poll did.
+            warn!(%error, "health listener readiness wait failed; falling back to a timer");
+            std::thread::sleep(remaining);
+            return;
+        }
+    }
+}
+
+/// Windows has no `poll` in this crate's dependency set, so the wait degrades
+/// to a plain sleep and cannot be cut short by an arriving connection. That is
+/// why [`ACCEPT_POLL_INTERVAL`] is 5 ms there: the interval doubles as the
+/// accept latency, exactly as it did before the listener stopped polling.
+#[cfg(not(unix))]
+fn wait_for_accept_readiness(_listener: &TcpListener, timeout: Duration) {
+    std::thread::sleep(timeout);
 }
 
 /// Outcome of [`accept_and_force_blocking`] once a connection has actually
@@ -271,14 +463,13 @@ enum AcceptedConnection {
 /// typically before the client has even written its first byte — tearing the
 /// connection down before it ever received a command.
 ///
-/// [`HealthListener::bind`] now leaves the listening socket *blocking*, so
-/// there is no `O_NONBLOCK` to inherit and this `set_nonblocking(false)` is a
-/// no-op on every platform today. It is kept deliberately, as the invariant
-/// [`handle_client`] actually depends on — that the stream it receives is
-/// blocking — rather than as a consequence of how the listener happens to be
-/// configured. `accept_and_force_blocking_clears_nonblocking_flag` pins it by
-/// making the listener non-blocking on purpose, so the guarantee is still
-/// tested under the condition that motivated it.
+/// [`HealthListener::bind`] puts the listening socket into non-blocking mode
+/// so [`HealthListener::run`] can bound its wait for readiness, which is
+/// exactly the configuration that triggers the propagation.
+/// `set_nonblocking(false)` below undoes it unconditionally, which is a no-op
+/// (not a bug) on platforms that never had the problem, and states the
+/// invariant [`handle_client`] actually depends on rather than leaving it to
+/// follow from how the listener happens to be configured.
 fn accept_and_force_blocking(listener: &TcpListener) -> std::io::Result<AcceptedConnection> {
     let (stream, _addr) = listener.accept()?;
     match stream.set_nonblocking(false) {
@@ -850,10 +1041,6 @@ mod tests {
         use std::os::unix::io::AsRawFd;
 
         let listener = HealthListener::bind(0).expect("bind test health listener");
-        listener
-            .listener
-            .set_nonblocking(true)
-            .expect("recreate the O_NONBLOCK-propagating listener this test is about");
         let port = listener.port;
 
         let client = std::thread::spawn(move || {
@@ -938,15 +1125,17 @@ mod tests {
         );
     }
 
-    /// The structural property that makes a busy accept poll impossible: with
-    /// a blocking listening socket, `accept()` parks in the kernel and there
-    /// is nothing for a sleep to pace. Asserting the flag rather than timing
-    /// the loop keeps this deterministic — a CPU or wakeup-rate threshold
-    /// would be a flake on a loaded CI runner. Red against the previous
-    /// `bind`, which called `set_nonblocking(true)`.
+    /// The precondition the bounded-shutdown floor rests on. `run` never calls
+    /// `accept()` on a socket that can park: it waits for readiness with an
+    /// [`ACCEPT_POLL_INTERVAL`] timeout and then accepts what is already
+    /// queued. Make the listening socket blocking and that inverts — `accept()`
+    /// itself parks in the kernel with no timeout of any kind, and shutdown
+    /// stops being bounded by anything except the wake connection landing.
+    /// Asserting the flag rather than timing the loop keeps this deterministic;
+    /// a CPU or wakeup-rate threshold would be a flake on a loaded CI runner.
     #[cfg(unix)]
     #[test]
-    fn bind_leaves_the_listening_socket_blocking() {
+    fn bind_leaves_the_listening_socket_nonblocking() {
         use std::os::unix::io::AsRawFd;
 
         let listener = HealthListener::bind(0).expect("bind test health listener");
@@ -961,23 +1150,34 @@ mod tests {
         );
         assert_eq!(
             flags & libc::O_NONBLOCK,
-            0,
-            "the health listening socket must stay blocking so run()'s accept() parks \
-             instead of returning WouldBlock on a timer; a non-blocking listener puts the \
-             5 ms idle poll back"
+            libc::O_NONBLOCK,
+            "the health listening socket must stay non-blocking so run()'s accept() can \
+             never park; a blocking listener makes shutdown depend entirely on the wake \
+             connection landing, and a lost wake becomes a permanent hang in the join()"
         );
     }
 
-    /// The safety half of the blocking-accept design. `run_daemon` (and every
-    /// test harness) calls `request_shutdown` and then *joins* the listener
-    /// thread, so a parked `accept()` that is never woken hangs the daemon's
-    /// shutdown forever rather than merely delaying it.
+    /// Deadline for the two tests that assert the *wake* is doing the work.
     ///
-    /// Bounded through a channel instead of a bare `join()` on purpose: a
-    /// missing wake is an infinite park, and this must fail with a message
-    /// rather than hang the suite.
+    /// Deliberately far below [`ACCEPT_POLL_INTERVAL`], because the readiness
+    /// floor would otherwise make them pass with the wake deleted: the loop
+    /// would simply notice the flag when its interval expired. Measured
+    /// shutdown latency through the wake is well under a millisecond, so half
+    /// a second is loose enough for a loaded CI runner and still an order of
+    /// magnitude clear of the one-second floor it has to distinguish itself
+    /// from. On Windows [`ACCEPT_POLL_INTERVAL`] is 5 ms and the two paths are
+    /// indistinguishable; the assertion holds there but proves nothing.
+    const PROMPT_SHUTDOWN_BOUND: Duration = Duration::from_millis(500);
+
+    /// The promptness half of the design. `run_daemon` (and every test
+    /// harness) calls `request_shutdown` and then *joins* the listener thread,
+    /// and the wake is what makes that join return immediately instead of
+    /// after a full [`ACCEPT_POLL_INTERVAL`].
+    ///
+    /// Bounded through a channel instead of a bare `join()` on purpose, so a
+    /// regression fails with a message rather than stalling the suite.
     #[test]
-    fn request_shutdown_wakes_a_parked_accept() {
+    fn request_shutdown_wakes_a_waiting_accept_loop() {
         let listener = HealthListener::bind(0).expect("bind test health listener");
         let port = listener.port;
         let state = Arc::new(DaemonState::new());
@@ -991,13 +1191,13 @@ mod tests {
             let _ = finished_tx.send(());
         });
 
-        // Prove the parked loop still serves a real client — a blocking
-        // accept() that never woke on a genuine connection would fail here —
-        // then idle well past the 5 ms cadence the old poll ran at, so the
-        // loop is certainly parked when shutdown is requested.
+        // Prove the loop serves a real client with no added latency, then idle
+        // long enough that it is certainly back inside its readiness wait when
+        // shutdown is requested — so the elapsed time below measures the wake
+        // and not a coincidental interval boundary.
         let pong =
             send_command_with_timeout(port, "PING", Duration::from_secs(2), Duration::from_secs(2))
-                .expect("a parked blocking accept() must still accept a real client");
+                .expect("the accept loop must serve a real client while waiting for readiness");
         assert!(pong.starts_with("PONG"), "unexpected PING reply: {pong:?}");
         std::thread::sleep(Duration::from_millis(100));
 
@@ -1007,9 +1207,69 @@ mod tests {
         let elapsed = requested_at.elapsed();
         assert!(
             woken.is_ok(),
-            "request_shutdown did not wake the parked accept() within 5s ({elapsed:?}); \
-             without the self-connect wake the listener thread never returns and \
-             run_daemon's join() hangs"
+            "request_shutdown did not stop the listener within 5s ({elapsed:?})"
+        );
+        assert!(
+            elapsed < PROMPT_SHUTDOWN_BOUND,
+            "request_shutdown took {elapsed:?} to stop the listener, past the \
+             {PROMPT_SHUTDOWN_BOUND:?} bound: the self-connect wake did not land and the \
+             loop fell through to its {ACCEPT_POLL_INTERVAL:?} readiness floor instead"
+        );
+        server
+            .join()
+            .expect("health listener thread must not panic");
+    }
+
+    /// The floor underneath the wake, and the reason `run` may never call a
+    /// blocking `accept()`.
+    ///
+    /// Clearing `wake_port` makes `request_shutdown` return without connecting
+    /// to anything — the same observable outcome as a shutdown that races
+    /// registration, a second listener having overwritten the port, or a
+    /// connect that never lands. Every `request_shutdown` caller in the tree
+    /// joins the listener thread, so with nothing but the wake to rely on this
+    /// is not a slow shutdown but a permanent one.
+    ///
+    /// Red against a blocking listening socket: the loop sits in `accept()`
+    /// with no timeout of any kind and the channel below never fires.
+    #[test]
+    fn shutdown_is_bounded_when_the_wake_cannot_be_delivered() {
+        // Comfortably past `ACCEPT_POLL_INTERVAL`, so the test measures
+        // "bounded at all" rather than racing the floor it is verifying.
+        const LOST_WAKE_SHUTDOWN_BOUND: Duration = Duration::from_secs(5);
+
+        let listener = HealthListener::bind(0).expect("bind test health listener");
+        let port = listener.port;
+        let state = Arc::new(DaemonState::new());
+        let info = Arc::new(Mutex::new(daemon_info(port)));
+
+        let run_state = Arc::clone(&state);
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            listener.run(run_state, info);
+            let _ = finished_tx.send(());
+        });
+
+        // Round-trip a real command first: that proves `run` has reached its
+        // loop and registered, so the clear below genuinely un-registers a
+        // live listener rather than winning a race against startup.
+        let pong =
+            send_command_with_timeout(port, "PING", Duration::from_secs(2), Duration::from_secs(2))
+                .expect("the accept loop must serve a real client before the wake is removed");
+        assert!(pong.starts_with("PONG"), "unexpected PING reply: {pong:?}");
+
+        state.clear_wake_port();
+
+        let requested_at = Instant::now();
+        state.request_shutdown();
+        let finished = finished_rx.recv_timeout(LOST_WAKE_SHUTDOWN_BOUND);
+        let elapsed = requested_at.elapsed();
+        assert!(
+            finished.is_ok(),
+            "the listener did not stop within {LOST_WAKE_SHUTDOWN_BOUND:?} ({elapsed:?}) once \
+             the wake could not be delivered; shutdown must stay bounded by the loop's own \
+             {ACCEPT_POLL_INTERVAL:?} readiness timeout, because run_daemon and every test \
+             harness join this thread and an unbounded wait there is a permanent hang"
         );
         server
             .join()
@@ -1019,7 +1279,7 @@ mod tests {
     /// The ordering hazard the pre-`accept` flag check covers: a shutdown
     /// requested before `run` has registered a wake port sends no wake at all
     /// (`wake_port` is still the `0` sentinel), so the loop must notice the
-    /// flag on its own and never park.
+    /// flag on its own rather than waiting out an interval first.
     #[test]
     fn run_returns_promptly_when_shutdown_precedes_it() {
         let listener = HealthListener::bind(0).expect("bind test health listener");
@@ -1031,15 +1291,19 @@ mod tests {
 
         let run_state = Arc::clone(&state);
         let (finished_tx, finished_rx) = mpsc::channel();
+        let started_at = Instant::now();
         let server = std::thread::spawn(move || {
             listener.run(run_state, info);
             let _ = finished_tx.send(());
         });
 
+        let finished = finished_rx.recv_timeout(Duration::from_secs(5));
+        let elapsed = started_at.elapsed();
         assert!(
-            finished_rx.recv_timeout(Duration::from_secs(5)).is_ok(),
-            "run() must observe a pre-existing shutdown flag before parking in accept(); \
-             it parked instead and no wake was ever sent"
+            finished.is_ok() && elapsed < PROMPT_SHUTDOWN_BOUND,
+            "run() must observe a pre-existing shutdown flag before waiting on the socket; \
+             it returned after {elapsed:?}, which means it waited out a readiness interval \
+             ({ACCEPT_POLL_INTERVAL:?}) first"
         );
         server
             .join()
