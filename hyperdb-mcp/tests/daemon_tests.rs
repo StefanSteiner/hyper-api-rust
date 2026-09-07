@@ -1615,12 +1615,11 @@ fn hyperd_monitor_detects_killed_hyperd_and_restarts() {
             .expect("daemon should restart hyperd within 12s");
 
     // The new endpoint must be reachable. Don't assert it differs from the old —
-    // port reuse is permitted by the OS.
-    let probe = std::net::TcpStream::connect_timeout(
-        &new_endpoint.parse().expect("valid endpoint"),
-        Duration::from_secs(2),
+    // the OS may reuse a TCP port, and the Unix socket path is fixed by design.
+    assert!(
+        endpoint_accepts_connection(&new_endpoint),
+        "new hyperd endpoint should be reachable"
     );
-    assert!(probe.is_ok(), "new hyperd endpoint should be reachable");
 }
 
 #[cfg(unix)]
@@ -1648,11 +1647,10 @@ fn client_report_triggers_restart_after_kill() {
         wait_for_live_hyperd_after_kill(daemon.info.health_port, &daemon.info.hyperd_endpoint, 12)
             .expect("daemon should restart hyperd within 12s after report");
 
-    let probe = std::net::TcpStream::connect_timeout(
-        &new_endpoint.parse().expect("valid endpoint"),
-        Duration::from_secs(2),
+    assert!(
+        endpoint_accepts_connection(&new_endpoint),
+        "new hyperd endpoint should be reachable"
     );
-    assert!(probe.is_ok(), "new hyperd endpoint should be reachable");
 }
 
 #[cfg(unix)]
@@ -2059,19 +2057,31 @@ impl Drop for TestDaemon {
     }
 }
 
-/// Locate the `hyperd` process by matching the listen-port portion of an
-/// endpoint string like `127.0.0.1:54321` against `lsof`'s view of TCP ports.
-/// Returns the PID of whichever process owns the port. Unix-only.
+/// Locate the `hyperd` process serving a daemon endpoint via `lsof`. Over IPC
+/// the endpoint is a Unix domain socket path (`<state>/sockets/hyper`), so
+/// match the process holding that socket file open; for a TCP `host:port`
+/// endpoint, match the process listening on the port. Returns the PID of
+/// whichever process owns it. Unix-only.
 #[cfg(unix)]
 fn find_hyperd_pid_for_endpoint(endpoint: &str) -> Option<u32> {
     use std::process::Command;
 
-    let port = endpoint.rsplit(':').next()?.parse::<u16>().ok()?;
-    // `lsof -nP -iTCP:<port> -sTCP:LISTEN -t` prints just the PID(s) listening on that port.
-    let output = Command::new("lsof")
-        .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-t"])
-        .output()
-        .ok()?;
+    // `lsof -t` prints just the PID(s). A socket path is passed as a
+    // positional file argument; a TCP endpoint selects the listening socket by
+    // port. On the socket-path branch, constrain to command `hyperd` (`-c
+    // hyperd`) so a client sharing the socket can't be the PID the caller then
+    // kills — the TCP branch already narrows to the listener via `-sTCP:LISTEN`.
+    let output = if endpoint.starts_with('/') {
+        Command::new("lsof")
+            .args(["-nP", "-t", "-c", "hyperd", endpoint])
+            .output()
+    } else {
+        let port = endpoint.rsplit(':').next()?.parse::<u16>().ok()?;
+        Command::new("lsof")
+            .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-t"])
+            .output()
+    }
+    .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -2082,6 +2092,21 @@ fn find_hyperd_pid_for_endpoint(endpoint: &str) -> Option<u32> {
         .map(str::trim)
         .find(|s| !s.is_empty())
         .and_then(|s| s.parse::<u32>().ok())
+}
+
+/// Whether `endpoint` currently accepts a connection, over whichever transport
+/// it names: a Unix domain socket path (`/…`) or a TCP `host:port`. Mirrors how
+/// a client would reach it, so the restart tests can gate on real reachability
+/// regardless of the daemon's transport. Unix-only.
+#[cfg(unix)]
+fn endpoint_accepts_connection(endpoint: &str) -> bool {
+    if endpoint.starts_with('/') {
+        std::os::unix::net::UnixStream::connect(endpoint).is_ok()
+    } else if let Ok(addr) = endpoint.parse::<std::net::SocketAddr>() {
+        std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok()
+    } else {
+        false
+    }
 }
 
 /// Kill the given PID with SIGKILL. Unix-only.
@@ -2123,12 +2148,14 @@ fn wait_for_live_hyperd_after_kill(
 
     // Phase 1: the killed hyperd must stop accepting connections. Until it
     // does, any endpoint we observe could still be its soon-to-close socket.
-    let killed_addr = killed_endpoint.parse::<std::net::SocketAddr>().ok()?;
+    // For the Unix socket the path is fixed across restarts, but the daemon's
+    // monitor only reacts on its ~5s tick, so there is always a downtime window
+    // in which the path refuses a connection before the replacement binds it.
     loop {
         if Instant::now() >= deadline {
             return None;
         }
-        if std::net::TcpStream::connect_timeout(&killed_addr, Duration::from_millis(500)).is_err() {
+        if !endpoint_accepts_connection(killed_endpoint) {
             break;
         }
         std::thread::sleep(Duration::from_millis(25));
@@ -2140,8 +2167,7 @@ fn wait_for_live_hyperd_after_kill(
         if let Ok(response) = health::send_command(health_port, "STATUS")
             && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(response.trim())
             && let Some(endpoint) = parsed["hyperd_endpoint"].as_str()
-            && let Ok(addr) = endpoint.parse::<std::net::SocketAddr>()
-            && std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok()
+            && endpoint_accepts_connection(endpoint)
         {
             return Some(endpoint.to_string());
         }

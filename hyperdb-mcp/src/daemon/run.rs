@@ -8,6 +8,7 @@
 //! `--idle-timeout` flag or `HYPERDB_DAEMON_IDLE_TIMEOUT` env var). When enabled,
 //! client HEARTBEAT commands reset the idle timer (see [`DaemonState`]).
 
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -94,11 +95,18 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), Box<dyn std::error::
     let bound_port = listener.port;
     info!(port = bound_port, "daemon health listener bound");
 
-    // Step 2: Spawn hyperd with TCP transport
-    let hyper = HyperProcess::new(None, Some(&build_params()?))?;
+    // Step 2: Spawn hyperd over a local IPC channel (Unix domain socket on
+    // Unix/macOS, named pipe on Windows).
+    let state_dir = discovery::state_dir()?;
+    let hyper = HyperProcess::new(None, Some(&build_params(&state_dir)?))?;
+    // Publish the *connection* endpoint, not the raw callback descriptor. For a
+    // Unix domain socket the raw `endpoint()` string reconstructs the path as
+    // `<dir>/domain/hyper` (a `tab.domain://` scheme artifact), whereas hyperd
+    // actually binds `<dir>/hyper`; `connection_endpoint()` carries the path a
+    // client can connect to. For TCP and Windows named pipes the two agree.
     let endpoint = hyper
-        .endpoint()
-        .ok_or("hyperd did not report an endpoint")?
+        .connection_endpoint()
+        .ok_or("hyperd did not report a connection endpoint")?
         .to_string();
     info!(endpoint = %endpoint, "hyperd started");
 
@@ -195,15 +203,19 @@ pub fn try_record_restart_attempt(history: &mut Vec<Instant>, now: Instant) -> R
 }
 
 /// Build the Parameters used for every hyperd spawn (initial start and restarts).
-fn build_params() -> std::io::Result<Parameters> {
+///
+/// `state_dir` is the resolved daemon state directory (from
+/// [`discovery::state_dir`]). Taking it as an argument rather than resolving it
+/// internally keeps this unit-testable without touching the process
+/// environment.
+fn build_params(state_dir: &Path) -> std::io::Result<Parameters> {
     // The state directory holds `daemon.json`; `logs/` holds `hyperd`'s own
     // diagnostic logs, which name the endpoint just as `daemon.json` does.
     // `hyperd` is a separate process writing under its own umask, so
     // restricting the directory is what covers those files. Both levels are
     // restricted here so the daemon's own startup establishes the invariant
     // instead of it depending on the later discovery-file write.
-    let state_dir = discovery::state_dir()?;
-    super::state_perms::ensure_owner_only_dir(&state_dir)?;
+    super::state_perms::ensure_owner_only_dir(state_dir)?;
     let log_dir = state_dir.join("logs");
     super::state_perms::ensure_owner_only_dir(&log_dir)?;
 
@@ -211,7 +223,52 @@ fn build_params() -> std::io::Result<Parameters> {
     params.set("log_file_max_count", "2");
     params.set("log_file_size_limit", "100M");
     params.set("log_dir", log_dir.to_string_lossy().as_ref());
-    params.set_transport_mode(TransportMode::Tcp);
+
+    // The daemon reaches its engine over a local IPC channel rather than TCP.
+    params.set_transport_mode(TransportMode::Ipc);
+
+    // On Unix the socket lives in a directory created private to the owner
+    // *before* hyperd binds inside it. hyperd binds the socket and never
+    // widens its directory, and creating the directory `0700` up front leaves
+    // no window in which a client-side tightening would race that bind. On
+    // Windows the transport is a named pipe with no directory to place, so
+    // this block compiles out (`domain_socket_directory` is Unix-only).
+    #[cfg(unix)]
+    {
+        // Landmine for PR B: the basename here must NOT start with `hyper-`.
+        // `HyperProcess::drop` (`hyperdb-api/src/process.rs`) `remove_dir_all`s
+        // any caller-supplied socket directory whose basename
+        // `starts_with("hyper-")`, treating it as a temp dir it owns. `sockets`
+        // is safe; renaming it to e.g. `hyper-sockets` would make Drop delete
+        // the daemon's persistent state directory contents.
+        let socket_dir = state_dir.join("sockets");
+        super::state_perms::ensure_owner_only_dir(&socket_dir)?;
+
+        // Fast-fail pre-flight. hyperd binds `<socket_dir>/hyper`; if another
+        // hyperd is *genuinely* bound there the connect succeeds, and without
+        // this guard hyperd would die with "unable to listen on domain socket:
+        // domain socket is in use" while `HyperProcess::new` masked it as a
+        // 60-second "Timeout waiting for Hyper to connect to callback listener".
+        // Reachable today only when two daemons share one state dir (different
+        // ports). A refused/missing socket (stale file, dead owner) is fine —
+        // proceed and let hyperd's pid-liveness staleness check reclaim it. This
+        // keeps the crash-restart path safe: `try_restart_hyperd` reaps the
+        // SIGKILLed child (`guard.hyper = None`) before calling `build_params`,
+        // so here the connect is refused and we proceed to rebind.
+        let socket_path = socket_dir.join("hyper");
+        if std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AddrInUse,
+                format!(
+                    "another hyperd is already bound at {}",
+                    socket_path.display()
+                ),
+            ));
+        }
+
+        params.set_domain_socket_directory(socket_dir);
+    }
+
     Ok(params)
 }
 
@@ -316,15 +373,29 @@ fn try_restart_hyperd(
 
     // Drop the old hyperd. For an already-exited process this is near-instant;
     // for a still-alive process, Drop waits up to ~5s for graceful shutdown.
+    //
+    // Load-bearing ordering: this drop MUST precede the respawn below. A
+    // SIGKILLed hyperd leaves a zombie until its `Child` handle is reaped, and a
+    // zombie still looks alive to hyperd's stale-socket check (pid-liveness on
+    // `<dir>/hyper.pid`) *and* to `build_params`' pre-flight connect. Dropping
+    // the handle here reaps the child so the replacement can reclaim the socket;
+    // reordering the respawn before this line wedges the new hyperd for the full
+    // 60-second callback timeout.
     guard.hyper = None;
 
     // Spawn the replacement.
-    let params = build_params().map_err(|e| RestartError::SpawnFailed(e.to_string()))?;
+    let state_dir = discovery::state_dir().map_err(|e| RestartError::SpawnFailed(e.to_string()))?;
+    let params = build_params(&state_dir).map_err(|e| RestartError::SpawnFailed(e.to_string()))?;
     let new_hyper = HyperProcess::new(None, Some(&params))
         .map_err(|e| RestartError::SpawnFailed(e.to_string()))?;
+    // See `run_daemon`: publish the connectable `connection_endpoint()`, not
+    // the raw callback descriptor, so a Unix socket path is the one hyperd
+    // actually bound.
     let new_endpoint = new_hyper
-        .endpoint()
-        .ok_or_else(|| RestartError::SpawnFailed("hyperd did not report endpoint".into()))?
+        .connection_endpoint()
+        .ok_or_else(|| {
+            RestartError::SpawnFailed("hyperd did not report a connection endpoint".into())
+        })?
         .to_string();
 
     // Publish the new endpoint, discovery file first and STATUS second.
@@ -379,5 +450,48 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     {
         ctrl_c.await.ok();
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    /// The daemon's Unix domain socket lives in a directory it creates private
+    /// to the owner *before* hyperd binds inside it. This reads the mode
+    /// straight back off the directory `build_params` created and handed to
+    /// `HyperProcess` through the `domain_socket_directory` override, so a
+    /// regression that dropped the `ensure_owner_only_dir` call — leaving the
+    /// directory at its umask-derived mode — would surface here.
+    #[test]
+    fn build_params_creates_owner_only_socket_directory() {
+        let tmp = TempDir::new().unwrap();
+        let state_dir = tmp.path().join("state");
+
+        let params = build_params(&state_dir).expect("build_params should create the state layout");
+
+        let socket_dir = params
+            .domain_socket_directory()
+            .expect("IPC params must carry a Unix domain socket directory");
+        assert_eq!(
+            socket_dir,
+            state_dir.join("sockets"),
+            "the socket directory must be a dedicated subdirectory under the state directory"
+        );
+
+        let mode = std::fs::metadata(socket_dir)
+            .expect("the socket directory must exist on disk")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o700,
+            "the daemon's socket directory must be owner-only before hyperd binds in it, \
+             got {mode:04o}"
+        );
     }
 }
