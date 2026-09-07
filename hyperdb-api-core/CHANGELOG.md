@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.0-rc.3] - 2026-09-07
+
 ### Added
 
 - `ParamFormat` (`Text` / `Binary`) and a set of `*_with_formats` execution

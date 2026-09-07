@@ -12,6 +12,8 @@ surface, and consumers should depend on `hyperdb-api-derive` instead.
 
 ## [Unreleased]
 
+## [1.0.0-rc.3] - 2026-09-07
+
 ### Fixed
 
 - **Validation no longer reports false "not registered" errors when nothing has
