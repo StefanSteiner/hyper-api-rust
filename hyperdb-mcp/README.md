@@ -1,6 +1,13 @@
 # hyperdb-mcp
 
-> **Note:** This crate is AI-assisted but human-directed — much of the code was written by AI coding assistants under close review, with the design and engineering trade-offs decided by an experienced developer. As of 1.0.0 the public API is stable and follows [semantic versioning](https://semver.org/), so breaking changes require a major release.
+> **Note:** This crate is AI-assisted but human-directed — much of the code was written by
+> AI coding assistants under close review, with the design and engineering trade-offs decided
+> by an experienced developer. As of 1.0.0 the **MCP tool surface** — tool names, their
+> parameters, and their behavior as reached over the MCP protocol — is stable and follows
+> [semantic versioning](https://semver.org/), so breaking changes to it require a major
+> release. The Rust library target is **not** a supported API surface: it exists only to
+> support the `hyperdb-mcp` binary, its tests, and its examples, its modules are
+> `#[doc(hidden)]`, and items within it may change in any release.
 
 An MCP (Model Context Protocol) server that turns the Hyper columnar database into an instant SQL analytics engine. Data flows in from other MCP plugins or files, lands in Hyper automatically, and becomes queryable with SQL — no setup, no schema files, no database management.
 

@@ -422,7 +422,10 @@ fn public_docs_database_and_read_only_contract() {
         "`status`",
     );
     let lib_source = LIB_SOURCE.to_lowercase();
-    let engine_crate_doc = markdown_section(&lib_source, "- [`engine`]", "- [`ingest`]");
+    // The crate-level architecture bullets name modules in plain code spans, not
+    // intra-doc links: every module is `#[doc(hidden)]`, and rustdoc leaves a
+    // link to a hidden item as literal `[engine]` brackets rather than resolving it.
+    let engine_crate_doc = markdown_section(&lib_source, "- `engine`", "- `ingest`");
     let development = DEVELOPMENT.to_lowercase();
     let development_prerequisites =
         markdown_section(&development, "### prerequisites", "### build");
