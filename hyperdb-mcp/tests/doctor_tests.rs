@@ -1961,9 +1961,10 @@ fn doctor_cli_reports_live_from_discovery_via_real_health_listener() {
         let launcher_metadata = sandbox.launcher_metadata("hyperdb-mcp-test-wrapper");
         let missing_hyperd = sandbox.root.join("missing-hyperd");
 
-        // Warm the already-built child before aligning the real listener's
-        // nonblocking accept loop. This keeps process-loader latency from
-        // determining whether the child lands inside the 100 ms sleep cadence.
+        // Warm the already-built child before starting the real listener. The
+        // accept loop no longer runs on a sleep cadence for the child to land
+        // inside, but keeping process-loader latency out of the measured
+        // attempt still makes the retry loop below cheaper.
         let warm_before = snapshot_tree(&sandbox.root);
         let warm = sandbox.run_with_options(
             &["doctor", "--json"],

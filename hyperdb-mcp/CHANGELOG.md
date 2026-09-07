@@ -214,6 +214,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **BREAKING:** the minimum supported Rust version is now **1.88**, up from
   1.81, and the crate is compiled with **edition 2024**. 1.88 is the version
   Red Hat Enterprise Linux 9.7 ships as `rust-toolset`.
+- **The daemon's health listener no longer polls for connections.** The accept
+  loop used a non-blocking listening socket and a 5 ms sleep, so that
+  `DaemonState::should_shutdown` could be re-checked between
+  accepts. That put the whole cost of shutdown responsiveness on an idle
+  daemon, and made every connection pay a share of the sleep before it was
+  even read. The listener is now left blocking, `accept()` parks in the
+  kernel, and `request_shutdown` wakes it with a throwaway loopback
+  connection; the loop re-checks the flag after every `accept()` and drops the
+  wake connection unread. Measured on an Apple M3 Max over a 10 s idle window,
+  release build, with `getrusage(RUSAGE_SELF)` around a real listener thread:
+  context switches fell from **1736 (174/s) to 1**, idle CPU from
+  **16 985 µs to 35 µs**, PING round-trip median from **4670 µs to 659 µs**,
+  and shutdown latency from **5385 µs to 456 µs** — so both halves of the
+  original trade improved rather than one being chosen over the other. `EINTR`
+  from a parked `accept()` is now handled as a benign retry instead of being
+  logged as an accept error and penalized with a 500 ms sleep
+  ([#274](https://github.com/tableau/hyper-api-rust/issues/274)).
+
+  **`DaemonState` gained a private field** (`wake_port`), so it can no longer
+  be built with a struct literal from outside the crate. `DaemonState::new()`
+  and `Default` are unaffected and are what every in-tree caller already
+  uses. `HealthListener::bind` also no longer returns a listener in
+  non-blocking mode; nothing outside this module can observe that, since the
+  socket is private and `run` is its only consumer.
 - **KV attachment/read-only clarification (supersedes the shorthand in the
   Added notes above).** The global `--read-only` guard leaves the four KV
   readers available, but every `kv_*` call targeting a user attachment still

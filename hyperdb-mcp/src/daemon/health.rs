@@ -19,7 +19,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -30,6 +30,12 @@ use super::discovery::{DaemonInfo, DaemonRecord};
 /// Identifying token included in PONG responses. Used to verify that a bound
 /// port is owned by a hyperdb-mcp daemon (not a foreign service).
 pub const PONG_TOKEN: &str = "hyperdb-mcp";
+
+/// Bound on the throwaway loopback connect that wakes a parked `accept()`.
+/// Generous only as a hang guard — the kernel completes a loopback connection
+/// into the listen backlog without waiting for `accept()`, so in practice this
+/// returns in microseconds or fails fast with `ECONNREFUSED`.
+const WAKE_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Construct the PONG response with the identifying token and version.
 fn pong_response() -> String {
@@ -53,6 +59,12 @@ pub struct DaemonState {
     /// Set by clients reporting that hyperd looks dead from over there;
     /// consumed by the daemon's restart monitor.
     pub restart_requested: AtomicBool,
+    /// Loopback port to connect to in order to wake a [`HealthListener::run`]
+    /// loop parked in a blocking `accept()`. `0` is an unambiguous
+    /// "no listener registered" sentinel: [`HealthListener::bind`] resolves an
+    /// ephemeral `bind(0)` through `local_addr()`, so a bound listener's port
+    /// is never `0`.
+    wake_port: AtomicU16,
 }
 
 impl Default for DaemonState {
@@ -67,6 +79,7 @@ impl DaemonState {
             last_activity: Mutex::new(Instant::now()),
             shutdown: AtomicBool::new(false),
             restart_requested: AtomicBool::new(false),
+            wake_port: AtomicU16::new(0),
         }
     }
 
@@ -86,8 +99,47 @@ impl DaemonState {
         self.last_activity.lock().expect("mutex poisoned").elapsed()
     }
 
+    /// Request shutdown and wake a health listener parked in `accept()`.
+    ///
+    /// Every caller in the tree follows this with a `join()` on the listener
+    /// thread (`run_daemon`'s step 7, and the test harnesses), so the wake is
+    /// not an optimization — without it a blocking `accept()` would never
+    /// return and the join would hang.
     pub fn request_shutdown(&self) {
         self.shutdown.store(true, Ordering::Release);
+        self.wake_accept_loop();
+    }
+
+    /// Nudge the listening socket so a blocked `accept()` returns and the loop
+    /// re-reads `should_shutdown`.
+    ///
+    /// The connection is completed by the kernel into the listen backlog, so
+    /// this does not itself wait on `accept()` and cannot deadlock against the
+    /// very loop it is waking. Every failure mode is benign and ignored: no
+    /// listener registered yet (the loop's pre-`accept` `should_shutdown`
+    /// check catches that), the listener already gone (connection refused), or
+    /// a full backlog — in which case the loop still wakes on one of the
+    /// queued connections and observes the flag. The wake makes shutdown
+    /// prompt; correctness rests on the flag check after `accept()` returns.
+    fn wake_accept_loop(&self) {
+        let port = self.wake_port.load(Ordering::Acquire);
+        if port == 0 {
+            return;
+        }
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        let _ = TcpStream::connect_timeout(&addr, WAKE_CONNECT_TIMEOUT);
+    }
+
+    /// Point [`Self::wake_accept_loop`] at a live listening port. Called by
+    /// [`HealthListener::run`] before it parks in `accept()`.
+    fn register_wake_port(&self, port: u16) {
+        self.wake_port.store(port, Ordering::Release);
+    }
+
+    /// Forget the wake port once the listener has stopped, so a later
+    /// `request_shutdown` does not connect to whatever has since taken it.
+    fn clear_wake_port(&self) {
+        self.wake_port.store(0, Ordering::Release);
     }
 
     pub fn should_shutdown(&self) -> bool {
@@ -109,13 +161,18 @@ impl DaemonState {
 impl HealthListener {
     /// Try to bind the health port.
     ///
+    /// The listener is left in blocking mode: [`Self::run`] parks in
+    /// `accept()` and is woken by [`DaemonState::request_shutdown`] rather
+    /// than by polling. Passing `0` binds an ephemeral port, which
+    /// `local_addr()` below resolves into [`Self::port`], so a bound
+    /// listener's port is never `0`.
+    ///
     /// # Errors
     /// Returns `Err` if the port is already in use (another daemon is running)
     /// or the bind fails for another reason.
     pub fn bind(port: u16) -> std::io::Result<Self> {
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
         let listener = TcpListener::bind(addr)?;
-        listener.set_nonblocking(true)?;
         let port = listener.local_addr()?.port();
         Ok(Self { listener, port })
     }
@@ -126,11 +183,25 @@ impl HealthListener {
     /// `info` is shared (`Arc<Mutex<DaemonInfo>>`) so the listener reports the
     /// *current* hyperd endpoint after a restart — the monitor task updates the
     /// same Arc once a new hyperd is running.
+    ///
+    /// The loop blocks in `accept()` rather than polling a non-blocking socket
+    /// on a timer. It is woken by [`DaemonState::request_shutdown`], which
+    /// makes a throwaway loopback connection to this listener; the loop
+    /// re-checks `should_shutdown` after every `accept()` and drops the wake
+    /// connection unread. That leaves an idle daemon costing zero wakeups
+    /// while also giving a real client zero accept latency — the previous
+    /// 5 ms poll paid ~174 wakeups/second to make its own accept cost ~5 ms
+    /// (see issue #274 for the measurements).
     #[expect(
         clippy::needless_pass_by_value,
         reason = "Arcs are cloned into per-connection threads"
     )]
     pub fn run(self, state: Arc<DaemonState>, info: Arc<Mutex<DaemonInfo>>) {
+        // Register before the first `should_shutdown` check, so a shutdown
+        // racing this setup either finds the port (and wakes us) or is seen by
+        // the check below before we ever park.
+        state.register_wake_port(self.port);
+
         loop {
             if state.should_shutdown() {
                 break;
@@ -138,6 +209,13 @@ impl HealthListener {
 
             match accept_and_force_blocking(&self.listener) {
                 Ok(AcceptedConnection::Ready(stream)) => {
+                    // The shutdown wake arrives as an ordinary connection.
+                    // Re-check before spending a thread on it; a genuine
+                    // client arriving in the same instant is dropped, exactly
+                    // as the pre-`accept` check has always dropped it.
+                    if state.should_shutdown() {
+                        break;
+                    }
                     let state = Arc::clone(&state);
                     let info = Arc::clone(&info);
                     std::thread::spawn(move || {
@@ -150,20 +228,23 @@ impl HealthListener {
                         "could not make accepted health connection blocking"
                     );
                 }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    // Poll tightly: the doctor network phase budgets only a
-                    // few hundred ms for a STATUS round-trip, and on slow CI
-                    // runners a 100ms idle sleep between accepts can push the
-                    // accept past that window. 5ms keeps the listener
-                    // responsive without meaningfully raising idle CPU.
+                Err(ref error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                    // A parked `accept()` is a prime EINTR target. Not an
+                    // error: loop round, re-check `should_shutdown`, re-park.
+                }
+                Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    // Unreachable while `bind` leaves the listener blocking.
+                    // Kept as a backstop that cannot spin if some future
+                    // caller reintroduces a non-blocking listening socket.
                     std::thread::sleep(Duration::from_millis(5));
                 }
-                Err(e) => {
-                    warn!(error = %e, "health listener accept error");
+                Err(error) => {
+                    warn!(error = %error, "health listener accept error");
                     std::thread::sleep(Duration::from_millis(500));
                 }
             }
         }
+        state.clear_wake_port();
         debug!("health listener shut down");
     }
 }
@@ -182,18 +263,22 @@ enum AcceptedConnection {
 
 /// Accept one connection and force it into blocking mode.
 ///
-/// [`HealthListener::bind`] puts the *listening* socket into non-blocking
-/// mode so [`HealthListener::run`]'s loop can poll `should_shutdown` between
-/// accepts. On BSD-derived kernels — macOS and other BSDs, but **not**
-/// Linux, which keeps a newly accepted socket's blocking mode independent of
-/// the listener's — `accept()` propagates the listening socket's
-/// `O_NONBLOCK` flag to the accepted socket. Left non-blocking, the accepted
-/// stream would return `WouldBlock` from `read_line` in
-/// [`handle_client`] in microseconds — typically before the client has even
-/// written its first byte — tearing the connection down before it ever
-/// received a command. `set_nonblocking(false)` below undoes that
-/// propagation unconditionally, which is a no-op (not a bug) on platforms
-/// that never had the problem.
+/// On BSD-derived kernels — macOS and other BSDs, but **not** Linux, which
+/// keeps a newly accepted socket's blocking mode independent of the
+/// listener's — `accept()` propagates the listening socket's `O_NONBLOCK`
+/// flag to the accepted socket. Left non-blocking, the accepted stream would
+/// return `WouldBlock` from `read_line` in [`handle_client`] in microseconds —
+/// typically before the client has even written its first byte — tearing the
+/// connection down before it ever received a command.
+///
+/// [`HealthListener::bind`] now leaves the listening socket *blocking*, so
+/// there is no `O_NONBLOCK` to inherit and this `set_nonblocking(false)` is a
+/// no-op on every platform today. It is kept deliberately, as the invariant
+/// [`handle_client`] actually depends on — that the stream it receives is
+/// blocking — rather than as a consequence of how the listener happens to be
+/// configured. `accept_and_force_blocking_clears_nonblocking_flag` pins it by
+/// making the listener non-blocking on purpose, so the guarantee is still
+/// tested under the condition that motivated it.
 fn accept_and_force_blocking(listener: &TcpListener) -> std::io::Result<AcceptedConnection> {
     let (stream, _addr) = listener.accept()?;
     match stream.set_nonblocking(false) {
@@ -753,12 +838,22 @@ mod tests {
     /// propagate `O_NONBLOCK` to accepted sockets. Reading the `O_NONBLOCK`
     /// flag directly makes the test verify the real contract everywhere,
     /// rather than a platform-dependent behavioral proxy for it.
+    ///
+    /// The listener is put into non-blocking mode explicitly. `bind` leaves it
+    /// blocking now that [`HealthListener::run`] parks in `accept()`, so
+    /// without this the accepted socket would be blocking for free and the
+    /// assertion would hold no matter what `accept_and_force_blocking` did —
+    /// re-opening the verification gap #273 closed.
     #[cfg(unix)]
     #[test]
     fn accept_and_force_blocking_clears_nonblocking_flag() {
         use std::os::unix::io::AsRawFd;
 
         let listener = HealthListener::bind(0).expect("bind test health listener");
+        listener
+            .listener
+            .set_nonblocking(true)
+            .expect("recreate the O_NONBLOCK-propagating listener this test is about");
         let port = listener.port;
 
         let client = std::thread::spawn(move || {
@@ -841,5 +936,113 @@ mod tests {
             Some(std::io::ErrorKind::UnexpectedEof),
             "a peer that closes having sent nothing must be reported as an error, not {result:?}"
         );
+    }
+
+    /// The structural property that makes a busy accept poll impossible: with
+    /// a blocking listening socket, `accept()` parks in the kernel and there
+    /// is nothing for a sleep to pace. Asserting the flag rather than timing
+    /// the loop keeps this deterministic — a CPU or wakeup-rate threshold
+    /// would be a flake on a loaded CI runner. Red against the previous
+    /// `bind`, which called `set_nonblocking(true)`.
+    #[cfg(unix)]
+    #[test]
+    fn bind_leaves_the_listening_socket_blocking() {
+        use std::os::unix::io::AsRawFd;
+
+        let listener = HealthListener::bind(0).expect("bind test health listener");
+
+        // SAFETY: `listener.listener` is a live, owned, valid socket for the
+        // duration of this call; `F_GETFL` only reads flags and mutates nothing.
+        let flags = unsafe { libc::fcntl(listener.listener.as_raw_fd(), libc::F_GETFL) };
+        assert!(
+            flags >= 0,
+            "fcntl(F_GETFL) on the health listening socket failed: {}",
+            std::io::Error::last_os_error()
+        );
+        assert_eq!(
+            flags & libc::O_NONBLOCK,
+            0,
+            "the health listening socket must stay blocking so run()'s accept() parks \
+             instead of returning WouldBlock on a timer; a non-blocking listener puts the \
+             5 ms idle poll back"
+        );
+    }
+
+    /// The safety half of the blocking-accept design. `run_daemon` (and every
+    /// test harness) calls `request_shutdown` and then *joins* the listener
+    /// thread, so a parked `accept()` that is never woken hangs the daemon's
+    /// shutdown forever rather than merely delaying it.
+    ///
+    /// Bounded through a channel instead of a bare `join()` on purpose: a
+    /// missing wake is an infinite park, and this must fail with a message
+    /// rather than hang the suite.
+    #[test]
+    fn request_shutdown_wakes_a_parked_accept() {
+        let listener = HealthListener::bind(0).expect("bind test health listener");
+        let port = listener.port;
+        let state = Arc::new(DaemonState::new());
+        let info = Arc::new(Mutex::new(daemon_info(port)));
+
+        let run_state = Arc::clone(&state);
+        let run_info = Arc::clone(&info);
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            listener.run(run_state, run_info);
+            let _ = finished_tx.send(());
+        });
+
+        // Prove the parked loop still serves a real client — a blocking
+        // accept() that never woke on a genuine connection would fail here —
+        // then idle well past the 5 ms cadence the old poll ran at, so the
+        // loop is certainly parked when shutdown is requested.
+        let pong =
+            send_command_with_timeout(port, "PING", Duration::from_secs(2), Duration::from_secs(2))
+                .expect("a parked blocking accept() must still accept a real client");
+        assert!(pong.starts_with("PONG"), "unexpected PING reply: {pong:?}");
+        std::thread::sleep(Duration::from_millis(100));
+
+        let requested_at = Instant::now();
+        state.request_shutdown();
+        let woken = finished_rx.recv_timeout(Duration::from_secs(5));
+        let elapsed = requested_at.elapsed();
+        assert!(
+            woken.is_ok(),
+            "request_shutdown did not wake the parked accept() within 5s ({elapsed:?}); \
+             without the self-connect wake the listener thread never returns and \
+             run_daemon's join() hangs"
+        );
+        server
+            .join()
+            .expect("health listener thread must not panic");
+    }
+
+    /// The ordering hazard the pre-`accept` flag check covers: a shutdown
+    /// requested before `run` has registered a wake port sends no wake at all
+    /// (`wake_port` is still the `0` sentinel), so the loop must notice the
+    /// flag on its own and never park.
+    #[test]
+    fn run_returns_promptly_when_shutdown_precedes_it() {
+        let listener = HealthListener::bind(0).expect("bind test health listener");
+        let port = listener.port;
+        let state = Arc::new(DaemonState::new());
+        let info = Arc::new(Mutex::new(daemon_info(port)));
+
+        state.request_shutdown();
+
+        let run_state = Arc::clone(&state);
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            listener.run(run_state, info);
+            let _ = finished_tx.send(());
+        });
+
+        assert!(
+            finished_rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "run() must observe a pre-existing shutdown flag before parking in accept(); \
+             it parked instead and no wake was ever sent"
+        );
+        server
+            .join()
+            .expect("health listener thread must not panic");
     }
 }
