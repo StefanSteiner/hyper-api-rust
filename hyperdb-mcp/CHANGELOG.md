@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **The daemon now connects to its `hyperd` engine over a local IPC channel
+  instead of TCP** — a Unix domain socket on Unix/macOS, a named pipe on
+  Windows. Only the daemon's engine connection moves: the health/control
+  channel and daemon discovery keep their existing loopback TCP port, so
+  `daemon.json` still carries a numeric `health_port`. What changes there is
+  `hyperd_endpoint` — a daemon-mode session now advertises a socket path (e.g.
+  `~/.hyperdb/sockets/hyper`) rather than `127.0.0.1:<port>`, and `status`
+  reports it as `transport: "unix_domain_socket"` (or `"named_pipe"`). The
+  socket directory is created private to the owner (`0700`) before `hyperd`
+  binds in it, as ordinary hygiene for a path under the state directory. A
+  local `--no-daemon` session is unchanged and stays TCP.
+
 ## [1.0.0-rc.3] - 2026-09-07
 
 ### Added

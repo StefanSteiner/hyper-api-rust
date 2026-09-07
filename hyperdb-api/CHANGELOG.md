@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **IPC transport: a process that spawns several IPC `HyperProcess` instances
+  now gives each a distinct endpoint on both platforms.** The Windows named-pipe
+  name and the default Unix domain-socket *directory* were both keyed only on
+  `std::process::id()` (`hyper-<pid>`), so a second instance in the same process
+  — the MCP daemon restarting `hyperd`, or a test harness driving several in
+  turn — reused the endpoint. Sequentially this worked only because `Drop`
+  removed the prior artifact first; two concurrently-live instances collided and
+  the second surfaced as a 60-second callback-listener timeout. Both the pipe
+  name and the default socket directory now carry a monotonic per-process suffix
+  (`hyper-<pid>-<seq>`), so concurrent IPC instances no longer collide. A
+  caller-supplied `domain_socket_directory` is used verbatim and is the caller's
+  responsibility to keep unique.
+
 ## [1.0.0-rc.3] - 2026-09-07
 
 ### Removed

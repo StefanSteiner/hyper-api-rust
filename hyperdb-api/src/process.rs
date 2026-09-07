@@ -80,6 +80,25 @@ use tracing::info;
 
 use crate::error::{Error, Result};
 
+/// Monotonic disambiguator for per-process IPC endpoint names.
+///
+/// A single process can spawn several `HyperProcess` instances — the MCP daemon
+/// restarting `hyperd`, or a test harness driving several daemons in turn — and
+/// each IPC instance must claim a *distinct* endpoint. Keying the name on
+/// `std::process::id()` alone repeats within a process, so an endpoint not yet
+/// released by a prior instance would make the next `bind` fail; this counter
+/// gives every instance in the process a unique suffix, while the pid keeps
+/// names distinct across processes.
+///
+/// This applies symmetrically to both transports: the Windows named-pipe name
+/// (`hyper-<pid>-<seq>`) and the default Unix domain-socket *directory*
+/// (`hyper-<pid>-<seq>`). Both previously used the bare `hyper-<pid>` shape,
+/// which collided for two concurrently-live IPC instances in one process (the
+/// sequential case only worked because `Drop` removed the per-pid artifact
+/// first).
+#[cfg(any(unix, windows))]
+static IPC_INSTANCE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Specifies which protocols `HyperProcess` should listen on.
 ///
 /// # Examples
@@ -251,6 +270,21 @@ impl HyperProcess {
         Self::start_server(&hyperd_path, parameters)
     }
 
+    /// Builds the default Unix domain-socket *directory* for an IPC instance
+    /// when the caller has not supplied one.
+    ///
+    /// The basename is `hyper-<pid>-<seq>`, where `<seq>` comes from the
+    /// process-wide [`IPC_INSTANCE_SEQ`] counter. The suffix is load-bearing:
+    /// two concurrently-live IPC `HyperProcess` instances in one process must
+    /// not share a socket path, or the second bind fails and surfaces as a
+    /// 60 s callback timeout. The `hyper-` prefix is also load-bearing — `Drop`
+    /// only cleans up directories whose basename `starts_with("hyper-")`.
+    #[cfg(unix)]
+    fn default_socket_dir() -> PathBuf {
+        let seq = IPC_INSTANCE_SEQ.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("hyper-{}-{}", std::process::id(), seq))
+    }
+
     /// Resolves the hyperd executable from the `HYPERD_PATH` environment
     /// variable. The value can point at the executable directly, or at a
     /// directory containing it.
@@ -390,8 +424,11 @@ impl HyperProcess {
             {
                 custom_dir.clone()
             } else {
-                // Create a temp directory for the socket
-                let temp_dir = std::env::temp_dir().join(format!("hyper-{}", std::process::id()));
+                // Create a temp directory for the socket. The basename carries a
+                // per-process monotonic suffix (`hyper-<pid>-<seq>`) so two
+                // concurrently-live IPC instances in one process never share a
+                // socket path — see `Self::default_socket_dir`.
+                let temp_dir = Self::default_socket_dir();
                 std::fs::create_dir_all(&temp_dir).map_err(|e| {
                     Error::connection_with_io("Failed to create socket directory", e)
                 })?;
@@ -409,7 +446,8 @@ impl HyperProcess {
         // Create pipe name for Named Pipes if needed (Windows only)
         #[cfg(windows)]
         let pipe_name: Option<String> = if transport_mode == TransportMode::Ipc {
-            Some(format!("hyper-{}", std::process::id()))
+            let seq = IPC_INSTANCE_SEQ.fetch_add(1, Ordering::Relaxed);
+            Some(format!("hyper-{}-{}", std::process::id(), seq))
         } else {
             None
         };
@@ -1485,6 +1523,24 @@ mod tests {
     fn test_no_default_parameters_constant() {
         // Verify the constant matches what C++ uses
         assert_eq!(NO_DEFAULT_PARAMETERS, "no_default_parameters");
+    }
+
+    /// Two IPC instances in one process must derive *distinct* default socket
+    /// directories, or their sockets collide and the second bind 60 s-timeouts.
+    /// Also guards the `hyper-` prefix that `Drop`'s cleanup keys on.
+    #[cfg(unix)]
+    #[test]
+    fn default_socket_dir_names_are_unique_and_prefixed() {
+        let a = HyperProcess::default_socket_dir();
+        let b = HyperProcess::default_socket_dir();
+        assert_ne!(a, b, "concurrent IPC instances must not share a socket dir");
+        for dir in [&a, &b] {
+            let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            assert!(
+                name.starts_with("hyper-"),
+                "socket dir basename must keep the `hyper-` prefix so Drop cleans it up: {name}"
+            );
+        }
     }
 
     #[test]

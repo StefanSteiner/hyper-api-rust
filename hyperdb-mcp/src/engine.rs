@@ -663,14 +663,17 @@ impl Engine {
     /// Whether the backing `hyperd` is currently reachable.
     ///
     /// In local mode, delegates to the owned `HyperProcess`. In daemon mode,
-    /// probes the cached libpq `daemon_endpoint` directly with a short-timeout
-    /// TCP connect — the same endpoint queries run against. This reflects
-    /// *current* liveness of the resource the engine actually depends on, and
-    /// is robust to two failure modes the health-port PING is not:
+    /// probes the cached libpq `daemon_endpoint` directly by connecting over
+    /// whichever transport it names (a Unix domain socket, a named pipe, or
+    /// TCP) — the same endpoint queries run against. This reflects *current*
+    /// liveness of the resource the engine actually depends on, and is robust
+    /// to two failure modes the health-port PING is not:
     ///   - the health port being unreachable (stale `daemon.json`,
     ///     port-scan-adopted daemon, firewall) while the libpq endpoint serves;
-    ///   - the daemon restarting `hyperd` on a new port, leaving the cached
-    ///     endpoint stale (the probe then correctly reports `false`).
+    ///   - the daemon restarting `hyperd` at a new endpoint, leaving the cached
+    ///     one stale (the probe then correctly reports `false`); the Unix socket
+    ///     path is stable across restarts, so there the same probe instead
+    ///     observes the live replacement.
     ///
     /// Falls back to discovery (`daemon.json` + health-port PING) only when no
     /// endpoint has been cached yet (before the first connection attempt).
@@ -2515,17 +2518,39 @@ pub fn describe_endpoint(endpoint: &str) -> Value {
     })
 }
 
-/// Cheap liveness probe for a daemon-mode `hyperd`: attempt a short-timeout
-/// TCP connect to `endpoint` (`host:port`). Returns `true` if the connect
-/// succeeds (something is listening). A bare connect is sufficient here — we
-/// only need to know the port the engine's libpq connection targets is still
-/// accepting connections, not to perform a full protocol round-trip.
+/// Cheap liveness probe for a daemon-mode `hyperd`: attempt a short connect
+/// over whichever transport the `endpoint` names — a Unix domain socket path
+/// (`/…`), a Windows named pipe (`\\…`), or a TCP `host:port` — and return
+/// `true` if it succeeds (something is listening). A bare connect is sufficient
+/// here: we only need to know whether hyperd is reachable right now, not to
+/// perform a full protocol round-trip. The TCP branch bounds itself with a
+/// short timeout; a local UDS/pipe connect is effectively instant.
 fn probe_endpoint_alive(endpoint: &str) -> bool {
+    // The daemon reaches hyperd over IPC, so the cached endpoint is a Unix
+    // domain socket path on Unix or a named pipe on Windows; only a local
+    // engine's private hyperd is TCP. Probe over whichever transport the
+    // endpoint names, mirroring how `Connection::connect` routes it, and drop
+    // the connection immediately — this answers only "is hyperd reachable
+    // now?". A local UDS/pipe connect is effectively instant, so unlike the
+    // TCP branch it needs no timeout.
+    #[cfg(unix)]
+    if endpoint.starts_with('/') {
+        return std::os::unix::net::UnixStream::connect(endpoint).is_ok();
+    }
+    #[cfg(windows)]
+    if endpoint.starts_with(r"\\") {
+        return std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(endpoint)
+            .is_ok();
+    }
+
     use std::net::ToSocketAddrs;
     const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(300);
     match endpoint.to_socket_addrs() {
         // Probe each resolved address, short-circuiting on the first that
-        // accepts a connection. `daemon_endpoint` is normally a single
+        // accepts a connection. A TCP `daemon_endpoint` is normally a single
         // `127.0.0.1:PORT`, so this is one connect in the common case.
         Ok(mut addrs) => {
             addrs.any(|addr| std::net::TcpStream::connect_timeout(&addr, PROBE_TIMEOUT).is_ok())
