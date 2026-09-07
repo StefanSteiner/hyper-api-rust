@@ -454,8 +454,22 @@ pub fn resolve_port() -> u16 {
 }
 
 /// Cross-platform home directory resolution.
+///
+/// On Windows the user profile is consulted first. MSYS2, Cygwin and Git Bash
+/// commonly set `HOME` to a path of their own outside `%USERPROFILE%`, and
+/// preferring it would put the state directory outside the profile — losing the
+/// inherited ACL that is the whole of the Windows protection for these files
+/// (see [`super::state_perms`]) without the user having asked for it. `HOME`
+/// stays as a last resort there, so a machine that resolved before still
+/// resolves. This is also the order the documentation above already described,
+/// and it matches `crate::paths::persistent_home_dir`.
 fn home_dir() -> Option<PathBuf> {
-    // Try HOME (Unix) then USERPROFILE (Windows)
+    if cfg!(windows) {
+        return std::env::var_os("USERPROFILE")
+            .filter(|profile| !profile.is_empty())
+            .or_else(|| std::env::var_os("HOME"))
+            .map(PathBuf::from);
+    }
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
@@ -1605,7 +1619,7 @@ mod tests {
         if fresh_file_mode != 0o600 {
             failures.push(format!(
                 "a newly written discovery file was left at {fresh_file_mode:04o} instead of \
-                 0600, so it hands the hyperd endpoint to any local reader"
+                 0600, so it is readable by other local accounts"
             ));
         }
 

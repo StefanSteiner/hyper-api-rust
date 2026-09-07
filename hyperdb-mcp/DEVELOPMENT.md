@@ -234,7 +234,11 @@ Logs land next to the persistent file when one is supplied (so users find them i
 `Engine::new` defaults to *daemon mode* — it tries
 `daemon::spawn::ensure_daemon(resolve_port_scan())` first, which discovers an
 existing daemon via `~/.hyperdb/daemon.json` (overridable via
-`HYPERDB_STATE_DIR`), else scans the port range for a running daemon, else
+`HYPERDB_STATE_DIR` — see `daemon::state_perms`, which restricts that directory
+and the files in it to the owning user, and which needs the override to name a
+path that can carry those permissions: inside `%USERPROFILE%` on Windows, on a
+mode-supporting filesystem on Unix), else scans the port range for a running
+daemon, else
 auto-spawns one on the first free port as a detached background process. The
 Engine then connects via TCP (`Connection::connect(endpoint, …)`) without
 owning any `HyperProcess`, and records the daemon's `health_port` so the

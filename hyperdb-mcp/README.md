@@ -286,6 +286,15 @@ hyperdb-mcp daemon          # Run as a daemon explicitly (rarely needed)
 `status` and `stop` locate the running daemon automatically (reading `daemon.json`, then scanning the port range), so they work even if the daemon scanned onto a non-default port. Pass `--port <PORT>` to target a specific port explicitly.
 
 State files live at `~/.hyperdb/` by default (override with `HYPERDB_STATE_DIR`).
+They record the `hyperd` endpoint, so the daemon restricts them to your own
+account: `0700` on the directories and `0600` on `daemon.json` on Unix, and on
+Windows the ACL a `%USERPROFILE%` subdirectory inherits. If you override the
+location, keep it somewhere that can carry those permissions — under your user
+profile on Windows, and on a filesystem that supports Unix modes on Unix (a
+network share or a FAT/exFAT volume takes its modes from mount options
+instead). The daemon warns rather than refusing to start when it cannot tighten
+the directory, but it will not publish `daemon.json` into a file it cannot keep
+readable by you alone.
 
 For installation and configuration diagnostics that also work before MCP can start, use the native doctor command:
 
@@ -970,7 +979,9 @@ Environment:
   HYPERD_PATH                  Hyperd executable or containing directory; when absent or
                                non-UTF-8, walk upward for .hyperd/current/hyperd (no PATH lookup)
   HYPERDB_PERSISTENT_DB        Override the default persistent-db path
-  HYPERDB_STATE_DIR            Override daemon state directory (default ~/.hyperdb/)
+  HYPERDB_STATE_DIR            Override daemon state directory (default ~/.hyperdb/); keep it
+                               under your user profile on Windows and on a filesystem with Unix
+                               modes on Unix, or it cannot be restricted to your account
   HYPERDB_DAEMON_PORT          Pin auto-spawn discovery to one health/lock candidate;
                                foreground startup binds this configured/base port exactly
   HYPERDB_DAEMON_IDLE_TIMEOUT  Opt into idle shutdown (seconds); default: stay resident
