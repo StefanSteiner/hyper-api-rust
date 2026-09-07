@@ -22,13 +22,13 @@
 //!
 //! Run with:
 //! ```sh
-//! HYPERD_PATH=~/dev/bin/hyperd \
+//! HYPERD_PATH="$PWD/.hyperd/current" \
 //!   cargo run -p hyperdb-api --release --example async_parallel_benchmark
 //! # or at a custom total:
-//! HYPERD_PATH=~/dev/bin/hyperd \
+//! HYPERD_PATH="$PWD/.hyperd/current" \
 //!   cargo run -p hyperdb-api --release --example async_parallel_benchmark -- 20000000
 //! # or with a custom worker count:
-//! HYPERD_PATH=~/dev/bin/hyperd \
+//! HYPERD_PATH="$PWD/.hyperd/current" \
 //!   cargo run -p hyperdb-api --release --example async_parallel_benchmark -- 20000000 8
 //! ```
 

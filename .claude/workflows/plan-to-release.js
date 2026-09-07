@@ -67,7 +67,10 @@ const releaseStage = (args && args.releaseStage) || 'pr'
 const npmPackage = (args && args.npmPackage) || 'hyperdb-mcp'
 const upstream = (args && args.upstream) || 'tableau/hyper-api-rust'
 const forkOwner = (args && args.forkOwner) || 'StefanSteiner'
-const hyperdPath = (args && args.hyperdPath) || '~/dev/bin/hyperd'
+// The pinned engine from `make download-hyperd` — the same release CI uses.
+// Must be absolute: cargo runs integration tests from the package root, so a
+// relative `.hyperd/current` resolves against the wrong directory.
+const hyperdPath = (args && args.hyperdPath) || `${REPO}/.hyperd/current`
 // Max iterations dispatched from a parsed plan (backstop; logged if exceeded).
 const MAX_ITERATIONS = (args && args.maxIterations) || 24
 

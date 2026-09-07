@@ -135,19 +135,49 @@ The API supports **two transport protocols**:
 
 ### Environment Setup
 
-**CRITICAL:** The `HYPERD_PATH` environment variable must point to the `hyperd` executable. The Makefile auto-detects it in known locations, but you may need to set it manually:
+Tests and examples spawn a real `hyperd`. Run `make download-hyperd` (or
+`.\build.ps1 download-hyperd`) once: it installs the release pinned in
+[`hyperdb-bootstrap/hyperd-version.toml`](hyperdb-bootstrap/hyperd-version.toml)
+under `.hyperd/current/`. The `make`/`build.ps1` targets export `HYPERD_PATH`
+themselves, so plain `make test` needs no further setup.
+
+**Always use the pinned binary at `.hyperd/current`, never an ad-hoc `hyperd`
+elsewhere on the machine.** That is the release this repo pins and the one CI
+runs against — [`.github/workflows/ci.yml`](.github/workflows/ci.yml) sets
+`HYPERD_PATH` to `.hyperd/current` — so local results stay comparable to CI. A
+copy sitting somewhere else may be an unrelated or unversioned build, which
+makes a local pass weaker than it looks.
+
+For a bare `cargo` invocation the most robust option is to **leave
+`HYPERD_PATH` unset**: `HyperProcess::new()` walks up from the working
+directory looking for `.hyperd/current/hyperd`, so it finds the pinned binary
+from anywhere in the repo. To set it explicitly, use an **absolute** path —
+the executable and its containing directory are both accepted:
 
 ```bash
-export HYPERD_PATH=/path/to/hyperd
+export HYPERD_PATH="$PWD/.hyperd/current"   # from the workspace root
+cargo test -p hyperdb-mcp --test attach_tests
 ```
 
-The Makefile will auto-detect `hyperd` in common locations if `HYPERD_PATH` is not set.
+A **relative** path does not work. Cargo runs an integration test with the
+working directory set to the *package* root (`hyperdb-mcp/`), not the
+workspace root, so `HYPERD_PATH=.hyperd/current` resolves against the wrong
+directory and every hyperd-backed test fails with `HYPERD_PATH set to
+'.hyperd/current' but hyperd executable not found`.
 
-**Default for this workstation:** always use `HYPERD_PATH=~/dev/bin/hyperd` when running `cargo test`/`cargo run`/etc. directly (the Makefile targets already export it, so plain `make test` is also fine). Example:
+The Makefile falls back to `.hyperd/current/hyperd` only when `HYPERD_PATH` is
+**unset** — an exported value always wins. Don't leave a stale one in your
+shell profile, or `make test` silently inherits it too.
+
+Confirm the engine before trusting a run:
 
 ```bash
-HYPERD_PATH=~/dev/bin/hyperd cargo test -p hyperdb-mcp --test attach_tests
+.hyperd/current/hyperd --version
 ```
+
+It must report the `version` from `hyperdb-bootstrap/hyperd-version.toml`. If
+it prints `__UNVERSIONED_HYPER__` or some other version, the local engine is
+not the pinned one and the results are not comparable to CI.
 
 ### Editor Setup (VS Code / Windsurf / Cursor)
 
@@ -171,8 +201,8 @@ One rust-analyzer quirk worth knowing, unrelated to the edition: with the `compi
 
 The repo provides a `Makefile` for Linux/macOS and a PowerShell equivalent
 `build.ps1` for Windows. Both wrappers auto-set `HYPERD_PATH` for test/run
-targets. Plain `cargo …` invocations also work but require setting
-`HYPERD_PATH` manually.
+targets. Plain `cargo …` invocations also work, resolving `.hyperd/current`
+themselves or honouring an absolute `HYPERD_PATH` override.
 
 **Linux / macOS** (`bash`):
 
@@ -201,7 +231,9 @@ make clean-test-files    # Clean only test-generated files
 ```
 
 The bare `cargo` equivalent for any target works on either platform once
-`HYPERD_PATH` is set (e.g. `HYPERD_PATH=~/dev/bin/hyperd cargo test --workspace`).
+`.hyperd/` is populated — either relying on the upward `.hyperd/current`
+discovery described above, or with an absolute override (e.g.
+`HYPERD_PATH="$PWD/.hyperd/current" cargo test --workspace`).
 
 ### Running Individual Tests
 
@@ -467,7 +499,7 @@ All commit messages **must** follow the format `<type>(<scope>): <subject>` — 
 1. **Never commit `.hyper` files or `hyperd*.log` files** - These are test artifacts
 2. **Always propagate errors with `?`** - Don't panic in library code
 3. **Test both sync and async APIs** when adding features
-4. **Use `make test` instead of `cargo test`** to ensure `HYPERD_PATH` is set
+4. **Use `make test` instead of `cargo test`** to ensure `HYPERD_PATH` points at the pinned `.hyperd/current` engine CI uses, not an ad-hoc copy
 5. **Profile in release mode** - Debug builds are not representative of performance
 6. **Write 100% idiomatic Rust** - All code must follow Rust idioms and conventions. Flag any existing code that isn't idiomatic when you encounter it.
 7. **Ban narrowing `as` casts on integers** - `as` casts between integer types of different widths (e.g. `i16 as u8`, `u32 as u8`, `i128 as i64`) are *truncating*, not saturating. They silently wrap or drop high bits in release builds and are a documented source of data-corruption bugs in this codebase (see `hyperdb_api::Row::get_numeric`, `hyperdb_api_core::types::Numeric::encode_int64`, and the Arrow decimal paths). Use `TryFrom` instead:

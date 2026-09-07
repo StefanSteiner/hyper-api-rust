@@ -30,10 +30,10 @@
 //!
 //! Run with:
 //! ```sh
-//! HYPERD_PATH=~/dev/bin/hyperd \
+//! HYPERD_PATH="$PWD/.hyperd/current" \
 //!   cargo run -p hyperdb-api --release --example benchmark_suite
 //! # Custom scale (rows per workload) and worker count:
-//! HYPERD_PATH=~/dev/bin/hyperd \
+//! HYPERD_PATH="$PWD/.hyperd/current" \
 //!   cargo run -p hyperdb-api --release --example benchmark_suite -- 20000000 8
 //! ```
 
