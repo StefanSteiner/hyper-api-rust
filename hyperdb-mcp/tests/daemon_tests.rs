@@ -2112,12 +2112,23 @@ fn find_hyperd_pid_for_endpoint(endpoint: &str) -> Option<u32> {
 
     // `lsof -t` prints just the PID(s). A socket path is passed as a
     // positional file argument; a TCP endpoint selects the listening socket by
-    // port. On the socket-path branch, constrain to command `hyperd` (`-c
-    // hyperd`) so a client sharing the socket can't be the PID the caller then
-    // kills — the TCP branch already narrows to the listener via `-sTCP:LISTEN`.
+    // port.
+    //
+    // On the socket-path branch, `-a` is load-bearing (#310). lsof combines
+    // separately-stated selectors with OR, not AND, unless `-a` is given — so
+    // `-c hyperd <path>` means "every process named hyperd, OR anything holding
+    // <path> open", i.e. the PID of *every* concurrent hyperd, not the one at
+    // this socket. Under the parallel test binary that OR union made
+    // `.find(first)` pick an unrelated test's hyperd; killing it left this
+    // test's hyperd alive, so the daemon's monitor never restarted and
+    // `wait_for_live_hyperd_after_kill` timed out — reproducibly on the loaded
+    // ubuntu runner, never in the serial/macOS runs. `-a` ANDs the command-name
+    // and path selectors so only the hyperd actually bound to `<path>` matches.
+    // (The TCP branch was never affected: `-iTCP:{port} -sTCP:LISTEN` already
+    // names a unique listener, which is why the tests passed on TCP `main`.)
     let output = if endpoint.starts_with('/') {
         Command::new("lsof")
-            .args(["-nP", "-t", "-c", "hyperd", endpoint])
+            .args(["-nP", "-t", "-a", "-c", "hyperd", endpoint])
             .output()
     } else {
         let port = endpoint.rsplit(':').next()?.parse::<u16>().ok()?;
