@@ -148,16 +148,30 @@ runs against — [`.github/workflows/ci.yml`](.github/workflows/ci.yml) sets
 copy sitting somewhere else may be an unrelated or unversioned build, which
 makes a local pass weaker than it looks.
 
-For a bare `cargo` invocation the most robust option is to **leave
-`HYPERD_PATH` unset**: `HyperProcess::new()` walks up from the working
-directory looking for `.hyperd/current/hyperd`, so it finds the pinned binary
-from anywhere in the repo. To set it explicitly, use an **absolute** path —
-the executable and its containing directory are both accepted:
+For a bare `cargo` invocation the most robust option is to set `HYPERD_PATH` to
+an **absolute** path — the executable and its containing directory are both
+accepted, and CI uses the directory form. An absolute value is inherited
+unchanged by any child process a test spawns, so it works for the *whole*
+suite:
 
 ```bash
 export HYPERD_PATH="$PWD/.hyperd/current"   # from the workspace root
 cargo test -p hyperdb-mcp --test attach_tests
 ```
+
+Leaving `HYPERD_PATH` **unset** also works for most local runs and is fine for a
+quick single-crate check: `HyperProcess::new()` walks up from the working
+directory to find `.hyperd/current/hyperd`, locating the pinned binary from
+anywhere in the repo. The catch is that this discovery is relative to the
+process's working directory, so it fails for any test that re-execs a child with
+a relocated working directory and `HOME` — notably `hyperdb-mcp`'s
+`recovery_tests` watchdog/health cases
+(`slow_health_report_does_not_hold_engine_mutex` and the two
+`slow_health_watchdog_reaps_hyperd_*`): the child lands outside the repo, its
+upward walk finds no `.hyperd`, and it fails with `Hyper PID was not reported`.
+Measured on `upstream/main`, unset gives `5 passed; 3 failed` there while an
+absolute `HYPERD_PATH` gives `8 passed` — so prefer the absolute form as your
+default and reserve unset for quick single-crate runs.
 
 A **relative** path does not work. Cargo runs an integration test with the
 working directory set to the *package* root (`hyperdb-mcp/`), not the
@@ -201,8 +215,9 @@ One rust-analyzer quirk worth knowing, unrelated to the edition: with the `compi
 
 The repo provides a `Makefile` for Linux/macOS and a PowerShell equivalent
 `build.ps1` for Windows. Both wrappers auto-set `HYPERD_PATH` for test/run
-targets. Plain `cargo …` invocations also work, resolving `.hyperd/current`
-themselves or honouring an absolute `HYPERD_PATH` override.
+targets. Plain `cargo …` invocations also work — set an absolute `HYPERD_PATH`
+(the robust default, e.g. `"$PWD/.hyperd/current"`), or leave it unset and let
+the upward `.hyperd/current` walk resolve it for most single-crate runs.
 
 **Linux / macOS** (`bash`):
 
@@ -231,9 +246,11 @@ make clean-test-files    # Clean only test-generated files
 ```
 
 The bare `cargo` equivalent for any target works on either platform once
-`.hyperd/` is populated — either relying on the upward `.hyperd/current`
-discovery described above, or with an absolute override (e.g.
-`HYPERD_PATH="$PWD/.hyperd/current" cargo test --workspace`).
+`.hyperd/` is populated. Prefer an absolute `HYPERD_PATH` (e.g.
+`HYPERD_PATH="$PWD/.hyperd/current" cargo test --workspace`): a whole-workspace
+run includes the `recovery_tests` child-re-exec cases above, which need it. The
+upward `.hyperd/current` discovery (leaving `HYPERD_PATH` unset) covers most
+narrower single-crate runs.
 
 ### Running Individual Tests
 
