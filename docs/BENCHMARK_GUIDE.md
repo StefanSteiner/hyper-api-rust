@@ -147,7 +147,7 @@ block from the suite's stdout.
 
 #### Hardware / software
 
-- **OS:** Darwin 26.6.2 (aarch64)
+- **OS:** macOS 26.6.2 (Darwin 25.6.0, aarch64)
 - **CPU:** Apple M3 Max (14 physical / 14 logical cores)
 - **Memory:** 96.0 GB
 - **Rust:** rustc 1.98.0 (88d9e12ae 2026-08-18)
@@ -202,6 +202,68 @@ block from the suite's stdout.
 - **Sync beats async on single-connection reads.** `query.full_scan` sync runs 31.1 M rows/s against async's 24.9 M rows/s, and `query.filtered` 33.2 vs 26.9 M rows/s. Async wins only once it can use multiple connections, so prefer the sync path for a single streaming consumer and reach for async when you have concurrency to exploit.
 - **Async dominates single-connection *inserts*** — `AsyncArrowInserter` at 68.9 M rows/s versus sync `Inserter` at 25.5 M rows/s, a 2.7× gap. This is the one figure the `0.0.26479` engine bump moved: **+127%** (30.4 → 68.9 M rows/s), reproduced as **+75%** at 10M. Both are medians of 5 interleaved runs whose old and new ranges do not overlap, so the gain survives this workload's wide ±25–35% spread. Sync inserts were unaffected.
 - **Single-connection scans are much faster than the previous entry** (18.8 → 31.1 M rows/s sync full-scan). Note this is *not* a controlled comparison: the prior numbers were taken on a different `hyperd`, rustc 1.94, and macOS 26.4, so the gain cannot be attributed to any single change.
+
+#### Transport A/B — Unix Domain Socket vs TCP loopback
+
+Same host as the hardware block above. On Unix, `BENCH_TRANSPORT=ipc` switches
+the data path from TCP loopback to a Unix Domain Socket; both go through the
+same `hyperdb-api` API and only the wire underneath changes.
+
+> **Different methodology from every other table in this section.** These are
+> latency-shaped micro-measurements — one fresh `Connection` per iteration, then
+> a single statement drained to completion — not the 100M-row suite. The
+> [Windows Named Pipe table](#rust-suite--same-hardware-named-pipe-transport)
+> further down comes from the suite proper. The two characterise the same
+> trade-off from opposite ends of the workload space and are **complementary,
+> not comparable**: don't read a rows/sec figure out of this table, or a
+> connect-latency figure out of that one.
+
+- **Date:** 2026-09-06
+- **Build:** release, isolated `CARGO_TARGET_DIR`
+- **hyperd:** a local **unversioned** build (reports
+  `__UNVERSIONED_HYPER__.0.0.0.r00000000`), *not* the `0.0.26479` pin behind the
+  tables above. Both transport arms ran against that same binary, so the
+  transport delta is internally valid, but these rows are not comparable to the
+  100M tables and do not belong in
+  [hyperd-release-benchmarks.md](hyperd-release-benchmarks.md).
+- **Sampling:** one `HyperProcess` per transport; 3 warm-up iterations
+  discarded, then 20–30 measured iterations. Percentiles are nearest-rank.
+  Five independent runs agreed on direction.
+
+Milliseconds, representative 25-iteration run. These are latencies, so lower
+wins — **a negative Δ means UDS is faster**:
+
+| Workload | TCP median | TCP p95 | UDS median | UDS p95 | Δ median |
+|---|---:|---:|---:|---:|---:|
+| connect | 0.979 | 1.377 | **0.689** | **0.868** | **-29.7%** |
+| `SELECT 1` round-trip | 0.342 | 0.479 | **0.278** | **0.384** | **-18.6%** |
+| fetch 1,000 rows | 0.848 | 1.109 | **0.808** | **0.977** | **-4.7%** |
+| fetch 50,000 rows | **5.252** | **5.605** | 6.044 | 7.084 | +15.1% |
+
+Run-to-run spread over the five runs: connect -16% to -30%, `SELECT 1` -11% to
+-29%, 1,000-row fetch -5% to -15%, 50,000-row fetch +7% to +15%.
+
+Streaming crossover, 20 iterations each, medians in milliseconds:
+
+| Rows | TCP | UDS | Δ |
+|---|---:|---:|---:|
+| 10,000 | 1.900 | 1.920 | +1.0% |
+| 50,000 | ~5.5 | ~6.1 | ~+11% |
+| 200,000 | **8.049** | 13.042 | **+62.0%** |
+| 1,000,000 | **39.395** | 63.822 | **+62.0%** |
+
+**Reading:** UDS wins latency and loses bulk streaming. The crossover sits just
+above 10,000 rows, and the streaming penalty **saturates near +62%** rather than
+growing with row count. That is the same shape as the Named Pipe result in the
+Windows section below — IPC favours short, latency-sensitive exchanges and
+penalises long streamed reads — so read the two as one finding about IPC, not as
+two platform-specific curiosities.
+
+**Recommendation:** keep `TransportMode::Tcp` (the workspace default) for mixed
+and read-heavy workloads. `TransportMode::Ipc` is the better choice for
+connection-heavy or small-query-heavy traffic, where a ~30% faster connect and
+~19% faster round-trip dominate. The 100M-row insert suite was **not** run over
+UDS, so this table says nothing about bulk-insert throughput on macOS.
 
 #### Node.js bench — 10M rows (same schema)
 

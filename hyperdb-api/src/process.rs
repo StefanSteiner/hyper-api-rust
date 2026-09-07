@@ -359,8 +359,17 @@ impl HyperProcess {
         // Get the listen mode
         let listen_mode = parameters.and_then(|p| p.listen_mode).unwrap_or_default();
 
-        // Get transport mode (default to TCP until UDS performance is validated)
-        // See IPC_IMPLEMENTATION.md for details
+        // Get transport mode. The default is TCP on every platform, and that
+        // is now a measured choice rather than a pending one: IPC wins latency
+        // but loses bulk streaming. On macOS/UDS, connect is ~30% faster and a
+        // small round-trip ~19% faster, while streamed reads past ~10k rows
+        // cost up to +62%; Windows Named Pipes show the same shape (+34-41% on
+        // single-connection inserts, -76% on async full scans). TCP therefore
+        // remains the right default for mixed workloads, and is retained here
+        // pending the separate transport change.
+        //
+        // Figures and methodology: hyperdb-api-core/docs/IPC_IMPLEMENTATION.md
+        // and docs/BENCHMARK_GUIDE.md.
         #[cfg(unix)]
         let transport_mode = parameters
             .and_then(|p| p.transport_mode)

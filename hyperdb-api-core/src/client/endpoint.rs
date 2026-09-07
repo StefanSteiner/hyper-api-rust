@@ -17,7 +17,7 @@ use super::error::{Error, Result};
 /// Supports different transport mechanisms:
 /// - TCP: `tab.tcp://host:port`
 /// - Unix Domain Socket: `tab.domain://<directory>/domain/<name>` (Unix only)
-/// - Windows Named Pipe: `tab.pipe://<host>/pipe/<name>` (Windows only, future)
+/// - Windows Named Pipe: `tab.pipe://<host>/pipe/<name>` (Windows only)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectionEndpoint {
     /// TCP endpoint: `tab.tcp://host:port`
@@ -37,9 +37,6 @@ pub enum ConnectionEndpoint {
         name: String,
     },
     /// Windows Named Pipe: `tab.pipe://<host>/pipe/<name>`
-    ///
-    /// **TODO (Windows)**: Implement Named Pipe support for Windows IPC.
-    /// See IPC_IMPLEMENTATION.md for detailed implementation guide.
     ///
     /// Example format: `tab.pipe://./pipe/hyper-12345` for local pipe
     #[cfg(windows)]
@@ -87,7 +84,7 @@ impl ConnectionEndpoint {
     /// Supported formats:
     /// - `tab.tcp://host:port` or `host:port` → TCP
     /// - `tab.domain://<dir>/domain/<name>` → Unix Domain Socket
-    /// - `tab.pipe://<host>/pipe/<name>` → Named Pipe (future)
+    /// - `tab.pipe://<host>/pipe/<name>` → Named Pipe
     ///
     /// # Errors
     ///
