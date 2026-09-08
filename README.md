@@ -1,5 +1,7 @@
 # Hyper API for Rust
 
+![Hyper API for Rust — the high-performance interface for HyperDB](docs/images/hyper-api-rust-banner.jpg)
+
 [![CI](https://github.com/tableau/hyper-api-rust/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/tableau/hyper-api-rust/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/hyperdb-api.svg)](https://crates.io/crates/hyperdb-api)
 [![docs.rs](https://img.shields.io/docsrs/hyperdb-api)](https://docs.rs/hyperdb-api)
