@@ -272,7 +272,7 @@ Patch release that fixes two related but distinct bugs surfaced by [#84](https:/
 
 ## [0.3.0](https://github.com/tableau/hyper-api-rust/compare/v0.2.3...v0.3.0) (2026-05-29)
 
-This release aggregates a coordinated set of breaking and additive API changes that landed across four PRs during the v0.3.0 bundle window. See [MIGRATING-0.3.md](./MIGRATING-0.3.md) for complete migration recipes covering every change.
+This release aggregates a coordinated set of breaking and additive API changes that landed across four PRs during the v0.3.0 bundle window. See [MIGRATING-0.3.md](./docs/superpowers/specs/MIGRATING-0.3.md) for complete migration recipes covering every change.
 
 ### ⚠ BREAKING CHANGES
 
