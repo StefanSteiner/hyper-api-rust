@@ -187,7 +187,10 @@ fn expand_query_as(input: &TokenStream2) -> syn::Result<TokenStream2> {
 /// Only needed when `compile-time` feature is enabled (used for registry lookup).
 #[cfg(feature = "compile-time")]
 fn last_type_ident(ty: &Type) -> Option<&syn::Ident> {
-    let Type::Path(syn::TypePath { path, qself: None }) = ty else {
+    let Type::Path(syn::TypePath {
+        path, qself: None, ..
+    }) = ty
+    else {
         return None;
     };
     path.segments.last().map(|s| &s.ident)
@@ -397,7 +400,10 @@ fn field_source_for(field: &Field, default: &syn::Ident) -> syn::Result<FieldSou
 
 /// Detects `Option<T>` (any path ending in `Option<T>`).
 fn is_option_type(ty: &Type) -> bool {
-    let Type::Path(TypePath { path, qself: None }) = ty else {
+    let Type::Path(TypePath {
+        path, qself: None, ..
+    }) = ty
+    else {
         return false;
     };
     let Some(last) = path.segments.last() else {

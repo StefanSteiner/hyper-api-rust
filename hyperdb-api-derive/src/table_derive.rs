@@ -302,7 +302,10 @@ fn rust_type_to_sql<'a>(field: &Field, ty: &'a Type) -> syn::Result<&'a str> {
 
 /// If `ty` is `Option<T>`, return `(T, true)`. Otherwise return `(ty, false)`.
 fn unwrap_option(ty: &Type) -> (&Type, bool) {
-    let Type::Path(TypePath { path, qself: None }) = ty else {
+    let Type::Path(TypePath {
+        path, qself: None, ..
+    }) = ty
+    else {
         return (ty, false);
     };
     let Some(last) = path.segments.last() else {
@@ -323,7 +326,10 @@ fn unwrap_option(ty: &Type) -> (&Type, bool) {
 
 /// Returns `true` if `ty` is exactly `Vec<u8>` (the only `Vec<_>` that maps to BYTES).
 fn is_vec_u8(ty: &Type) -> bool {
-    let Type::Path(TypePath { path, qself: None }) = ty else {
+    let Type::Path(TypePath {
+        path, qself: None, ..
+    }) = ty
+    else {
         return false;
     };
     let Some(last) = path.segments.last() else {
@@ -337,14 +343,17 @@ fn is_vec_u8(ty: &Type) -> bool {
     };
     matches!(
         args.args.first(),
-        Some(GenericArgument::Type(Type::Path(TypePath { path, qself: None })))
+        Some(GenericArgument::Type(Type::Path(TypePath { path, qself: None, .. })))
             if path.is_ident("u8")
     )
 }
 
 /// Extract the last path segment ident from a type, if it's a simple `TypePath`.
 fn last_path_ident(ty: &Type) -> Option<&syn::Ident> {
-    let Type::Path(TypePath { path, qself: None }) = ty else {
+    let Type::Path(TypePath {
+        path, qself: None, ..
+    }) = ty
+    else {
         return None;
     };
     path.segments.last().map(|s| &s.ident)
