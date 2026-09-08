@@ -861,14 +861,31 @@ settings (not in this repo as config-as-code). The expected invariants:
 
 - All PRs require at least one approval.
 - `ci` must pass before merge.
-- `verify-release-pr-version` should be a required status check. Its job always
-  runs and reports `success` on non-release PRs (only `release-please--branches--*`
-  branches are actually compared), so requiring it never blocks an ordinary PR —
-  it gates only a release PR that regressed the version (#308). Until it is marked
-  required it is advisory: visible on the PR but non-blocking.
+- `version-forward` should be a required status check. That is the *job* name in
+  [`verify-release-pr-version.yml`](../.github/workflows/verify-release-pr-version.yml),
+  and GitHub's required-check picker lists checks by their check-run (job) name —
+  so searching for the workflow **file** name (`verify-release-pr-version`) finds
+  nothing; search for `version-forward`. The job always runs and reports `success`
+  on non-release PRs (only `release-please--branches--*` branches are actually
+  compared), so requiring it never blocks an ordinary PR — it gates only a release
+  PR that regressed the version (#308). Until it is marked required it is advisory:
+  visible on the PR but non-blocking.
 - Force-push and deletion are blocked.
 - Tags matching `v*.*.*` can only be pushed by maintainers (enforced via
   tag protection rules, separate from branch protection).
+
+**Planned — migrate `main` to a ruleset after 1.0.0.** These invariants are
+enforced today via GitHub's *classic* branch protection.
+[Rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets)
+are the successor: layerable (multiple can apply to one branch and the enforced
+requirements are their union), readable by anyone with repo access (classic
+rules are admin-only), and able to govern branches **and** tags — the `v*.*.*`
+rule above — in one place. We intend to convert `main` to a ruleset once the
+1.0.0 release has shipped, not during the release-candidate cycle, so
+branch-gating mechanics don't change mid-release. Classic rules and rulesets
+coexist and the most restrictive combination wins, so the switch can be staged
+and verified without a protection gap. After converting, update this section to
+point at **Settings → Rules → Rulesets** instead of **Settings → Branches**.
 
 Check the actual live settings under
 **Settings → Branches** and **Settings → Tags** on the GitHub UI.
