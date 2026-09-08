@@ -488,8 +488,10 @@ by release-please**:
 runs on every push to `main` and opens (or updates) a
 `chore(main): release X.Y.Z` PR, driven by
 [`release-please-config.json`](release-please-config.json) and
-[`.release-please-manifest.json`](.release-please-manifest.json). Never
-hand-edit a crate version or the root `CHANGELOG.md`. See
+[`.release-please-manifest.json`](.release-please-manifest.json). It also
+re-runs on the `release: published` event a hand-cut tag emits, so cutting the
+tag re-anchors the next `-rc.N` correctly (#308). Never hand-edit a crate
+version or the root `CHANGELOG.md`. See
 [CONTRIBUTING.md](CONTRIBUTING.md#release-process) for the full flow and
 [docs/GITHUB_OPERATIONS.md](docs/GITHUB_OPERATIONS.md#cutting-a-release) for the
 maintainer steps.

@@ -1,0 +1,55 @@
+name: verify-release-pr-version
+
+# Backstop for issue #308: a release-please PR must never move the manifest
+# version backward (e.g. propose 1.0.0-rc.2 after 1.0.0-rc.3 shipped). The
+# primary fix is the `release: published` re-trigger in release-please.yml;
+# this guard fails loudly and pre-merge if a regression slips through anyway.
+# See docs/GITHUB_OPERATIONS.md and .github/scripts/verify-release-pr-version.py.
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  # PR-only today, so this expression is effectively `true`: cancel a superseded
+  # run when a new commit is pushed to the same PR. Kept as an expression so that
+  # if a non-PR trigger is ever added, those runs won't cancel-in-progress.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  version-forward:
+    # The job ALWAYS runs so it reports a definite success on every PR — safe to
+    # mark as a required status check. The comparator's own unit tests run on
+    # every PR (cheap, stdlib-only); the manifest comparison is gated to the
+    # release-please PR, the only PR that carries a version bump worth guarding.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0   # the compare step reads origin/main via `git show`
+
+      # Guard the guard: run the comparator's regression suite on every PR so a
+      # change to verify-release-pr-version.py can't silently break the semver
+      # logic and only surface at the high-stakes moment of a real release.
+      - name: Run comparator unit tests
+        run: python3 .github/scripts/test_verify_release_pr_version.py
+
+      - name: Compare proposed manifest version against main
+        if: startsWith(github.head_ref, 'release-please--branches--')
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$BASE_REF"
+          # `."."` reads the single "." release-please package key — valid only
+          # because this repo uses one package with include-component-in-tag:
+          # false. A migration to component-based manifests would return null and
+          # fail every release PR closed; update this read if that ever changes.
+          BASE=$(git show "origin/${BASE_REF}:.release-please-manifest.json" | jq -r '."."')
+          HEAD=$(jq -r '."."' .release-please-manifest.json)
+          echo "main manifest:      $BASE"
+          echo "release-PR manifest: $HEAD"
+          python3 .github/scripts/verify-release-pr-version.py "$BASE" "$HEAD"

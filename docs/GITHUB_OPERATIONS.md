@@ -18,15 +18,16 @@ binaries on the Releases page come from".
 
 ## Workflows
 
-Six GitHub Actions workflows live under [`.github/workflows/`](../.github/workflows/):
+Seven GitHub Actions workflows live under [`.github/workflows/`](../.github/workflows/):
 
 | Workflow | File | Triggers | Purpose |
 |---|---|---|---|
 | `ci` | [ci.yml](../.github/workflows/ci.yml) | `push` to `main`, all PRs, manual | fmt, clippy, full test matrix, `cargo deny`, `cargo audit`, `cargo publish --dry-run` |
-| `release-please` | [release-please.yml](../.github/workflows/release-please.yml) | `push` to `main`, manual | open/update the release PR with version bumps + CHANGELOG. Does **not** tag: `skip-github-release: true` means the maintainer creates the tag and Release by hand — see [Cutting a release](#cutting-a-release) |
+| `release-please` | [release-please.yml](../.github/workflows/release-please.yml) | `push` to `main`, GitHub Release `published`, manual | open/update the release PR with version bumps + CHANGELOG. Does **not** tag: `skip-github-release: true` means the maintainer creates the tag and Release by hand — see [Cutting a release](#cutting-a-release). The `release: published` re-run re-anchors the next `-rc.N` on the just-cut tag (#308) |
 | `release` | [release.yml](../.github/workflows/release.yml) | GitHub Release `published`, manual (`workflow_dispatch` against an existing tag) | re-run tests, publish the 8 Rust crates to crates.io (`hyperdb-api-node` is published separately to npm). **Not** a tag push: that trigger was removed to stop duplicate runs, so pushing a tag alone publishes nothing |
 | `npm-build-publish` | [npm-build-publish.yml](../.github/workflows/npm-build-publish.yml) | GitHub Release published, manual | build npm platform packages with bundled hyperd, publish to npm registry |
 | `verify-hyperd-pin` | [verify-hyperd-pin.yml](../.github/workflows/verify-hyperd-pin.yml) | changes to `hyperdb-bootstrap/hyperd-version.toml` or its source, weekly cron, manual | `HEAD` every pinned hyperd release URL to catch Tableau yanks / typos |
+| `verify-release-pr-version` | [verify-release-pr-version.yml](../.github/workflows/verify-release-pr-version.yml) | `pull_request` to `main` | fail the release-please PR if it proposes a version behind `main` (backward-bump guard, #308). Runs on every PR but only acts on the `release-please--branches--*` branch, so non-release PRs report a plain `success` |
 | `rhel-compatibility` | [rhel-compatibility.yml](../.github/workflows/rhel-compatibility.yml) | `push` to `main` and PRs touching Rust/manifests/toolchain config, manual | `cargo check --workspace --locked --all-targets` in a `ubi9/ubi` container using RHEL's `rust-toolset` and no rustup — the M-OOBE enforcement |
 
 ### CI (`ci.yml`)
@@ -46,10 +47,10 @@ the PR. Main-branch runs always complete. This is set via the
 
 ### Release (`release.yml`)
 
-Runs on the **`release: published`** event (release-please publishes
-the GitHub Release after merging the release PR) or via manual
-`workflow_dispatch` with an explicit tag input (for re-runs or
-emergency releases). Structure:
+Runs on the **`release: published`** event (a maintainer publishes the
+GitHub Release by hand after merging the release PR — `skip-github-release`
+is `true`) or via manual `workflow_dispatch` with an explicit tag input
+(for re-runs or emergency releases). Structure:
 
 ```text
 verify          ← full test suite + hyperd URL check, single-platform
@@ -224,7 +225,12 @@ The tag and GitHub Release **are** created by hand; see step 5.
    before anything becomes permanent.
 
    **While the rc line is open**, that version bumps itself to the next
-   `-rc.N` with no footer needed; see [Pre-releases](#pre-releases).
+   `-rc.N` with no footer needed: release-please anchors on the previous
+   rc's tag, which exists on every ordinary push. The one gap — right after
+   the release PR merges but before you cut the new tag — is closed by
+   re-running release-please on the `release: published` event when you cut
+   it (#308), and the [backward-version guard](#the-backward-version-guard) fails the
+   release PR if that anchoring ever slips. See [Pre-releases](#pre-releases).
    **Before shipping `1.0.0` final, remove the prerelease keys from
    [release-please-config.json](../release-please-config.json)** — leave them
    in and the release after `1.0.0` computes `1.0.1-rc`. See
@@ -239,9 +245,11 @@ The tag and GitHub Release **are** created by hand; see step 5.
    merged and nothing shipped.
 6. **Publish workflows fire from the Release.** `gh release create` emits
    `release: published`, which triggers both `release.yml` (crates.io) and
-   `npm-build-publish.yml` (npm). Because the Release is created with a PAT
-   rather than the default `GITHUB_TOKEN`, those triggers are not suppressed.
-   The npm workflow waits for CI to pass before building.
+   `npm-build-publish.yml` (npm). It also re-runs `release-please.yml`, which
+   now anchors on the just-created tag and regenerates the open release PR
+   with the correct next `-rc.N` (#308). Because the Release is created with a
+   PAT rather than the default `GITHUB_TOKEN`, those triggers are not
+   suppressed. The npm workflow waits for CI to pass before building.
 
    If a publish workflow fails and needs a re-run:
 
@@ -283,21 +291,26 @@ gh api repos/tableau/hyper-api-rust/contents/.release-please-manifest.json?ref=<
 awk '/^## \[X\.Y\.Z\]/,/^## \[<previous>\]/' CHANGELOG.md \
   | sed '$d' | tail -n +3 > /tmp/vX.Y.Z-notes.md
 
-# 4. Create the tag + GitHub Release. --target accepts the merge SHA;
-#    the positional arg is the tag name. release.yml fires on the
-#    resulting `release: published` event and publishes to crates.io.
+# 4. Promote the release PR's label to `autorelease: tagged` BEFORE creating
+#    the Release. Creating the Release (next step) fires `release: published`,
+#    which re-runs release-please to re-anchor the next -rc.N (#308). Promoting
+#    the label first guarantees that re-run won't abort on "untagged, merged
+#    release PRs outstanding". This is only a label edit — reversible — so the
+#    point of no return is still `gh release create` below.
+gh pr edit <release-pr-number> -R tableau/hyper-api-rust \
+  --remove-label "autorelease: pending" \
+  --add-label "autorelease: tagged"
+
+# 5. Create the tag + GitHub Release. --target accepts the merge SHA; the
+#    positional arg is the tag name. Both release.yml and release-please.yml
+#    fire on the resulting `release: published` event — release.yml publishes
+#    to crates.io, release-please re-anchors the next rc PR (#308).
 gh release create vX.Y.Z \
   -R tableau/hyper-api-rust \
   --target <merge-sha> \
   --title "vX.Y.Z" \
   --notes-file /tmp/vX.Y.Z-notes.md \
   --latest    # OR --prerelease for -rc / -alpha / -beta tags
-
-# 5. Promote the release PR's label so future release-please runs don't
-#    abort with "untagged, merged release PRs outstanding".
-gh pr edit <release-pr-number> -R tableau/hyper-api-rust \
-  --remove-label "autorelease: pending" \
-  --add-label "autorelease: tagged"
 ```
 
 After the tag is created:
@@ -332,6 +345,16 @@ shipped yet — you have options:
 - **Revert the release PR's commit on `main`** if the bump itself is
   wrong, fix the manifest by hand if needed, and let release-please
   reconcile on the next run.
+
+Two things worth knowing here. First, a *forgotten* rc bump is not one of
+these cases: because release-please re-runs on `release: published` and every
+ordinary push already has the previous tag present, the next `-rc.N` computes
+itself — the `Release-As:` footer is for pinning a *different* version (skip a
+burned number, jump straight to `1.0.0`), not for the routine next rc. Second,
+step 4 of the runbook promotes the release PR's label to `autorelease: tagged`
+*before* the tag is cut, so if you stop here — after promoting but before
+`gh release create` — nothing has shipped; just re-label the PR
+(`autorelease: snooze`, per the first bullet).
 
 ### Rolling over the per-crate changelogs
 
@@ -453,6 +476,14 @@ prefix computes `1.0.0-rc.3` — no footer, no maintainer action:
 | `feat!:` / `fix!:` / `BREAKING CHANGE:` | `1.0.0-rc.3` |
 | any of the above **+ `Release-As: X.Y.Z`** | exactly `X.Y.Z` |
 
+This "no footer, no maintainer action" bump depends on release-please anchoring
+on the previous rc's **tag**, so that tag has to exist when release-please runs.
+On every ordinary push it does. The one window where it doesn't — right after
+the release PR merges but before the maintainer hand-cuts the new tag — is
+covered by re-running release-please on the `release: published` event the tag
+emits (#308); the [backward-version guard](#the-backward-version-guard) fails the release PR
+if the anchoring ever slips regardless.
+
 Pre-release tags flow through `release.yml` and `npm-build-publish.yml` exactly
 as stable releases do; the GitHub Release is flagged as `prerelease: true`, and
 the npm `dist-tag` is set to `rc` / `alpha` / `beta` instead of `latest` so
@@ -478,7 +509,12 @@ git commit --allow-empty -m "chore: release 1.0.0-rc.4" -m "Release-As: 1.0.0-rc
 
 An already-open release PR **self-corrects in place** whenever anything lands
 on `main` — release-please recomputes and force-pushes its branch on the next
-run. Don't close or hand-edit it.
+run. Don't close or hand-edit it. After a manual-tag cut, that "next run" is the
+one the `release: published` event triggers (#308); because the runbook now
+promotes the release PR's label to `autorelease: tagged` before cutting the tag
+(see [Manual tag step](#manual-tag-step-after-release-please-pr-merge)), that
+re-run anchors on the new tag and corrects the PR immediately rather than
+aborting.
 
 #### Reading the prerelease keys against the schema
 
@@ -497,6 +533,29 @@ package entry uses, and `mergeReleaserConfig` resolves every field as
 placements (package-only, top-level-only, both) compute the same version. They
 live on the `.` package here because that is the winning side of that merge,
 and because one location means one place to edit at `1.0.0` instead of two.
+
+#### The backward-version guard
+
+[`verify-release-pr-version.yml`](../.github/workflows/verify-release-pr-version.yml)
+is the CI backstop for the anchoring above. On every PR to `main` it compares the
+proposed `.release-please-manifest.json` version against the one already on
+`main` and **fails the check if the PR moves the version backward**. It acts only
+on the `release-please--branches--*` branch — every other PR reports a plain
+`success` — so it is safe to require (see [Branch protection](#branch-protection)).
+
+This is the guard against the #308 regression. If release-please ever computes a
+next `-rc.N` behind an already-published version — a stale `Release-As:` footer in
+history can force this when it runs before the tag exists — the guard turns what
+used to be a silent, unrecoverable backward publish into a loud, pre-merge CI
+failure. To clear it, re-run release-please once the previous release's tag
+exists (it re-runs on its own on `release: published`, #308), or add a
+`Release-As:` footer pinning the correct forward version.
+
+The guard survives the `1.0.0` graduation unchanged: `1.0.0` sorts *above*
+`1.0.0-rc.N`, so graduating forward passes, while a stale
+`Release-As: 1.0.0-rc.N` footer trying to drag a post-1.0.0 line back fails. Its
+semver comparator is covered by
+[`test_verify_release_pr_version.py`](../.github/scripts/test_verify_release_pr_version.py).
 
 #### Graduating to `1.0.0`
 
@@ -543,6 +602,13 @@ missed. The tripwire moved from silent-and-unrecoverable to
 visible-and-reversible. It did not disappear, which is why reading the version
 in the release PR title before merging is still the last check.
 
+The [backward-version guard](#the-backward-version-guard) does **not** catch this
+particular slip — `1.0.1-rc` sorts *above* `1.0.0`, so it is a *forward* move, and
+the guard only rejects backward ones. That is by design: the guard's job is the
+opposite failure (#308), and it correctly *passes* the legitimate graduation
+because `1.0.0` sorts above every `1.0.0-rc.N`. Reading the PR title remains the
+check that catches a forgotten config edit.
+
 #### Re-verifying the prerelease behaviour
 
 If release-please is upgraded, or the config is edited again, re-run the dry
@@ -574,6 +640,16 @@ npx release-please@17.6.0 release-pr \
 Validate the harness before trusting it: run the *current* config against
 `main` first and confirm it reproduces the version in the open release PR. If
 it doesn't, nothing downstream counts.
+
+The same harness re-checks the #308 fix. Push the candidate config to a scratch
+branch **that carries the last release's tag**, then confirm a dry run computes
+the correct *next* `-rc.N` rather than a backward one. When re-checking the
+manual-tag runbook, verify the release PR's label is promoted to
+`autorelease: tagged` *before* `gh release create` (see
+[Manual tag step](#manual-tag-step-after-release-please-pr-merge)) so the
+`release: published` re-run anchors instead of aborting. The
+[backward-version guard](#the-backward-version-guard)'s own comparator has unit
+tests: `python3 .github/scripts/test_verify_release_pr_version.py`.
 
 ### Lockstep versioning
 
@@ -785,6 +861,11 @@ settings (not in this repo as config-as-code). The expected invariants:
 
 - All PRs require at least one approval.
 - `ci` must pass before merge.
+- `verify-release-pr-version` should be a required status check. Its job always
+  runs and reports `success` on non-release PRs (only `release-please--branches--*`
+  branches are actually compared), so requiring it never blocks an ordinary PR —
+  it gates only a release PR that regressed the version (#308). Until it is marked
+  required it is advisory: visible on the PR but non-blocking.
 - Force-push and deletion are blocked.
 - Tags matching `v*.*.*` can only be pushed by maintainers (enforced via
   tag protection rules, separate from branch protection).

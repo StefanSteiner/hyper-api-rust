@@ -238,9 +238,10 @@ Summary:
    flag required for `-rc.N` tags.
 4. **The publish workflows fire on their own** from the `release: published`
    event that `gh release create` emits — creating the Release *is* the
-   publish trigger. `gh workflow run release.yml -f tag=vX.Y.Z` is for
-   re-running a failed publish against an existing tag, not part of the
-   normal path.
+   publish trigger. That same event also re-runs release-please, which
+   re-anchors the next `-rc.N` on the freshly cut tag (#308).
+   `gh workflow run release.yml -f tag=vX.Y.Z` is for re-running a failed
+   publish against an existing tag, not part of the normal path.
 5. Roll over the per-crate `CHANGELOG.md` files. release-please does not
    manage them, so nothing else will — see
    [`docs/GITHUB_OPERATIONS.md`](docs/GITHUB_OPERATIONS.md#rolling-over-the-per-crate-changelogs).

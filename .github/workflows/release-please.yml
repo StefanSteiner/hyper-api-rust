@@ -7,6 +7,8 @@ name: release-please
 # NOT tag, because `skip-github-release` is true in release-please-config.json.
 # A maintainer creates the v{X.Y.Z} tag and GitHub Release by hand afterwards,
 # which is what triggers the publish workflows. See docs/GITHUB_OPERATIONS.md.
+# That same `release: published` event also re-runs this workflow so it can
+# anchor on the freshly created tag and correct the next release PR (see #308).
 #
 # Uses a fine-grained PAT (RELEASE_PLEASE_TOKEN) instead of the default
 # GITHUB_TOKEN so that PRs and tags created by this workflow trigger
@@ -40,6 +42,17 @@ name: release-please
 on:
   push:
     branches: [main]
+  # #308: the run that fires on the release-PR *merge* races ahead of the
+  # hand-cut tag (skip-github-release: true), so release-please can't see the
+  # just-released version and miscomputes the next rc backward. Re-running when
+  # the maintainer publishes the Release — the tag now exists — makes it anchor
+  # on that version and regenerate the next release PR correctly. The manual-tag
+  # runbook promotes the release PR's `autorelease: tagged` label BEFORE
+  # `gh release create` so this re-run doesn't hit the outstanding-pending-PR
+  # abort (see docs/GITHUB_OPERATIONS.md). The verify-release-pr-version guard
+  # backstops any residual lag.
+  release:
+    types: [published]
   workflow_dispatch: {}
 
 # Serialize runs so the lockfile-sync push doesn't race a concurrent
