@@ -23,7 +23,7 @@ path = "src/main.rs"
 # x-release-please-start-version
 hyperdb-api = { path = "../hyperdb-api", version = "=1.0.0-rc.4" }
 # x-release-please-end
-rmcp = { version = "1.7", features = ["server", "transport-io"] }
+rmcp = { version = "3.4", features = ["server", "transport-io"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "signal", "time"] }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["preserve_order"] }
@@ -60,7 +60,7 @@ tokio = { version = "1", features = ["full"] }
 # `tokio::io::duplex` pair so tool calls exercise the full rmcp
 # dispatch path (params deserialization, request-context plumbing,
 # error mapping) rather than skipping straight to the engine layer.
-rmcp = { version = "1.7", features = ["server", "transport-io", "client"] }
+rmcp = { version = "3.4", features = ["server", "transport-io", "client"] }
 
 [build-dependencies]
 # Build-time only: used to stamp dirty builds with an ISO-8601 basic UTC

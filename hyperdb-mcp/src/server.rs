@@ -38,11 +38,11 @@ use rmcp::handler::server::router::prompt::PromptRouter;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    AnnotateAble, CallToolResult, Content, GetPromptRequestParams, GetPromptResult, Implementation,
-    InitializeRequestParams, InitializeResult, ListPromptsResult, ListResourceTemplatesResult,
-    ListResourcesResult, PaginatedRequestParams, PromptMessage, PromptMessageRole, RawResource,
-    RawResourceTemplate, ReadResourceRequestParams, ReadResourceResult, ResourceContents,
-    ServerCapabilities, ServerInfo, SubscribeRequestParams, UnsubscribeRequestParams,
+    CallToolResult, ContentBlock, Implementation, InitializeRequestParams, InitializeResult,
+    ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParams, PromptMessage,
+    ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource,
+    ResourceContents, ResourceTemplate, Role, ServerCapabilities, ServerConfig,
+    SubscribeRequestParams, UnsubscribeRequestParams,
 };
 use rmcp::service::RequestContext;
 use rmcp::{
@@ -55,12 +55,6 @@ use serde_json::{Value, json};
 use sqlformat::{FormatOptions, Indent, QueryParams as SqlQueryParams};
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
-
-#[expect(
-    unused_imports,
-    reason = "imported for use in doc comments that reference the type path"
-)]
-use rmcp::model::RawTextContent;
 
 /// Number of rows returned by the `hyper://tables/{name}/sample` JSON
 /// resource. Kept small so an MCP client can prefetch every table's sample
@@ -1874,7 +1868,7 @@ impl HyperMcpServer {
         // CallToolResult::structured includes a stringified copy in `content`;
         // replace it with a pretty-printed version for human-readable display
         // in older clients.
-        result.content = vec![Content::text(text)];
+        result.content = vec![ContentBlock::text(text)];
         Ok(result)
     }
 
@@ -1912,7 +1906,7 @@ impl HyperMcpServer {
         let body = json!({"error": err_val});
         let text = serde_json::to_string_pretty(&body).unwrap_or_default();
         let mut result = CallToolResult::structured_error(body);
-        result.content = vec![Content::text(text)];
+        result.content = vec![ContentBlock::text(text)];
         Ok(result)
     }
 }
@@ -2764,8 +2758,8 @@ impl HyperMcpServer {
                 let formatted_sql = Self::fmt_sql(&sql);
                 let json_text = serde_json::to_string_pretty(&val).unwrap_or_default();
                 Ok(CallToolResult::success(vec![
-                    Content::text(format!("```sql\n{formatted_sql}\n```")),
-                    Content::text(json_text),
+                    ContentBlock::text(format!("```sql\n{formatted_sql}\n```")),
+                    ContentBlock::text(json_text),
                 ]))
             }
             Err(e) => Self::err_content(e),
@@ -3099,9 +3093,9 @@ impl HyperMcpServer {
                 let mut content = Vec::with_capacity(2);
                 if wants_inline {
                     let b64 = base64::engine::general_purpose::STANDARD.encode(&chart.bytes);
-                    content.push(Content::image(b64, chart.mime_type.to_string()));
+                    content.push(ContentBlock::image(b64, chart.mime_type.to_string()));
                 }
-                content.push(Content::text(stats_text));
+                content.push(ContentBlock::text(stats_text));
                 Ok(CallToolResult::success(content))
             }
             Err(e) => Self::err_content(e),
@@ -3931,7 +3925,7 @@ impl HyperMcpServer {
         reason = "uniform Result<CallToolResult, rmcp::ErrorData> across all tools so the #[tool_router] dispatcher has one signature shape"
     )]
     fn get_readme(&self) -> Result<CallToolResult, rmcp::ErrorData> {
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             crate::readme::README,
         )]))
     }
@@ -4288,7 +4282,7 @@ impl HyperMcpServer {
         let context = self.build_analyze_context(&args.table);
         vec![
             PromptMessage::new_text(
-                PromptMessageRole::User,
+                Role::User,
                 format!(
                     "Analyze the `{}` table thoroughly.\n\n{}\n\nPlease:\n\
                     1. Describe each column (what it likely represents based on name and sample values)\n\
@@ -4299,7 +4293,7 @@ impl HyperMcpServer {
                 ),
             ),
             PromptMessage::new_text(
-                PromptMessageRole::Assistant,
+                Role::Assistant,
                 format!(
                     "I'll analyze the `{}` table systematically. Let me start by examining the schema and sample, then run targeted queries for statistics and data quality.",
                     args.table
@@ -4321,7 +4315,7 @@ impl HyperMcpServer {
         let ctx_b = self.build_brief_context(&args.table_b);
         vec![
             PromptMessage::new_text(
-                PromptMessageRole::User,
+                Role::User,
                 format!(
                     "Compare these two tables:\n\n## Table A: `{}`\n{}\n\n## Table B: `{}`\n{}\n\nPlease:\n\
                     1. Identify columns that appear in both tables (by name or semantic match)\n\
@@ -4332,7 +4326,7 @@ impl HyperMcpServer {
                 ),
             ),
             PromptMessage::new_text(
-                PromptMessageRole::Assistant,
+                Role::Assistant,
                 format!(
                     "I'll compare `{}` and `{}` systematically — schema alignment first, then join keys, then analytical opportunities.",
                     args.table_a, args.table_b
@@ -4353,7 +4347,7 @@ impl HyperMcpServer {
         let context = self.build_brief_context(&args.table);
         vec![
             PromptMessage::new_text(
-                PromptMessageRole::User,
+                Role::User,
                 format!(
                     "Run a data quality assessment on the `{}` table.\n\n{}\n\nPlease use the query tool to check:\n\
                     1. NULL rate per column — run SELECT COUNT(*) FILTER (WHERE col IS NULL) / COUNT(*) for each column\n\
@@ -4366,7 +4360,7 @@ impl HyperMcpServer {
                 ),
             ),
             PromptMessage::new_text(
-                PromptMessageRole::Assistant,
+                Role::Assistant,
                 format!(
                     "I'll perform a systematic data quality assessment on `{}`. Let me run targeted queries for each check category.",
                     args.table
@@ -4391,7 +4385,7 @@ impl HyperMcpServer {
         };
         vec![
             PromptMessage::new_text(
-                PromptMessageRole::User,
+                Role::User,
                 format!(
                     "Given the `{}` table:\n\n{}{}\n\nSuggest 5 analytical SQL queries that would be useful for exploring this data. \
                     For each query, provide:\n\
@@ -4403,7 +4397,7 @@ impl HyperMcpServer {
                 ),
             ),
             PromptMessage::new_text(
-                PromptMessageRole::Assistant,
+                Role::Assistant,
                 format!(
                     "Based on the schema and sample of `{}`, here are 5 analytical queries.",
                     args.table
@@ -4861,7 +4855,7 @@ impl HyperMcpServer {
     reason = "ServerHandler trait methods are async by trait contract; several handlers here (and the tool_handler/prompt_handler macro expansions) have no await points but keeping them as async fn matches the trait signature callers expect"
 )]
 impl ServerHandler for HyperMcpServer {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         let sql_dialect = "\n\
 \n\
 SQL DIALECT — Salesforce Data Cloud SQL (PostgreSQL-compatible with extensions).\n\
@@ -4971,7 +4965,7 @@ Full SQL reference: https://developer.salesforce.com/docs/data/data-cloud-query-
                 .into(),
         );
 
-        let mut info = ServerInfo::default();
+        let mut info = ServerConfig::default();
         info.instructions = Some(instructions);
         info.server_info = server_info;
         info.capabilities = ServerCapabilities::builder()
@@ -5048,63 +5042,32 @@ Full SQL reference: https://developer.salesforce.com/docs/data/data-cloud-query-
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, rmcp::ErrorData> {
         let mut resources = vec![
-            RawResource {
-                uri: "hyper://workspace".into(),
-                name: "Local and Persistent Database Info".into(),
-                title: Some("HyperDB local and persistent databases".into()),
-                description: Some(
+            Resource::new("hyper://workspace", "Local and Persistent Database Info")
+                .with_title("HyperDB local and persistent databases")
+                .with_description(
                     "Local/default database and persistent attachment state, table count, \
-                     total rows, and disk usage"
-                        .into(),
-                ),
-                mime_type: Some("application/json".into()),
-                size: None,
-                icons: None,
-                meta: None,
-            }
-            .no_annotation(),
-            RawResource {
-                uri: "hyper://tables".into(),
-                name: "All Tables".into(),
-                title: Some("All Tables".into()),
-                description: Some("List of all tables with column schemas and row counts".into()),
-                mime_type: Some("application/json".into()),
-                size: None,
-                icons: None,
-                meta: None,
-            }
-            .no_annotation(),
-            RawResource {
-                uri: "hyper://readme".into(),
-                name: "Database Readme".into(),
-                title: Some("HyperDB local and persistent database readme".into()),
-                description: Some(
+                     total rows, and disk usage",
+                )
+                .with_mime_type("application/json"),
+            Resource::new("hyper://tables", "All Tables")
+                .with_title("All Tables")
+                .with_description("List of all tables with column schemas and row counts")
+                .with_mime_type("application/json"),
+            Resource::new("hyper://readme", "Database Readme")
+                .with_title("HyperDB local and persistent database readme")
+                .with_description(
                     "Markdown overview of local/default and persistent databases: local \
-                     tables, row counts, related resources, and tool hints for LLMs."
-                        .into(),
-                ),
-                mime_type: Some("text/markdown".into()),
-                size: None,
-                icons: None,
-                meta: None,
-            }
-            .no_annotation(),
-            RawResource {
-                uri: "hyper://schema/kv".into(),
-                name: "KV store schema".into(),
-                title: Some("Key-value scratchpad schema".into()),
-                description: Some(
+                     tables, row counts, related resources, and tool hints for LLMs.",
+                )
+                .with_mime_type("text/markdown"),
+            Resource::new("hyper://schema/kv", "KV store schema")
+                .with_title("Key-value scratchpad schema")
+                .with_description(
                     "Schema of the _hyperdb_kv_store table backing the kv_* tools, the \
                      local-vs-persistent durability rule, and the LEFT JOIN enrichment \
-                     pattern for joining KV metadata onto analytical tables."
-                        .into(),
-                ),
-                mime_type: Some("text/plain".into()),
-                size: None,
-                icons: None,
-                meta: None,
-            }
-            .no_annotation(),
+                     pattern for joining KV metadata onto analytical tables.",
+                )
+                .with_mime_type("text/plain"),
         ];
 
         if let Ok(tables) = self.with_engine(|engine| engine.describe_tables()) {
@@ -5118,49 +5081,37 @@ Full SQL reference: https://developer.salesforce.com/docs/data/data-cloud-query-
                         .and_then(serde_json::Value::as_i64)
                         .unwrap_or(0);
                     resources.push(
-                        RawResource {
-                            uri: format!("hyper://tables/{name}/schema"),
-                            name: format!("Schema of {name}"),
-                            title: Some(format!("{name} schema")),
-                            description: Some(format!(
-                                "Column schema and row count ({row_count} rows) for table '{name}'"
-                            )),
-                            mime_type: Some("application/json".into()),
-                            size: None,
-                            icons: None,
-                            meta: None,
-                        }
-                        .no_annotation(),
+                        Resource::new(
+                            format!("hyper://tables/{name}/schema"),
+                            format!("Schema of {name}"),
+                        )
+                        .with_title(format!("{name} schema"))
+                        .with_description(format!(
+                            "Column schema and row count ({row_count} rows) for table '{name}'"
+                        ))
+                        .with_mime_type("application/json"),
                     );
                     resources.push(
-                        RawResource {
-                            uri: format!("hyper://tables/{name}/sample"),
-                            name: format!("Sample of {name}"),
-                            title: Some(format!("{name} sample (JSON)")),
-                            description: Some(format!(
-                                "First {TABLE_SAMPLE_ROWS} rows of '{name}' as JSON, with schema"
-                            )),
-                            mime_type: Some("application/json".into()),
-                            size: None,
-                            icons: None,
-                            meta: None,
-                        }
-                        .no_annotation(),
+                        Resource::new(
+                            format!("hyper://tables/{name}/sample"),
+                            format!("Sample of {name}"),
+                        )
+                        .with_title(format!("{name} sample (JSON)"))
+                        .with_description(format!(
+                            "First {TABLE_SAMPLE_ROWS} rows of '{name}' as JSON, with schema"
+                        ))
+                        .with_mime_type("application/json"),
                     );
                     resources.push(
-                        RawResource {
-                            uri: format!("hyper://tables/{name}/csv-sample"),
-                            name: format!("CSV sample of {name}"),
-                            title: Some(format!("{name} sample (CSV)")),
-                            description: Some(format!(
-                                "First {TABLE_CSV_SAMPLE_ROWS} rows of '{name}' as CSV"
-                            )),
-                            mime_type: Some("text/csv".into()),
-                            size: None,
-                            icons: None,
-                            meta: None,
-                        }
-                        .no_annotation(),
+                        Resource::new(
+                            format!("hyper://tables/{name}/csv-sample"),
+                            format!("CSV sample of {name}"),
+                        )
+                        .with_title(format!("{name} sample (CSV)"))
+                        .with_description(format!(
+                            "First {TABLE_CSV_SAMPLE_ROWS} rows of '{name}' as CSV"
+                        ))
+                        .with_mime_type("text/csv"),
                     );
                 }
             }
@@ -5174,39 +5125,27 @@ Full SQL reference: https://developer.salesforce.com/docs/data/data-cloud-query-
                     .clone()
                     .unwrap_or_else(|| format!("Saved read-only SQL query '{}'", q.name));
                 resources.push(
-                    RawResource {
-                        uri: format!("hyper://queries/{}/definition", q.name),
-                        name: format!("Query: {}", q.name),
-                        title: Some(format!("{} (definition)", q.name)),
-                        description: Some(format!("SQL + metadata for saved query '{}'", q.name)),
-                        mime_type: Some("application/json".into()),
-                        size: None,
-                        icons: None,
-                        meta: None,
-                    }
-                    .no_annotation(),
+                    Resource::new(
+                        format!("hyper://queries/{}/definition", q.name),
+                        format!("Query: {}", q.name),
+                    )
+                    .with_title(format!("{} (definition)", q.name))
+                    .with_description(format!("SQL + metadata for saved query '{}'", q.name))
+                    .with_mime_type("application/json"),
                 );
                 resources.push(
-                    RawResource {
-                        uri: format!("hyper://queries/{}/result", q.name),
-                        name: format!("Result: {}", q.name),
-                        title: Some(format!("{} (result)", q.name)),
-                        description: Some(format!("{desc} — re-runs on every read")),
-                        mime_type: Some("application/json".into()),
-                        size: None,
-                        icons: None,
-                        meta: None,
-                    }
-                    .no_annotation(),
+                    Resource::new(
+                        format!("hyper://queries/{}/result", q.name),
+                        format!("Result: {}", q.name),
+                    )
+                    .with_title(format!("{} (result)", q.name))
+                    .with_description(format!("{desc} — re-runs on every read"))
+                    .with_mime_type("application/json"),
                 );
             }
         }
 
-        Ok(ListResourcesResult {
-            resources,
-            next_cursor: None,
-            meta: None,
-        })
+        Ok(ListResourcesResult::with_all_items(resources))
     }
 
     /// Advertise URI templates so clients can construct resource URIs for
@@ -5217,75 +5156,45 @@ Full SQL reference: https://developer.salesforce.com/docs/data/data-cloud-query-
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourceTemplatesResult, rmcp::ErrorData> {
         let templates = vec![
-            RawResourceTemplate {
-                uri_template: "hyper://tables/{name}/schema".into(),
-                name: "Table Schema".into(),
-                title: Some("Table Schema".into()),
-                description: Some(
-                    "Column schema, types, nullability, and row count for a named table".into(),
-                ),
-                mime_type: Some("application/json".into()),
-                icons: None,
-            }
-            .no_annotation(),
-            RawResourceTemplate {
-                uri_template: "hyper://tables/{name}/sample".into(),
-                name: "Table Sample (JSON)".into(),
-                title: Some("Table Sample".into()),
-                description: Some(
+            ResourceTemplate::new("hyper://tables/{name}/schema", "Table Schema")
+                .with_title("Table Schema")
+                .with_description(
+                    "Column schema, types, nullability, and row count for a named table",
+                )
+                .with_mime_type("application/json"),
+            ResourceTemplate::new("hyper://tables/{name}/sample", "Table Sample (JSON)")
+                .with_title("Table Sample")
+                .with_description(
                     "First few rows of a named table as JSON, with schema. For a \
-                     configurable row count use the `sample` tool instead."
-                        .into(),
-                ),
-                mime_type: Some("application/json".into()),
-                icons: None,
-            }
-            .no_annotation(),
-            RawResourceTemplate {
-                uri_template: "hyper://tables/{name}/csv-sample".into(),
-                name: "Table Sample (CSV)".into(),
-                title: Some("Table Sample (CSV)".into()),
-                description: Some(
+                     configurable row count use the `sample` tool instead.",
+                )
+                .with_mime_type("application/json"),
+            ResourceTemplate::new("hyper://tables/{name}/csv-sample", "Table Sample (CSV)")
+                .with_title("Table Sample (CSV)")
+                .with_description(
                     "First few rows of a named table as CSV, header-first, for \
-                     spreadsheet and Pandas consumers."
-                        .into(),
-                ),
-                mime_type: Some("text/csv".into()),
-                icons: None,
-            }
-            .no_annotation(),
-            RawResourceTemplate {
-                uri_template: "hyper://queries/{name}/definition".into(),
-                name: "Saved Query Definition".into(),
-                title: Some("Saved Query Definition".into()),
-                description: Some(
-                    "Stored SQL plus metadata (description, created_at) for a saved \
-                     query registered via the `save_query` tool."
-                        .into(),
-                ),
-                mime_type: Some("application/json".into()),
-                icons: None,
-            }
-            .no_annotation(),
-            RawResourceTemplate {
-                uri_template: "hyper://queries/{name}/result".into(),
-                name: "Saved Query Result".into(),
-                title: Some("Saved Query Result".into()),
-                description: Some(
+                     spreadsheet and Pandas consumers.",
+                )
+                .with_mime_type("text/csv"),
+            ResourceTemplate::new(
+                "hyper://queries/{name}/definition",
+                "Saved Query Definition",
+            )
+            .with_title("Saved Query Definition")
+            .with_description(
+                "Stored SQL plus metadata (description, created_at) for a saved \
+                     query registered via the `save_query` tool.",
+            )
+            .with_mime_type("application/json"),
+            ResourceTemplate::new("hyper://queries/{name}/result", "Saved Query Result")
+                .with_title("Saved Query Result")
+                .with_description(
                     "Live result of a saved query. The stored SQL re-runs on every \
-                     resource read — no caching, always fresh."
-                        .into(),
-                ),
-                mime_type: Some("application/json".into()),
-                icons: None,
-            }
-            .no_annotation(),
+                     resource read — no caching, always fresh.",
+                )
+                .with_mime_type("application/json"),
         ];
-        Ok(ListResourceTemplatesResult {
-            resource_templates: templates,
-            next_cursor: None,
-            meta: None,
-        })
+        Ok(ListResourceTemplatesResult::with_all_items(templates))
     }
 
     /// Read a resource by URI. Dispatches via
@@ -5296,7 +5205,7 @@ Full SQL reference: https://developer.salesforce.com/docs/data/data-cloud-query-
         &self,
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> Result<ReadResourceResult, rmcp::ErrorData> {
+    ) -> Result<ReadResourceResponse, rmcp::ErrorData> {
         let uri = &request.uri;
         let (mime_type, text) = match self.resource_body_for_uri(uri) {
             Ok(Some(body)) => (body.mime_type().to_string(), body.to_text()),
@@ -5316,14 +5225,14 @@ Full SQL reference: https://developer.salesforce.com/docs/data/data-cloud-query-
             }
         };
 
-        Ok(ReadResourceResult::new(vec![
-            ResourceContents::TextResourceContents {
+        Ok(ReadResourceResponse::Complete(ReadResourceResult::new(
+            vec![ResourceContents::TextResourceContents {
                 uri: uri.clone(),
                 mime_type: Some(mime_type),
                 text,
                 meta: None,
-            },
-        ]))
+            }],
+        )))
     }
 }
 

@@ -120,7 +120,7 @@ impl SubscriptionRegistry {
             let Ok(handle) = tokio::runtime::Handle::try_current() else {
                 return;
             };
-            let params = ResourceUpdatedNotificationParam { uri: uri.clone() };
+            let params = ResourceUpdatedNotificationParam::new(uri.clone());
             handle.spawn(async move {
                 if let Err(e) = peer.notify_resource_updated(params).await {
                     tracing::debug!(uri = %uri, error = ?e, "resource update notify failed");

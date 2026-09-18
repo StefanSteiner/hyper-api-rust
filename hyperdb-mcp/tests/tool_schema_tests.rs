@@ -9,7 +9,7 @@
 
 use hyperdb_mcp::readme::README;
 use hyperdb_mcp::server::HyperMcpServer;
-use rmcp::model::{CallToolRequestParams, CallToolResult, ClientInfo, Tool};
+use rmcp::model::{CallToolRequestParams, CallToolResult, ClientConfig, Tool};
 use rmcp::service::{RoleClient, RunningService};
 use rmcp::{ClientHandler, ServiceExt};
 use serde::Serialize;
@@ -83,8 +83,8 @@ const ROUTED_TOOL_ALLOWLIST: [&str; 21] = [
 struct DummyClientHandler;
 
 impl ClientHandler for DummyClientHandler {
-    fn get_info(&self) -> ClientInfo {
-        ClientInfo::default()
+    fn get_info(&self) -> ClientConfig {
+        ClientConfig::default()
     }
 }
 
@@ -181,7 +181,7 @@ fn readme_text(result: &CallToolResult) -> Result<&str, std::io::Error> {
     let mut text_blocks = result
         .content
         .iter()
-        .filter_map(|content| content.raw.as_text());
+        .filter_map(|content| content.as_text());
     let text = text_blocks
         .next()
         .ok_or_else(|| std::io::Error::other("get_readme returned no text content"))?;

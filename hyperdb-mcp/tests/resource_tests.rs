@@ -6,7 +6,7 @@
 
 use hyperdb_mcp::server::HyperMcpServer;
 use rmcp::model::{
-    ClientInfo, ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents,
+    ClientConfig, ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents,
 };
 use rmcp::service::{RoleClient, RunningService};
 use rmcp::{ClientHandler, ServiceExt};
@@ -18,8 +18,8 @@ type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 struct ResourceClientHandler;
 
 impl ClientHandler for ResourceClientHandler {
-    fn get_info(&self) -> ClientInfo {
-        ClientInfo::default()
+    fn get_info(&self) -> ClientConfig {
+        ClientConfig::default()
     }
 }
 
