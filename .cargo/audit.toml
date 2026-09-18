@@ -5,9 +5,6 @@
 
 [advisories]
 ignore = [
-    # `paste` is unmaintained; macro-only crate pulled transitively by `parquet`
-    # (hyperapi-mcp). No runtime code path, no runtime risk.
-    "RUSTSEC-2024-0436",
     # `rsa` Marvin Attack — no constant-time fix yet. Used only for outbound
     # JWT signing in `hyperapi-salesforce`, where timing sidechannels are not
     # observable to a remote attacker. Threat model does not apply.
@@ -17,11 +14,3 @@ ignore = [
     # runtime risk. Tracking plotters-rs/plotters#736. Mirror of deny.toml.
     "RUSTSEC-2026-0192",
 ]
-
-# Forward-looking note (no waiver yet — RustSec hasn't issued an ID):
-# CVE-2026-43868 / GHSA-2f9f-gq7v-9h6m affects the `thrift` Rust crate
-# (≤ 0.22.0). Latest published is 0.17.0; Apache Thrift hasn't released
-# a fixed Rust crate (the "0.23.0 fix" is in C++/Java/Python only). We
-# pull thrift transitively via `parquet` in hyperdb-mcp. When RustSec
-# assigns a `RUSTSEC-2026-NNNN` ID, add it to the ignore list above
-# with the matching entry in deny.toml.

@@ -16,6 +16,9 @@
     "hyperdb-api-node": "file:../../",
     "sql-formatter": "^15.7.2"
   },
+  "overrides": {
+    "qs": "^6.16.0"
+  },
   "devDependencies": {
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
