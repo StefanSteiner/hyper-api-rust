@@ -38,18 +38,18 @@ fn contains_any(text: &str, alternatives: &[&str]) -> bool {
 /// The changelog's *current release window*: the `## [Unreleased]` section plus
 /// the single most-recent dated release section, concatenated.
 ///
-/// When a release ships, a `docs:` rollover (see PR #307) moves every bullet
-/// out of `## [Unreleased]` into a fresh dated `## [x.y.z]` section. Asserting
-/// documentation claims against the `## [Unreleased]` slice alone therefore
-/// breaks silently the moment that rollover lands — which is exactly what
-/// happened to `smoke_demo_and_changelog_contract`. Searching this window
-/// instead keeps the contract's intent ("these claims are documented for the
-/// current release candidate") stable across the rollover: before a release the
-/// claims live under `## [Unreleased]`, after it they live under the newest
-/// dated section, and the window spans both. Only the *most-recent* dated
-/// section is included — older historical sections are deliberately excluded so
-/// a stale token in an ancient entry cannot satisfy a check for a claim that was
-/// actually deleted.
+/// This is deliberately narrow and is only used for the structural
+/// well-formedness check in `smoke_demo_and_changelog_contract` (the current
+/// release's own entry has real bullets under whichever of Added/Fixed/Changed
+/// it uses). It is NOT used for the historical-claim token checks in that same
+/// test: those tokens (e.g. `doctor`, `resolved_database`) document permanent,
+/// still-true capabilities that were introduced in *some* past release and are
+/// never restated in each subsequent one, so windowing them to only the newest
+/// section just orphans them the next time a `docs:` rollover (see PR #307)
+/// demotes whichever dated section happens to mention them — which is exactly
+/// what happened when PR #320's rollover pushed the rc.3 section (containing
+/// all nine tokens) out of a one-section window. Those checks search the whole
+/// lowercased changelog instead.
 ///
 /// `changelog_lower` must already be lowercased (the headings are matched
 /// case-insensitively by lowercasing the whole document at the call site).
@@ -797,9 +797,12 @@ fn public_docs_database_and_read_only_contract() {
 fn smoke_demo_and_changelog_contract() {
     let smoke = SMOKE_TESTS.to_lowercase();
     let demo = DEMO.to_lowercase();
-    // Assert against the current release window (`## [Unreleased]` + the newest
-    // dated section) so the release rollover (#307) can't silently rebreak this.
-    let release_window = current_release_window(&CHANGELOG.to_lowercase());
+    let changelog_lower = CHANGELOG.to_lowercase();
+    // Only the release-shaped structural check below is windowed to the
+    // current release window (`## [Unreleased]` + the newest dated section);
+    // it exists so the rollover (#307) can't silently rebreak that one check.
+    // The historical-claim checks further down search the whole changelog.
+    let release_window = current_release_window(&changelog_lower);
     let batch_section = markdown_section(
         &smoke,
         "## 2. create / read / overwrite (upsert)",
@@ -962,17 +965,32 @@ fn smoke_demo_and_changelog_contract() {
         );
     }
 
+    // Not every release touches Added, Fixed, AND Changed — require any
+    // heading that IS present to have real bullets, and require at least one
+    // of the three to be present at all (guards against a rollover leaving
+    // the current release entry empty or malformed).
+    let mut release_window_has_bullet = false;
     for heading in ["### added", "### fixed", "### changed"] {
         let section = markdown_section(&release_window, heading, "\n### ");
-        if section.is_empty()
-            || !section
-                .lines()
-                .any(|line| line.trim_start().starts_with("- "))
+        if section.trim().is_empty() {
+            continue;
+        }
+        if section
+            .lines()
+            .any(|line| line.trim_start().starts_with("- "))
         {
+            release_window_has_bullet = true;
+        } else {
             failures.push(format!(
-                "crate current release window must contain at least one bullet under {heading}"
+                "crate current release window has a {heading} heading with no bullets"
             ));
         }
+    }
+    if !release_window_has_bullet {
+        failures.push(
+            "crate current release window (## [Unreleased] + newest dated section) has no Added/Fixed/Changed bullets"
+                .to_owned(),
+        );
     }
     for token in [
         "doctor",
@@ -985,14 +1003,14 @@ fn smoke_demo_and_changelog_contract() {
         "show_legend",
         "y_scale",
     ] {
-        if !release_window.contains(token) {
+        if !changelog_lower.contains(token) {
             failures.push(format!(
-                "crate current release window does not account for {token:?}"
+                "crate changelog does not document {token:?} anywhere"
             ));
         }
     }
 
-    let hyper_export = markdown_bullet(&release_window, "hyper-format export");
+    let hyper_export = markdown_bullet(&changelog_lower, "hyper-format export");
     if !(hyper_export.contains("source")
         && contains_any(
             &hyper_export,
