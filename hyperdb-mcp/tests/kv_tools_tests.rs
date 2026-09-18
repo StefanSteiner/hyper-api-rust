@@ -10,7 +10,7 @@
 //! the handlers exactly as an MCP client would, including the
 //! `database`/`persist` routing, the read-only guard, and durability.
 
-use rmcp::model::{CallToolRequestParams, CallToolResult, ClientInfo};
+use rmcp::model::{CallToolRequestParams, CallToolResult, ClientConfig};
 use rmcp::service::{RoleClient, RunningService};
 use rmcp::{ClientHandler, ServiceExt};
 use std::path::PathBuf;
@@ -26,8 +26,8 @@ type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 struct DummyClientHandler;
 
 impl ClientHandler for DummyClientHandler {
-    fn get_info(&self) -> ClientInfo {
-        ClientInfo::default()
+    fn get_info(&self) -> ClientConfig {
+        ClientConfig::default()
     }
 }
 
@@ -129,7 +129,7 @@ fn first_text(result: &CallToolResult) -> Option<String> {
     result
         .content
         .first()
-        .and_then(|c| c.raw.as_text())
+        .and_then(|c| c.as_text())
         .map(|t| t.text.clone())
 }
 
@@ -173,7 +173,7 @@ fn record_kv_response(
     let Some(text) = result
         .content
         .first()
-        .and_then(|content| content.raw.as_text())
+        .and_then(|content| content.as_text())
         .map(|content| content.text.as_str())
     else {
         failures.push(format!("{case}: first content block must be text JSON"));

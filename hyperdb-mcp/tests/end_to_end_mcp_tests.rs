@@ -12,7 +12,7 @@
 
 use base64::Engine as _;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, ClientInfo, ResourceUpdatedNotificationParam,
+    CallToolRequestParams, CallToolResult, ClientConfig, ResourceUpdatedNotificationParam,
     SubscribeRequestParams,
 };
 use rmcp::service::{RoleClient, RunningService};
@@ -47,8 +47,8 @@ struct DummyClientHandler {
 }
 
 impl ClientHandler for DummyClientHandler {
-    fn get_info(&self) -> ClientInfo {
-        ClientInfo::default()
+    fn get_info(&self) -> ClientConfig {
+        ClientConfig::default()
     }
 
     async fn on_resource_updated(
@@ -253,7 +253,7 @@ fn first_text(result: &CallToolResult) -> Option<String> {
     result
         .content
         .first()
-        .and_then(|c| c.raw.as_text())
+        .and_then(|c| c.as_text())
         .map(|t| t.text.clone())
 }
 
@@ -264,7 +264,7 @@ fn all_text(result: &CallToolResult) -> String {
     result
         .content
         .iter()
-        .filter_map(|c| c.raw.as_text())
+        .filter_map(|c| c.as_text())
         .map(|t| t.text.clone())
         .collect::<Vec<_>>()
         .join("\n")
@@ -295,7 +295,7 @@ fn record_legacy_object_response(
     let Some(text) = result
         .content
         .first()
-        .and_then(|content| content.raw.as_text())
+        .and_then(|content| content.as_text())
         .map(|content| content.text.as_str())
     else {
         failures.push(format!("{case}: first content block must be text JSON"));
@@ -561,7 +561,7 @@ fn record_query_response(
     let sql_text = result
         .content
         .first()
-        .and_then(|content| content.raw.as_text())
+        .and_then(|content| content.as_text())
         .map(|content| content.text.as_str());
     let expected_sql_block = format!("```sql\n{expected_sql}\n```");
     if sql_text != Some(expected_sql_block.as_str()) {
@@ -573,7 +573,7 @@ fn record_query_response(
     let Some(json_text) = result
         .content
         .get(1)
-        .and_then(|content| content.raw.as_text())
+        .and_then(|content| content.as_text())
         .map(|content| content.text.as_str())
     else {
         failures.push(format!("{case}: second query block must be JSON text"));
@@ -720,7 +720,7 @@ fn inline_image_bytes(
         || result
             .content
             .get(1)
-            .and_then(|content| content.raw.as_text())
+            .and_then(|content| content.as_text())
             .is_none()
     {
         failures.push(format!(
@@ -730,7 +730,7 @@ fn inline_image_bytes(
     let Some(image) = result
         .content
         .first()
-        .and_then(|content| content.raw.as_image())
+        .and_then(|content| content.as_image())
     else {
         failures.push(format!("{case}: first content block is not an image"));
         return None;
@@ -2576,13 +2576,13 @@ async fn resolved_database_query_success_shapes() -> TestResult {
             || result
                 .content
                 .first()
-                .and_then(|content| content.raw.as_text())
+                .and_then(|content| content.as_text())
                 .map(|content| content.text.as_str())
                 != Some("```sql\nSELECT\n  i\nFROM\n  truncation_rows\n```")
             || result
                 .content
                 .get(1)
-                .and_then(|content| content.raw.as_text())
+                .and_then(|content| content.as_text())
                 .is_none()
         {
             failures.push(
@@ -2592,7 +2592,7 @@ async fn resolved_database_query_success_shapes() -> TestResult {
         let payload = result
             .content
             .get(1)
-            .and_then(|content| content.raw.as_text())
+            .and_then(|content| content.as_text())
             .and_then(|content| serde_json::from_str::<serde_json::Value>(&content.text).ok());
         let expected_fields = [
             "hint",
@@ -2790,12 +2790,12 @@ async fn resolved_database_query_success_shapes() -> TestResult {
             || result
                 .content
                 .first()
-                .and_then(|content| content.raw.as_image())
+                .and_then(|content| content.as_image())
                 .is_none()
             || result
                 .content
                 .get(1)
-                .and_then(|content| content.raw.as_text())
+                .and_then(|content| content.as_text())
                 .is_none()
         {
             failures.push(
@@ -2805,7 +2805,7 @@ async fn resolved_database_query_success_shapes() -> TestResult {
         let stats = result
             .content
             .get(1)
-            .and_then(|content| content.raw.as_text())
+            .and_then(|content| content.as_text())
             .and_then(|content| serde_json::from_str::<serde_json::Value>(&content.text).ok());
         let expected_fields = [
             "bytes",
@@ -2857,7 +2857,7 @@ async fn resolved_database_query_success_shapes() -> TestResult {
             || result
                 .content
                 .first()
-                .and_then(|content| content.raw.as_text())
+                .and_then(|content| content.as_text())
                 .is_none()
         {
             failures.push(
@@ -2867,7 +2867,7 @@ async fn resolved_database_query_success_shapes() -> TestResult {
         let stats = result
             .content
             .first()
-            .and_then(|content| content.raw.as_text())
+            .and_then(|content| content.as_text())
             .and_then(|content| serde_json::from_str::<serde_json::Value>(&content.text).ok());
         let expected_fields = [
             "bytes",
@@ -2974,6 +2974,13 @@ async fn resolved_database_data_success_shapes() -> TestResult {
         ));
     }
 
+    // Exercises the legacy `resources/subscribe` protocol path the server
+    // still implements via `SubscriptionRegistry`; `Peer::listen` tests a
+    // different (stream-based) code path, not this one.
+    #[allow(
+        deprecated,
+        reason = "resources/subscribe is legacy-only, but this test exercises the legacy protocol path the server still implements via SubscriptionRegistry"
+    )]
     if let Err(error) = h
         .client
         .subscribe(SubscribeRequestParams::new("hyper://workspace"))
@@ -3753,6 +3760,13 @@ async fn copy_query_preserves_target_and_resolved_database() -> TestResult {
             first_text(&result)
         ));
     }
+    // Exercises the legacy `resources/subscribe` protocol path the server
+    // still implements via `SubscriptionRegistry`; `Peer::listen` tests a
+    // different (stream-based) code path, not this one.
+    #[allow(
+        deprecated,
+        reason = "resources/subscribe is legacy-only, but this test exercises the legacy protocol path the server still implements via SubscriptionRegistry"
+    )]
     if let Err(error) = h
         .client
         .subscribe(SubscribeRequestParams::new("hyper://workspace"))

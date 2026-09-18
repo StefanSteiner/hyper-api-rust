@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Upgraded the `rmcp` SDK dependency from 1.x to 3.4.** Resolves the
+  outstanding `rmcp` security advisories. Purely an internal dependency bump —
+  the MCP wire protocol and tool surface exposed by this server are unchanged.
+
 ## [1.0.0-rc.4] - 2026-09-08
 
 ### Changed
