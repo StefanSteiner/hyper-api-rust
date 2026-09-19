@@ -2072,10 +2072,19 @@ pub const CLIENT_LOG_FILE_NAME: &str = "hyperdb-mcp.log";
 /// automatically — no per-table filter list to keep in sync.
 pub const HYPERDB_INTERNAL_PREFIX: &str = "_hyperdb_";
 
-/// Returns true when `name` is one of `HyperDB`'s own internal tables
-/// (matches [`HYPERDB_INTERNAL_PREFIX`]). Factored into a helper so
-/// every filter site calls the same predicate and a future move to a
-/// more nuanced scheme (e.g. per-table allowlist) is a single edit.
+/// Reserved prefixes for short-lived scratch tables the server creates and
+/// drops within a single tool call: `_tmp_` (`query_data` / `query_file`
+/// staging) and `__hyperdb_merge_` (`load_file` merge staging). Filtered
+/// from user-facing listings so an in-flight — or, after a mid-call
+/// failure, leaked — scratch table never surfaces as if it were user data.
+const INTERNAL_SCRATCH_PREFIXES: [&str; 2] = ["_tmp_", "__hyperdb_merge_"];
+
+/// Returns true when `name` is one of `HyperDB`'s own internal tables:
+/// a persistent internal table ([`HYPERDB_INTERNAL_PREFIX`]) or a
+/// transient scratch table ([`INTERNAL_SCRATCH_PREFIXES`]). Factored into
+/// a helper so every filter site calls the same predicate and a future
+/// move to a more nuanced scheme (e.g. per-table allowlist) is a single
+/// edit.
 ///
 /// Note: `_table_catalog` lives in the persistent attachment, not the
 /// ephemeral primary, so it doesn't show up in `describe_tables` even
@@ -2083,6 +2092,9 @@ pub const HYPERDB_INTERNAL_PREFIX: &str = "_hyperdb_";
 #[must_use]
 pub fn is_internal_table(name: &str) -> bool {
     name.starts_with(HYPERDB_INTERNAL_PREFIX)
+        || INTERNAL_SCRATCH_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
 }
 
 /// Compute the log directory for both `hyperd` output and the client-side
@@ -2723,6 +2735,19 @@ mod endpoint_description_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_internal_table_covers_persistent_and_scratch_prefixes() {
+        // Persistent internals and transient scratch tables are hidden;
+        // ordinary user tables are not.
+        assert!(is_internal_table("_hyperdb_kv_store"));
+        assert!(is_internal_table("_tmp_data_123456789"));
+        assert!(is_internal_table("__hyperdb_merge_events_1_2_3"));
+        assert!(!is_internal_table("sales"));
+        assert!(!is_internal_table("data"));
+        // A user table merely containing "tmp" is not filtered.
+        assert!(!is_internal_table("tmp_sales"));
+    }
 
     /// A lock conflict on a user-facing `attach_database` call must surface
     /// as `RESOURCE_BUSY` (with doctor-oriented guidance), mirroring the

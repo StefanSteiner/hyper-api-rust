@@ -170,12 +170,12 @@ pub struct QueryDataParams {
 /// Parameters for the `query_file` one-shot tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct QueryFileParams {
-    /// Absolute path to a CSV, Parquet, or Arrow IPC file.
+    /// Absolute path to a CSV / JSON / JSONL / Parquet / Arrow IPC file.
     pub path: String,
-    /// SQL query to run. Reference the table by `table_name` (default:
-    /// filename stem).
+    /// SQL query to run. Reference the file's rows by `table_name`
+    /// (default `data`), e.g. `SELECT * FROM data`.
     pub sql: String,
-    /// Table name exposed to the SQL query (default: filename stem).
+    /// Table name the SQL references the file's rows as. Default `data`.
     pub table_name: Option<String>,
     /// Partial schema override keyed by column name: `{"col": "BIGINT", ...}`.
     /// See the docs on `QueryDataParams` for the full spec. Call
@@ -220,7 +220,7 @@ pub struct LoadDataParams {
 pub struct LoadFileParams {
     /// Target table name.
     pub table: String,
-    /// Absolute path to a CSV, Parquet, or Arrow IPC file.
+    /// Absolute path to a CSV / JSON / JSONL / Parquet / Arrow IPC file.
     pub path: String,
     /// `"replace"` (default — drops and recreates the table),
     /// `"append"` (adds rows to an existing table), or `"merge"`
@@ -625,7 +625,7 @@ pub struct UnwatchDirectoryParams {
 /// for the subsequent `load_file` / `load_data` call.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct InspectFileParams {
-    /// Absolute path to the CSV, Parquet, or Arrow IPC file to inspect.
+    /// Absolute path to the CSV / JSON / JSONL / Parquet / Arrow IPC file to inspect.
     /// Nothing is written to Hyper and no engine is started.
     pub path: String,
     /// Maximum number of sample rows / values per column to return (default
@@ -726,12 +726,10 @@ pub struct AttachSpec {
     /// lets you reference `src.public.customers`). Must be a SQL
     /// identifier and cannot be `local`.
     pub alias: String,
-    /// Attachment kind. Only `"local_file"` is supported today; `"tcp"`
-    /// (standard remote hyperd) and `"grpc"` (Data 360 read-only Hyper)
-    /// are planned.
-    pub kind: String,
-    /// Absolute path to a `.hyper` file. Required when `kind ==
-    /// "local_file"`; ignored otherwise.
+    /// Attachment kind. Optional; defaults to `"local_file"`, the only
+    /// kind supported today (`"tcp"` and `"grpc"` are planned).
+    pub kind: Option<String>,
+    /// Absolute path to the `.hyper` file to attach.
     pub path: Option<String>,
     /// If `true`, allow writes into this attachment. Defaults to
     /// `false`. Must also satisfy the server's `--read-only` flag (it
@@ -754,12 +752,13 @@ pub struct AttachDatabaseParams {
     /// (`[A-Za-z_][A-Za-z0-9_]{0,62}`) and cannot be `local` (reserved
     /// for the local database).
     pub alias: String,
-    /// Attachment kind. Only `"local_file"` is supported today.
-    pub kind: String,
-    /// Absolute path to a `.hyper` file. Required when `kind ==
-    /// "local_file"`. Attachment failures preserve Hyper diagnostics. The
-    /// specialized contention classification is reserved for startup of the
-    /// configured persistent attachment, not user attachments.
+    /// Attachment kind. Optional; defaults to `"local_file"`, the only
+    /// kind supported today.
+    pub kind: Option<String>,
+    /// Absolute path to the `.hyper` file to attach. Attachment failures
+    /// preserve Hyper diagnostics. The specialized contention
+    /// classification is reserved for startup of the configured persistent
+    /// attachment, not user attachments.
     pub path: Option<String>,
     /// If `true`, `copy_query` (and raw `execute`) may target this
     /// attachment. Defaults to `false` so sources stay safe from
@@ -1915,7 +1914,7 @@ impl HyperMcpServer {
 impl HyperMcpServer {
     /// Ingest inline data (JSON or CSV) and run a SQL query in one call. Creates a temp table, queries, discards.
     #[tool(
-        description = "Ingest inline data (JSON or CSV) and run a SQL query in one call. Creates a temp table, queries, discards."
+        description = "Ingest inline JSON or CSV and run one SQL query in a single call (temp table, discarded after). Reference the rows as `data` by default, e.g. `SELECT * FROM data` (or set `table_name`)."
     )]
     fn query_data(
         &self,
@@ -1939,9 +1938,13 @@ impl HyperMcpServer {
                 _ => ingest_json(engine, &params.data, &opts),
             }?;
 
-            let query_sql = params.sql.replace(&tname, &temp_table);
-            let rows = engine.execute_query_to_json(&query_sql)?;
+            let query_sql = replace_identifier(&params.sql, &tname, &temp_table);
+            // Drop the scratch table whether the query succeeds or fails —
+            // propagating the query error with `?` before the drop would
+            // orphan the temp table (it then surfaces in `describe`).
+            let query_result = engine.execute_query_to_json(&query_sql);
             let _ = engine.execute_command(&format!("DROP TABLE IF EXISTS \"{temp_table}\""));
+            let rows = query_result?;
 
             Ok(json!({
                 "sql": Self::fmt_sql(&params.sql),
@@ -1958,7 +1961,7 @@ impl HyperMcpServer {
 
     /// Ingest a file (CSV, JSON, JSONL, Parquet, Arrow IPC) and run a SQL query in one call.
     #[tool(
-        description = "Ingest a file (CSV, JSON, JSONL / NDJSON, Parquet, Arrow IPC) and run a SQL query in one call. JSON files may be either a top-level array of objects or newline-delimited JSON (JSONL); the format is auto-detected from the first byte. Use `json_extract_path` to extract a nested data array from a JSON wrapper file (e.g., MCP tool responses saved to disk). The path is dot-separated; numeric segments index into arrays; string values are automatically parsed as JSON."
+        description = "Ingest a file (CSV, JSON / JSONL, Parquet, Arrow IPC) and run one SQL query in a single call — the fastest path for 'what's in this file?'. The table is temporary; reference the file's rows as `data` by default, e.g. `SELECT * FROM data` (or set `table_name`). `json_extract_path` extracts a nested array from a JSON wrapper file (dot-separated path; numeric segments index arrays; string values are parsed as JSON)."
     )]
     fn query_file(
         &self,
@@ -1966,12 +1969,7 @@ impl HyperMcpServer {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let result = self.with_engine(|engine| {
             crate::attach::validate_input_path(&params.path, "data file")?;
-            let stem = std::path::Path::new(&params.path)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("file")
-                .to_string();
-            let tname = params.table_name.unwrap_or_else(|| stem.clone());
+            let tname = params.table_name.unwrap_or_else(|| "data".into());
             let temp_table = format!("_tmp_{}_{}", tname, rand_suffix());
             let schema_override = crate::schema::normalize_schema_param(params.schema.as_ref())?;
             let opts = IngestOptions {
@@ -2003,9 +2001,13 @@ impl HyperMcpServer {
                 }?
             };
 
-            let query_sql = params.sql.replace(&tname, &temp_table);
-            let rows = engine.execute_query_to_json(&query_sql)?;
+            let query_sql = replace_identifier(&params.sql, &tname, &temp_table);
+            // Drop the scratch table whether the query succeeds or fails —
+            // propagating the query error with `?` before the drop would
+            // orphan the temp table (it then surfaces in `describe`).
+            let query_result = engine.execute_query_to_json(&query_sql);
             let _ = engine.execute_command(&format!("DROP TABLE IF EXISTS \"{temp_table}\""));
+            let rows = query_result?;
 
             Ok(json!({
                 "sql": Self::fmt_sql(&params.sql),
@@ -2116,7 +2118,7 @@ impl HyperMcpServer {
 
     /// Load a file (CSV, JSON, JSONL, Parquet, Arrow IPC) into a named database table.
     #[tool(
-        description = "Load a CSV / JSON / JSONL / NDJSON / Parquet / Arrow IPC file into a named table in local, persistent, or an attached database. Format is auto-detected from extension (or content for JSON vs CSV).\n\nWhen choosing a format for *new* data going into Hyper, prefer in this order:\n  1. **Parquet** (fastest, server-side): hyperd reads the file directly via `external()`. Types, NUMERIC precision, DATE / TIMESTAMP, and Snappy/ZSTD compression all preserved. This is the recommended format for large imports.\n  2. **CSV**: server-side `COPY FROM` — also fast, but types are inferred from a header + full-file numeric widening pass (CSV has no embedded type info), and empty unquoted cells load as SQL NULL per PostgreSQL CSV default.\n  3. **Arrow IPC** (.arrow / .ipc / .feather, File or Stream format, auto-detected): read in Rust and streamed into hyperd via the binary COPY protocol with zero value-level decoding. Fast but not quite as fast as Parquet, and schema overrides are rejected (the Arrow schema is authoritative).\n  4. **JSON / JSONL / NDJSON**: parsed in Rust (hyperd has no native JSON reader), with per-row insertion. Use for small / irregular data; large JSON should be converted to Parquet first.\n\nFor Apache Iceberg tables use `load_iceberg` instead — it takes a directory path rather than a single file.\n\nSupports partial `schema` overrides keyed by column name (`{\"col\":\"BIGINT\"}`) — only list columns you want to correct; unlisted columns keep their inferred type. Overrides are supported for Parquet, CSV, and JSON; rejected for Arrow IPC. Call `inspect_file` first when unsure about types or to debug a prior failure; the inspector reports per-column min/max/null_count using the exact same inference logic. Use `json_extract_path` to extract a nested data array from a JSON wrapper file — dot-separated path, numeric segments index into arrays, string values are parsed as JSON.\n\n**Mode**: `replace` (default — drops + recreates the table), `append` (adds rows to an existing table), or `merge` (upserts rows by `merge_key`). In merge mode, set `merge_key` to a column name (`\"job_id\"`) or list of names (`[\"cell\",\"job_id\"]`); rows with a matching key are replaced, rows with no match are inserted. New columns in the incoming file are auto-added via `ALTER TABLE ADD COLUMN`. Type changes on existing columns are rejected — use `replace` for breaking schema changes."
+        description = "Load a CSV / JSON / JSONL / Parquet / Arrow IPC file into a named table (local, persistent, or an attached database); format auto-detected from extension/content. `mode`: `replace` (default) / `append` / `merge` (upsert by `merge_key` — a column name or list; unmatched rows insert, new columns auto-add, type changes on existing columns are rejected). Partial `schema` override `{\"col\":\"BIGINT\"}` corrects inferred types (rejected for Arrow IPC — its schema is authoritative). `json_extract_path` pulls a nested array from a JSON wrapper file. Prefer Parquet for large imports; run `inspect_file` first if unsure of types. For Apache Iceberg use `load_iceberg`. See get_readme for per-format tradeoffs."
     )]
     fn load_file(
         &self,
@@ -2245,7 +2247,7 @@ impl HyperMcpServer {
     /// Each entry behaves like a standalone `load_file` call; failures are
     /// reported per-file rather than aborting the whole batch.
     #[tool(
-        description = "Ingest multiple files in parallel. Each entry is equivalent to a standalone `load_file` call (same formats and same format-selection guidance: prefer Parquet > CSV > Arrow IPC > JSON for large imports). The batch runs across a pool of async connections sized by `concurrency` (default `min(files.len(), 8)`), so independent files finish roughly in max-time rather than sum-time. Per-file errors are captured in the response and do not abort the rest of the batch; the top-level call still returns Ok. For Apache Iceberg tables, call `load_iceberg` per table instead — this tool only handles single-file formats.\n\nUse `database` (or shorthand `persist: true`) to target a non-primary database; the same value applies to every entry in the batch. **Note: `mode = \"merge\"` is not supported here — use `load_file` once per file when you need merge/upsert semantics.**"
+        description = "Ingest multiple files in parallel — each entry is a `load_file` (same formats and guidance), run across a connection pool sized by `concurrency` (default `min(files, 8)`). Per-file errors are captured in the response without aborting the batch. `database` / `persist` apply to every entry. `mode=\"merge\"` is NOT supported here — call `load_file` per file for merge/upsert. For Apache Iceberg use `load_iceberg`."
     )]
     fn load_files(
         &self,
@@ -2933,7 +2935,7 @@ impl HyperMcpServer {
 
     /// Render a chart (PNG or SVG) from a SQL query.
     #[tool(
-        description = "Quick diagnostic: render one bar, line, scatter, or histogram from a SQL query. Returns PNG/SVG inline by default; `output_path` writes plus returns inline, while `inline=false` is disk-only.\n\n**Data shape:** Return long-format data with one numeric `y` column and optional `series`; reshape wide data with `UNION ALL`.\n\n**Temporal x:** Line/scatter DATE, TIMESTAMP, and TIMESTAMPTZ use proportional time spacing. TEXT is categorical; `x_as_category=true` deliberately forces even spacing. Bars are always categorical.\n\n- `format`: \"png\" (default) or \"svg\"; path extension and explicit format must agree.\n- `x_range` / `y_range`: finite, strictly increasing, representable extents; y applies to bars.\n- `bar_orientation`: \"vertical\" (default) or \"horizontal\" for bars.\n- `label_values=true`: label bars with each original y scalar.\n- `show_legend`: true by default; false hides the legend.\n- `y_scale`: \"linear\" or positive \"log\"; no log histograms, and explicit log ranges must contain every value.\n- `label_points=true`: label line/scatter points and suppress their legend."
+        description = "Quick diagnostic: render one bar / line / scatter / histogram from a SQL query — not a dashboard system. Use long-format data: one numeric `y` column plus an optional `series` to group/color (reshape wide data with `UNION ALL`). Returns a PNG (default) or SVG inline; set `output_path` to also write a file, or `inline=false` for disk-only. `database` routes the SQL. Individual axis/range/scale/label options are documented on each parameter; see get_readme for the fuller chart-presentation notes."
     )]
     fn chart(
         &self,
@@ -3251,7 +3253,7 @@ impl HyperMcpServer {
     /// Export query results or a table to CSV, Parquet, Arrow IPC,
     /// Apache Iceberg, or a new `.hyper` file.
     #[tool(
-        description = "Export query results or a table to a file via hyperd's native writers. Every format listed here is server-side — hyperd writes the file directly, with zero per-row work in the MCP process — and every format round-trips cleanly through the matching loader (`load_file` or `load_iceberg`).\n\nWhen choosing a format for *data leaving* Hyper, prefer in this order:\n  1. **Parquet** (recommended default): smallest output, fastest write, preserves every type (NUMERIC precision/scale, DATE, TIMESTAMP, etc.). `path` is a single file.\n  2. **Iceberg**: produces a full Apache Iceberg table directory (`metadata/` + `data/`). Use when the consumer is a data-lake tool (Spark, Trino, DuckDB, etc.). `path` is a directory that hyperd creates.\n  3. **Arrow IPC Stream** (`arrow_ipc`): same wire shape Hyper uses internally; great for handing data to another Arrow-aware process. Larger than Parquet (no compression) but extremely fast to read back. `path` is a single file.\n  4. **CSV**: portable and human-readable but the largest output and types are lost (everything becomes text). Use for spreadsheet / shell-pipeline interop. Includes header row.\n  5. **Hyper**: an entire `.hyper` database file openable directly in Tableau Desktop. `sql`/`table` are ignored — every user table is copied.\n\nAll formats except Iceberg and Hyper require either `sql` or `table`. Iceberg output is a directory; all others are single files.\n\nUse `database` to read from a non-primary source: for `format=\"hyper\"` it selects which database is snapshotted; for the row-oriented formats it routes the SELECT through the named database (when `table` is set) or pins `schema_search_path` for the call (when `sql` is set)."
+        description = "Export a query result or table to a file via hyperd's native server-side writers; every format round-trips back through `load_file` / `load_iceberg`. `format`: parquet (recommended default) / csv / arrow_ipc / iceberg / hyper. Requires `sql` or `table` — except `iceberg` and `hyper`, and `hyper` ignores both and snapshots every user table into a `.hyper` file openable in Tableau Desktop (a faithful backup; check `schema_fidelity` in the response). `path` is a single file except `iceberg`, which is a directory hyperd creates. `format_options` passes through to hyperd's `COPY ... WITH (...)` (e.g. parquet `codec`, csv `delimiter`). `database` selects the source. See get_readme for per-format tradeoffs."
     )]
     fn export(
         &self,
@@ -3456,7 +3458,7 @@ impl HyperMcpServer {
 
     /// Update prose metadata for a table in the `_table_catalog`.
     #[tool(
-        description = "Update prose metadata for a table in the `_table_catalog`: source_url, source_description, purpose, license, notes, data_url. Fields you omit stay unchanged; pass an explicit empty string (\"\") to clear a field. `data_url` is the machine-actionable download URL for the raw data file (distinct from `source_url`, which is a human-readable reference page). Mechanical fields (load_tool, load_params, loaded_at, last_refreshed_at, row_count) are managed by the server. Requires an existing catalog entry — load the table first (load_file / load_data / execute CREATE TABLE) so the stub row is created automatically. Use `database` to target the metadata for a table in a non-primary writable database; read-only attachments are rejected with a clear re-attach-with-writable message. Disabled in read-only mode."
+        description = "Update prose metadata for a table in `_table_catalog`: source_url, source_description, purpose, license, notes, data_url. Omitted fields stay unchanged; pass \"\" to clear one. `data_url` is the machine-actionable download URL (vs `source_url`, a human-readable page). Mechanical fields (load_tool, timestamps, row_count) are server-managed. Requires an existing catalog entry — load the table first (load_file / load_data / execute CREATE TABLE auto-creates the stub row). `database` targets a non-primary writable catalog (read-only attachments are rejected). Disabled in read-only mode."
     )]
     fn set_table_metadata(
         &self,
@@ -3520,7 +3522,7 @@ impl HyperMcpServer {
 
     /// Save a value under store + key (upsert). Local unless routed.
     #[tool(
-        description = "KV scratchpad. Save a variable, state, summary, or JSON config under store + key to remember later without creating a database table. IMPORTANT: without `database` the value is written to the local database and is LOST when the server restarts. To persist across restarts, pass database=\"persistent\" (or persist=true). Returns {stored, created, value_bytes}; `created:false` means an existing value was overwritten. Pass overwrite=false to avoid clobbering (skips + returns stored:false, existed:true). Pass value_path=<absolute path> to store a file's contents server-side instead of `value` (exactly one of value/value_path; reads any server-readable path — no sandbox; files over 64 MiB are rejected before reading)."
+        description = "KV scratchpad: save a string (variable, flag, summary, JSON) under store + key without creating a table. Without `database` the value is local and LOST on restart — pass database=\"persistent\" (or persist=true) to keep it. Returns {stored, created, value_bytes}; overwrite=false skips an existing key (returns stored:false, existed:true). value_path=<absolute path> stores a file's contents instead of `value` (exactly one of the two; any server-readable path, no sandbox; ≤64 MiB). See get_readme for the KV / durability model."
     )]
     fn kv_set(
         &self,
@@ -3933,7 +3935,7 @@ impl HyperMcpServer {
     /// Attach an additional `.hyper` database under a user-chosen
     /// alias so its tables can participate in cross-database queries.
     #[tool(
-        description = "Attach a .hyper database under a canonical lowercase alias. Its tables are `{alias}.public.{table}`; local tables are `local.public.{table}` or unqualified. Default is read-only. `writable:true` and `on_missing:'create'` permit writes only when the server is not `--read-only`; read-only attachment remains available. Only `kind:'local_file'` is supported; `local` is reserved."
+        description = "Attach a `.hyper` file under a lowercase `alias`; its tables become `{alias}.public.{table}` (local tables stay unqualified or `local.public.{table}`). Read-only by default — set `writable:true` (plus `on_missing:'create'` to create a missing file) to allow writes; both are blocked under `--read-only`. `alias` cannot be `local` (reserved). `kind` is optional and defaults to `local_file`, the only kind today."
     )]
     fn attach_database(
         &self,
@@ -3953,7 +3955,7 @@ impl HyperMcpServer {
                 "on_missing='create' requires writable:true — an empty .hyper file that cannot be written to cannot be populated.",
             ));
         }
-        let source = match params.kind.as_str() {
+        let source = match params.kind.as_deref().unwrap_or("local_file") {
             "local_file" => {
                 let Some(raw) = params.path.as_deref() else {
                     return Self::err_content(McpError::new(
@@ -5385,6 +5387,47 @@ fn rand_suffix() -> String {
     format!("{}", t.as_nanos() % 1_000_000_000)
 }
 
+/// Replace whole-word occurrences of the identifier `needle` with
+/// `replacement` in `sql`. A match qualifies only when the characters on
+/// both sides are not identifier characters (`[A-Za-z0-9_]`), so rewriting
+/// the alias `data` to a temp-table name does not corrupt a column named
+/// `metadata` or `data_url`. Both `needle` and `replacement` are
+/// lowercase ASCII identifiers here (SQL folds unquoted names to
+/// lowercase), so this stays a simple boundary check.
+///
+/// Known limitation: this is identifier-boundary aware but not SQL-aware,
+/// so a string literal, quoted identifier, or comment that exactly equals
+/// `needle` is also rewritten — e.g. `WHERE category = 'data'` with alias
+/// `data`. That is rare in practice (the alias is a table name); a
+/// SQL-tokenizing rewrite would be the complete fix.
+fn replace_identifier(sql: &str, needle: &str, replacement: &str) -> String {
+    if needle.is_empty() || !sql.contains(needle) {
+        return sql.to_string();
+    }
+    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut out = String::with_capacity(sql.len());
+    let mut rest = sql;
+    // The identifier char immediately preceding `rest`, carried across
+    // iterations so a match at the very start of `rest` still sees its
+    // left boundary.
+    let mut prev: Option<char> = None;
+    while let Some(pos) = rest.find(needle) {
+        let (head, tail) = rest.split_at(pos);
+        let before = head.chars().last().or(prev);
+        let after = tail[needle.len()..].chars().next();
+        out.push_str(head);
+        if before.is_none_or(|c| !is_ident(c)) && after.is_none_or(|c| !is_ident(c)) {
+            out.push_str(replacement);
+        } else {
+            out.push_str(needle);
+        }
+        prev = needle.chars().last();
+        rest = &tail[needle.len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Build a fully-qualified `"db"."schema"."table"` name. `db` is the
 /// target alias; `None` means "the primary workspace", which resolves
 /// via [`Engine::primary_db_name`]. The `public` schema is assumed
@@ -5489,7 +5532,7 @@ fn prepare_temp_attachments(
                 ),
             ));
         }
-        let source = match spec.kind.as_str() {
+        let source = match spec.kind.as_deref().unwrap_or("local_file") {
             "local_file" => {
                 let Some(raw) = spec.path.as_deref() else {
                     return Err(McpError::new(
@@ -5591,6 +5634,42 @@ fn perform_copy(
         "row_count": row_count,
         "stats": { "operation": "copy_query", "elapsed_ms": elapsed_ms },
     }))
+}
+
+#[cfg(test)]
+mod replace_identifier_tests {
+    use super::replace_identifier;
+
+    #[test]
+    fn replaces_standalone_identifier() {
+        assert_eq!(
+            replace_identifier("SELECT * FROM data", "data", "_tmp_data_1"),
+            "SELECT * FROM _tmp_data_1"
+        );
+    }
+
+    #[test]
+    fn does_not_corrupt_substring_matches() {
+        // The alias `data` must not touch the column `metadata` or `data_url`.
+        assert_eq!(
+            replace_identifier("SELECT metadata, data_url FROM data", "data", "_tmp_data_1"),
+            "SELECT metadata, data_url FROM _tmp_data_1"
+        );
+    }
+
+    #[test]
+    fn replaces_every_standalone_occurrence() {
+        assert_eq!(
+            replace_identifier("SELECT * FROM data JOIN data", "data", "t"),
+            "SELECT * FROM t JOIN t"
+        );
+    }
+
+    #[test]
+    fn leaves_sql_untouched_when_absent() {
+        let sql = "SELECT * FROM sales";
+        assert_eq!(replace_identifier(sql, "data", "t"), sql);
+    }
 }
 
 #[cfg(test)]

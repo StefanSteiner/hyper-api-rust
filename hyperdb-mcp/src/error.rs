@@ -179,6 +179,13 @@ impl From<hyperdb_api::Error> for McpError {
                     }
                     return McpError::new(ErrorCode::SqlError, err.to_string());
                 }
+                "42P01" => {
+                    // undefined_table — the query referenced a table that
+                    // does not exist. Steer toward listing what's there
+                    // rather than the generic "check your SQL" hint.
+                    return McpError::new(ErrorCode::SqlError, err.to_string()).with_suggestion(
+                        "Referenced table does not exist. Run `describe` (with the same `database` you queried) to list available tables; unquoted names fold to lowercase. In query_data / query_file the loaded rows are exposed as `table_name` (default `data`), e.g. `SELECT * FROM data`.");
+                }
                 _ => {} // fall through to message-based classification
             }
         }
