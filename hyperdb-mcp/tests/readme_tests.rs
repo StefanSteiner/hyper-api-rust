@@ -560,11 +560,10 @@ fn public_docs_database_and_read_only_contract() {
     }
 
     if !(attach_example.contains("attach_database({")
-        && attach_example.contains("\"kind\": \"local_file\"")
         && attach_example.contains("lookup.public.dim_region"))
     {
         failures.push(
-            "get_readme attach example must supply kind=local_file and use the runnable lookup.public.dim_region qualification"
+            "get_readme attach example must call attach_database and use the runnable lookup.public.dim_region qualification"
                 .to_owned(),
         );
     }

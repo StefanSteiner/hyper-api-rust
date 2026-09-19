@@ -12,6 +12,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Upgraded the `rmcp` SDK dependency from 1.x to 3.4.** Resolves the
   outstanding `rmcp` security advisories. Purely an internal dependency bump —
   the MCP wire protocol and tool surface exposed by this server are unchanged.
+- **`query_file` now exposes the file's rows as `data` by default**, matching
+  `query_data`, instead of the file's stem. Reference them as `SELECT ... FROM
+  data` (or pass `table_name`). The previous stem default was unpredictable and
+  contradicted the documented example.
+- **`attach_database` and `copy_query`'s `temp_attach` no longer require
+  `kind`** — it defaults to `"local_file"`, the only supported kind.
+- **Trimmed the always-in-context tool descriptions (~26% smaller)** — moved
+  the format-selection and edge-case detail into `get_readme` while keeping the
+  actionable rules inline, cutting the tokens the tool catalog costs per load.
+
+### Fixed
+
+- **`query_data` / `query_file` no longer leak their scratch table on a failed
+  query** — the temp table is now dropped whether the query succeeds or fails,
+  so a bad query no longer leaves a `_tmp_*` table behind in `describe`.
+- **Table listings (`describe`) now hide transient scratch tables** (`_tmp_*`
+  and `__hyperdb_merge_*`), not just `_hyperdb_*` internals.
+- **`query_data` / `query_file` table-name substitution is whole-word** — an
+  alias like `data` no longer corrupts a column named `metadata` or `data_url`.
+- **Unknown-table SQL errors now suggest running `describe`** and name the
+  default `data` alias, instead of the generic "check SQL syntax" hint.
 
 ## [1.0.0-rc.4] - 2026-09-08
 
