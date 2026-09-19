@@ -2081,7 +2081,7 @@ const INTERNAL_SCRATCH_PREFIXES: [&str; 2] = ["_tmp_", "__hyperdb_merge_"];
 
 /// Returns true when `name` is one of `HyperDB`'s own internal tables:
 /// a persistent internal table ([`HYPERDB_INTERNAL_PREFIX`]) or a
-/// transient scratch table ([`INTERNAL_SCRATCH_PREFIXES`]). Factored into
+/// transient scratch table (`INTERNAL_SCRATCH_PREFIXES`). Factored into
 /// a helper so every filter site calls the same predicate and a future
 /// move to a more nuanced scheme (e.g. per-table allowlist) is a single
 /// edit.
