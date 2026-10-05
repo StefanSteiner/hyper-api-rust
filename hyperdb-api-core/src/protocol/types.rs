@@ -423,10 +423,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(
-        clippy::float_cmp,
-        reason = "bit-for-bit round-trip through fixed-width binary encoding; epsilon compare would mask a decode regression"
-    )]
     fn test_f64_roundtrip() {
         let mut buf = BytesMut::new();
         f64_to_hyper_binary(std::f64::consts::PI, &mut buf);

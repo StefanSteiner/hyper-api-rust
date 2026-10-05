@@ -56,7 +56,7 @@ fn kv_store_in_targets_attached_database() -> Result<()> {
 
     // The location-aware listing sees the attached-DB store; the primary has none.
     assert_eq!(conn.kv_list_stores_in("aux")?, vec!["settings".to_string()]);
-    assert!(conn.kv_list_stores()?.is_empty());
+    assert_eq!(conn.kv_list_stores()?, [] as [std::string::String; 0]);
 
     Ok(())
 }
@@ -108,7 +108,7 @@ async fn async_kv_store_in_targets_attached_database() -> Result<()> {
         conn.kv_list_stores_in("aux").await?,
         vec!["settings".to_string()]
     );
-    assert!(conn.kv_list_stores().await?.is_empty());
+    assert_eq!(conn.kv_list_stores().await?, [] as [std::string::String; 0]);
 
     Ok(())
 }

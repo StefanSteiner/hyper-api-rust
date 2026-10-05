@@ -148,7 +148,10 @@ fn delete_exists_size_keys_clear() -> Result<()> {
 fn list_stores_and_isolation() -> Result<()> {
     let tc = TestConnection::new()?;
     // Empty before any store has keys.
-    assert!(tc.connection.kv_list_stores()?.is_empty());
+    assert_eq!(
+        tc.connection.kv_list_stores()?,
+        [] as [std::string::String; 0]
+    );
 
     let a = tc.connection.kv_store("alpha")?;
     let b = tc.connection.kv_store("beta")?;

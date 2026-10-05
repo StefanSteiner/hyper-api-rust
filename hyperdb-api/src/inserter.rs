@@ -284,6 +284,7 @@ impl<'conn> Inserter<'conn> {
     }
 
     /// Returns the table definition.
+    #[must_use]
     pub fn table_definition(&self) -> &TableDefinition {
         &self.table_def
     }

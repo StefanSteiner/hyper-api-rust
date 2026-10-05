@@ -109,7 +109,7 @@ mod tests {
     #[test]
     fn builtin_parses() {
         let r = PinnedRelease::builtin();
-        assert!(!r.version.is_empty());
+        assert_ne!(r.version, "");
     }
 
     #[test]

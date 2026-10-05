@@ -46,7 +46,10 @@ fn inspect_csv_reports_widened_types_and_min_max() {
     assert_eq!(report.stats[pop].max_i128, Some(8_000_000_000));
     assert_eq!(report.stats[pop].min_i128, Some(100));
     assert_eq!(report.stats[pop].null_count, 0);
-    assert!(!report.stats[pop].sample_values.is_empty());
+    assert_ne!(
+        report.stats[pop].sample_values,
+        [] as [std::string::String; 0]
+    );
 }
 
 /// Nulls and empty cells must be counted, not silently dropped — the caller

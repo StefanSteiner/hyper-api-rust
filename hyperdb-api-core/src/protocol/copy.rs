@@ -773,7 +773,7 @@ mod tests {
         // A zero-length value is valid: 4 bytes of length prefix, no data.
         let buf = [0x00, 0x00, 0x00, 0x00];
         let bytes = read_varbinary(&buf).unwrap();
-        assert!(bytes.is_empty());
+        assert_eq!(bytes.len(), 0);
     }
 
     #[test]

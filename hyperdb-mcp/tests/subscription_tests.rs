@@ -18,7 +18,7 @@ use hyperdb_mcp::subscriptions::{
 #[test]
 fn empty_registry_has_no_subscribed_uris() {
     let reg = SubscriptionRegistry::new();
-    assert!(reg.subscribed_uris().is_empty());
+    assert_eq!(reg.subscribed_uris(), [] as [std::string::String; 0]);
     assert!(reg.subscribers_for("hyper://anything").is_empty());
 }
 
@@ -32,7 +32,7 @@ fn unsubscribe_on_empty_registry_is_a_noop() {
     // subscribers_for after an unsubscribe should still be empty.
     assert_eq!(reg.subscribers_for("hyper://workspace").len(), 0);
     reg.clear();
-    assert!(reg.subscribed_uris().is_empty());
+    assert_eq!(reg.subscribed_uris(), [] as [std::string::String; 0]);
 }
 
 #[test]
@@ -43,7 +43,7 @@ fn notify_updated_on_empty_registry_is_safe() {
     reg.notify_updated("hyper://workspace");
     reg.notify_list_changed();
     // Should still have no subscribers after the no-op.
-    assert!(reg.subscribed_uris().is_empty());
+    assert_eq!(reg.subscribed_uris(), [] as [std::string::String; 0]);
 }
 
 // --- URI fan-out helpers ----------------------------------------------------

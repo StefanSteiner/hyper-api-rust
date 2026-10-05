@@ -57,7 +57,10 @@ fn non_utf8_os_string() -> OsString {
 fn launcher_identity_parsing_contract() {
     let absent = parse_launcher_identity(None);
     assert_eq!(absent.identity, None);
-    assert!(absent.warnings.is_empty());
+    assert_eq!(
+        absent.warnings,
+        [] as [hyperdb_mcp::diagnostics::IdentityWarning; 0]
+    );
 
     let secret = "UNKNOWN_SECRET_SENTINEL_4c4c08";
     let valid = json!({
@@ -79,7 +82,10 @@ fn launcher_identity_parsing_contract() {
     .to_string();
 
     let parsed = parse_launcher_identity(Some(OsStr::new(&valid)));
-    assert!(parsed.warnings.is_empty());
+    assert_eq!(
+        parsed.warnings,
+        [] as [hyperdb_mcp::diagnostics::IdentityWarning; 0]
+    );
     let identity = parsed.identity.expect("valid launcher metadata must parse");
     assert_eq!(
         serde_json::to_value(&identity).expect("launcher identity must serialize"),
