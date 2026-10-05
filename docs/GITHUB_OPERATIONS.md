@@ -36,7 +36,7 @@ Runs on **every PR** and on **every push to `main`**. Jobs:
 
 - `rustfmt` — `cargo fmt --all --check`.
 - `clippy` — `cargo clippy --workspace --all-targets -- -D warnings` (single runner; lints are platform-independent).
-- `test` — full workspace test matrix on `ubuntu-latest`, `macos-14`, `windows-latest`.
+- `test` — full workspace test matrix on `ubuntu-24.04`, `macos-26`, `windows-2025`.
 - `publish-dry-run` — `cargo publish --dry-run` for each publishable crate so a broken publish manifest is caught before a tag is cut.
 - `cargo-deny` — license and advisory policy enforcement per [`deny.toml`](../deny.toml).
 - `cargo-audit` — RustSec advisories, `--deny warnings`.
@@ -122,9 +122,9 @@ verify-ci       ← checks that CI passed for this commit (gh api commit status)
 
 | Platform | Runner | Rust target | hyperd source |
 |---|---|---|---|
-| `darwin-arm64` | `macos-14` | `aarch64-apple-darwin` | `macos-arm64` |
-| `linux-x64-gnu` | `ubuntu-latest` | `x86_64-unknown-linux-gnu` | `linux-x86_64` |
-| `win32-x64-msvc` | `windows-latest` | `x86_64-pc-windows-msvc` | `windows-x86_64` |
+| `darwin-arm64` | `macos-26` | `aarch64-apple-darwin` | `macos-arm64` |
+| `linux-x64-gnu` | `ubuntu-24.04` | `x86_64-unknown-linux-gnu` | `linux-x86_64` |
+| `win32-x64-msvc` | `windows-2025` | `x86_64-pc-windows-msvc` | `windows-x86_64` |
 
 `darwin-x64` (Intel macOS) is currently disabled — `macos-13` GHA
 runners have been unreliable. The matrix entry is commented out in
@@ -830,7 +830,7 @@ when multiple maintainers need the pipeline to work independently.
    ```yaml
    jobs:
      release-please:
-       runs-on: ubuntu-latest
+       runs-on: ubuntu-24.04
        steps:
          - uses: actions/create-github-app-token@v2
            id: app-token
