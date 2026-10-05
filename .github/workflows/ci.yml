@@ -46,7 +46,7 @@ env:
 jobs:
   fmt:
     name: rustfmt
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -79,7 +79,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-24.04, windows-2025]
     steps:
       - uses: actions/checkout@v7
       - name: Install system libraries (Linux)
@@ -126,7 +126,7 @@ jobs:
     # Pinned deliberately: this job must fail when the floor is exceeded, which
     # is the signal to make raising it a conscious decision.
     name: msrv (1.88)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -164,7 +164,7 @@ jobs:
     # long before it could pass; it went green once the broken intra-doc links
     # in hyperdb-mcp and hyperdb-api-derive were fixed, so it is now wired up.
     name: doc
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -198,7 +198,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14, windows-latest]
+        os: [ubuntu-24.04, macos-26, windows-2025]
     steps:
       - uses: actions/checkout@v7
       - name: Free disk space (Linux only)
@@ -276,7 +276,7 @@ jobs:
     # cross-platform napi compatibility is exercised by the per-platform
     # build matrix in npm-build-publish.yml when a release ships.
     name: hyperdb-api-node (build + smoke)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
@@ -287,7 +287,7 @@ jobs:
           toolchain: stable
           # Reuse the test job's Linux cache so the Cargo deps are warm
           # when both jobs run on the same SHA.
-          cache-key: test-ubuntu-latest
+          cache-key: test-ubuntu-24.04
           # See fmt job for rationale.
           rustflags: ""
       - uses: actions/setup-node@v7
@@ -328,7 +328,7 @@ jobs:
     #   hyperdb-compile-check: depends on hyperdb-api (not yet published).
     # All of the above are exercised end-to-end by release.yml at tag time.
     name: publish dry-run
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -352,7 +352,7 @@ jobs:
     # rules from deny.toml. Pairs with the `audit` job — `cargo-deny` and
     # `cargo-audit` have separate ignore mechanisms; both must agree.
     name: cargo-deny
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     # The cargo-deny-action image ships a pre-installed `stable` toolchain,
     # but its `rustup show` step honors `rust-toolchain.toml`'s override
@@ -373,7 +373,7 @@ jobs:
     # Enforces the RustSec advisory ignore list in .cargo/audit.toml.
     # Fails on any unfixed advisory for a crate in the lockfile.
     name: cargo-audit
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -390,7 +390,7 @@ jobs:
     # with Cargo.toml workspace version. Catches release-please PRs that
     # bump one but not the other.
     name: version consistency
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7

@@ -59,10 +59,10 @@ jobs:
           # silently on the v0.2.2 release. Exact-string match avoids
           # the whole class of regex-escaping bugs.
           REQUIRED_JSON='[
-            "rustfmt","clippy (ubuntu-latest)","clippy (windows-latest)",
+            "rustfmt","clippy (ubuntu-24.04)","clippy (windows-2025)",
             "cargo-audit","cargo-deny",
             "version consistency","publish dry-run",
-            "test (ubuntu-latest)","test (macos-14)","test (windows-latest)",
+            "test (ubuntu-24.04)","test (macos-26)","test (windows-2025)",
             "hyperdb-api-node (build + smoke)"
           ]'
           for i in $(seq 1 "$MAX_ATTEMPTS"); do
@@ -101,7 +101,7 @@ jobs:
           # a wrong tag yields a 404 rather than a version mismatch.
           # hyperd-sha256 is the digest of the downloaded .whl archive.
           - platform: darwin-arm64
-            os: macos-14
+            os: macos-26
             target: aarch64-apple-darwin
             hyperd-slug: macos-arm64
             hyperd-wheel-tag: macosx_13_0_arm64
@@ -114,13 +114,13 @@ jobs:
           #   hyperd-wheel-tag: macosx_10_11_x86_64
           #   hyperd-sha256: "960e276028137847a3870695d9c2d5a1392c173b1e119ff1146d24a75deca71a"
           - platform: linux-x64-gnu
-            os: ubuntu-latest
+            os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             hyperd-slug: linux-x86_64
             hyperd-wheel-tag: manylinux2014_x86_64
             hyperd-sha256: "9f5ff04c0dc3c17224b7a3f36f297775f2f49aae084da84614003cd6508213bc"
           - platform: win32-x64-msvc
-            os: windows-latest
+            os: windows-2025
             target: x86_64-pc-windows-msvc
             hyperd-slug: windows-x86_64
             hyperd-wheel-tag: win_amd64
@@ -156,11 +156,17 @@ jobs:
       - name: Build hyperdb-mcp
         env:
           TARGET: ${{ matrix.target }}
+          # Keep the macOS binary's minimum OS at hyperd's wheel floor
+          # (macosx_13_0) even though the runner is newer; ignored elsewhere.
+          MACOSX_DEPLOYMENT_TARGET: "13.0"
         run: cargo build --release --target "$TARGET" -p hyperdb-mcp
 
       - name: Build hyperdb-api-node
         env:
           TARGET: ${{ matrix.target }}
+          # Keep the macOS binary's minimum OS at hyperd's wheel floor
+          # (macosx_13_0) even though the runner is newer; ignored elsewhere.
+          MACOSX_DEPLOYMENT_TARGET: "13.0"
         run: cargo build --release --target "$TARGET" -p hyperdb-api-node
 
       - name: Download and verify hyperd

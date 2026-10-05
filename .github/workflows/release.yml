@@ -52,7 +52,7 @@ jobs:
   verify:
     if: github.repository == 'tableau/hyper-api-rust'
     name: verify
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v7
@@ -88,7 +88,7 @@ jobs:
           REQUIRED_JSON='[
             "rustfmt","clippy","cargo-audit","cargo-deny",
             "version consistency","publish dry-run",
-            "test (ubuntu-latest)","test (macos-14)","test (windows-latest)",
+            "test (ubuntu-24.04)","test (macos-26)","test (windows-2025)",
             "hyperdb-api-node (build + smoke)"
           ]'
           for i in $(seq 1 "$MAX_ATTEMPTS"); do
@@ -140,7 +140,7 @@ jobs:
   publish:
     name: publish to crates.io
     needs: verify
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
       contents: write
