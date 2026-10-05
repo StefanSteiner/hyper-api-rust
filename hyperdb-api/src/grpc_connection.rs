@@ -290,6 +290,7 @@ impl GrpcConnection {
     }
 
     /// Returns the gRPC configuration.
+    #[must_use]
     pub fn config(&self) -> &GrpcConfig {
         self.client.config()
     }
@@ -425,6 +426,7 @@ impl GrpcConnectionAsync {
     }
 
     /// Returns the gRPC configuration.
+    #[must_use]
     pub fn config(&self) -> &GrpcConfig {
         self.client.config()
     }

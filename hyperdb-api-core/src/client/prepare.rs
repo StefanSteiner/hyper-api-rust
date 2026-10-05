@@ -692,10 +692,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(
-        clippy::float_cmp,
-        reason = "1.5 is exactly representable; encode/decode must round-trip bit-for-bit"
-    )]
     fn test_sql_param_f32() {
         let encoded = 1.5_f32.encode();
         assert_eq!(encoded.len(), 4);
@@ -704,10 +700,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(
-        clippy::float_cmp,
-        reason = "1.5 is exactly representable; encode/decode must round-trip bit-for-bit"
-    )]
     fn test_sql_param_f64() {
         let encoded = 1.5_f64.encode();
         assert_eq!(encoded.len(), 8);
@@ -748,7 +740,7 @@ mod tests {
     #[test]
     fn test_params_macro_empty() {
         let p = params![];
-        assert!(p.is_empty());
+        assert_eq!(p.len(), 0);
     }
 
     #[test]

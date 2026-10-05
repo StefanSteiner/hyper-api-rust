@@ -314,6 +314,7 @@ impl DatabaseName {
     }
 
     /// Returns the name component.
+    #[must_use]
     pub fn name(&self) -> &Name {
         &self.name
     }
@@ -449,6 +450,7 @@ impl SchemaName {
     }
 
     /// Returns the schema name component.
+    #[must_use]
     pub fn schema(&self) -> &Name {
         &self.schema
     }
@@ -638,6 +640,7 @@ impl TableName {
     }
 
     /// Returns the table name component.
+    #[must_use]
     pub fn table(&self) -> &Name {
         &self.table
     }
@@ -877,7 +880,7 @@ mod tests {
         let name = Name::try_new("users").unwrap();
         assert_eq!(name.to_string(), "\"users\"");
         assert_eq!(name.unescaped(), "users");
-        assert!(!name.unescaped().is_empty());
+        assert_ne!(name.unescaped(), "");
     }
 
     #[test]

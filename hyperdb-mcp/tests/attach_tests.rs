@@ -166,7 +166,7 @@ fn detach_removes_entry_and_hides_tables() {
     // Should surface as a SQL error (attached database not found). We
     // don't pin the exact ErrorCode here — we only care that the
     // query is rejected.
-    assert!(!err.message.is_empty());
+    assert_ne!(err.message, "");
 }
 
 #[test]

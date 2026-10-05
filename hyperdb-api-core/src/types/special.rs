@@ -2182,7 +2182,7 @@ mod geo_impl {
             let wkb_geo = Geography::from_wkt("POINT(1 2)").expect("wkt to wkb");
             match wkb_geo.format().expect("format detection") {
                 GeographyFormat::Wkb(bytes) => {
-                    assert!(!bytes.is_empty());
+                    assert_ne!(bytes.len(), 0);
                     assert!(bytes[0] == 0 || bytes[0] == 1);
                 }
                 GeographyFormat::Legacy(_) => panic!("expected WKB format"),
@@ -2460,10 +2460,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(
-        clippy::float_cmp,
-        reason = "42.0 is exactly representable; scale=0 conversion must be bit-exact"
-    )]
     fn test_numeric_from_binary_with_scale_zero() {
         // Unscaled value 42 with scale 0 = 42
         let mut bytes = [0u8; 16];
@@ -2571,10 +2567,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(
-        clippy::float_cmp,
-        reason = "123.0 is exactly representable; scale=0 conversion must be bit-exact"
-    )]
     fn test_numeric_from_binary_with_scale_required() {
         // FromHyperBinary is intentionally NOT implemented for Numeric because
         // the scale must be obtained from type metadata - it cannot be inferred

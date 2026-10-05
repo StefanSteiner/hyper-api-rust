@@ -56,11 +56,11 @@ fn test_arrow_reader_query() -> Result<()> {
 
     // Test query with filter
     let arrow_data = reader.query_to_arrow("SELECT * FROM products WHERE price > 15")?;
-    assert!(!arrow_data.is_empty());
+    assert_ne!(arrow_data, [] as [u8; 0]);
 
     // Test query with aggregation
     let arrow_data = reader.query_to_arrow("SELECT COUNT(*), SUM(price) FROM products")?;
-    assert!(!arrow_data.is_empty());
+    assert_ne!(arrow_data, [] as [u8; 0]);
 
     Ok(())
 }
@@ -80,7 +80,7 @@ fn test_arrow_reader_columns() -> Result<()> {
 
     // Read only specific columns
     let arrow_data = reader.table_columns_to_arrow("users", &["id", "name"])?;
-    assert!(!arrow_data.is_empty());
+    assert_ne!(arrow_data, [] as [u8; 0]);
 
     Ok(())
 }
@@ -106,7 +106,7 @@ fn test_arrow_reader_filtered() -> Result<()> {
 
     // Read with filter
     let arrow_data = reader.table_filtered_to_arrow("orders", "status = 'pending'")?;
-    assert!(!arrow_data.is_empty());
+    assert_ne!(arrow_data, [] as [u8; 0]);
 
     Ok(())
 }
@@ -161,7 +161,7 @@ fn test_arrow_reader_empty_table() -> Result<()> {
     let arrow_data = reader.table_to_arrow("empty_table")?;
 
     // Even empty result should have some data (schema at minimum)
-    assert!(!arrow_data.is_empty());
+    assert_ne!(arrow_data, [] as [u8; 0]);
 
     Ok(())
 }
@@ -192,7 +192,7 @@ fn test_arrow_reader_various_types() -> Result<()> {
 
     let reader = ArrowReader::new(&conn);
     let arrow_data = reader.table_to_arrow("typed_data")?;
-    assert!(!arrow_data.is_empty());
+    assert_ne!(arrow_data, [] as [u8; 0]);
 
     Ok(())
 }
@@ -213,7 +213,7 @@ fn test_arrow_reader_no_matching_rows() -> Result<()> {
     let arrow_data = reader.query_to_arrow("SELECT * FROM test_filter WHERE id > 100")?;
 
     // Should still have data (schema)
-    assert!(!arrow_data.is_empty());
+    assert_ne!(arrow_data, [] as [u8; 0]);
 
     Ok(())
 }
@@ -233,7 +233,7 @@ fn test_arrow_reader_schema_qualified() -> Result<()> {
 
     let reader = ArrowReader::new(&conn);
     let arrow_data = reader.table_to_arrow("custom_schema.test_table")?;
-    assert!(!arrow_data.is_empty());
+    assert_ne!(arrow_data, [] as [u8; 0]);
 
     Ok(())
 }
@@ -256,9 +256,9 @@ fn test_arrow_reader_multiple_reads() -> Result<()> {
     let data2 = reader.table_to_arrow("multi_test")?;
     let data3 = reader.query_to_arrow("SELECT COUNT(*) FROM multi_test")?;
 
-    assert!(!data1.is_empty());
-    assert!(!data2.is_empty());
-    assert!(!data3.is_empty());
+    assert_ne!(data1, [] as [u8; 0]);
+    assert_ne!(data2, [] as [u8; 0]);
+    assert_ne!(data3, [] as [u8; 0]);
 
     // Same query should return same size
     assert_eq!(data1.len(), data2.len());

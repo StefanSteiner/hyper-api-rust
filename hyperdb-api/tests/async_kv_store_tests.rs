@@ -71,7 +71,7 @@ async fn async_kv_full_surface() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 async fn async_list_stores_and_validation() -> Result<()> {
     let (_hyper, conn) = fresh_async_conn("async_kv_list").await?;
-    assert!(conn.kv_list_stores().await?.is_empty());
+    assert_eq!(conn.kv_list_stores().await?, [] as [std::string::String; 0]);
     let _ = conn.kv_store("alpha").await?.set("k", "1").await?;
     let _ = conn.kv_store("beta").await?.set("k", "2").await?;
     let mut stores = conn.kv_list_stores().await?;

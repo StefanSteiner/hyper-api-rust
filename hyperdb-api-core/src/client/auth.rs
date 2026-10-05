@@ -390,6 +390,6 @@ mod tests {
         let nonce1 = generate_nonce();
         let nonce2 = generate_nonce();
         assert_ne!(nonce1, nonce2);
-        assert!(!nonce1.is_empty());
+        assert_ne!(nonce1, "");
     }
 }

@@ -94,7 +94,7 @@ fn test_i64_type_handling() {
             let str_val = row.get::<String>(0);
             assert!(str_val.is_some(), "Should be readable as String");
             // The string might be "42" or binary representation, but should not be empty
-            assert!(!str_val.unwrap().is_empty());
+            assert_ne!(str_val.unwrap(), "");
         }
     }
 

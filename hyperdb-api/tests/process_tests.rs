@@ -172,7 +172,7 @@ fn test_hyper_process_start_stop() {
     // Verify the endpoint is valid
     let endpoint = hyper.endpoint().expect("No endpoint");
     let descriptor = endpoint.to_string();
-    assert!(!descriptor.is_empty());
+    assert_ne!(descriptor, "");
 
     // Verify we can connect
     let conn = Connection::without_database(endpoint).expect("Failed to connect");
@@ -310,7 +310,7 @@ fn test_hyper_process_drop() {
     }
     // After hyper is dropped, we can't verify the server is down without
     // trying to connect (which would hang), so we just ensure no panic
-    assert!(!endpoint_str.is_empty());
+    assert_ne!(endpoint_str, "");
 }
 
 #[test]
