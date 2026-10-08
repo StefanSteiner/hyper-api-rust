@@ -24,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **`inspect_file` and JSON schema inference no longer panic on non-ASCII
+  text.** Sample-value previews were truncated at a byte offset and ISO 8601
+  date/timestamp detection sliced strings by byte index, so a multi-byte
+  character at the cut point aborted the request. Previews now truncate by
+  character, and date/timestamp detection only considers ASCII strings.
 - **`query_data` / `query_file` no longer leak their scratch table on a failed
   query** — the temp table is now dropped whether the query succeeds or fails,
   so a bad query no longer leaves a `_tmp_*` table behind in `describe`.
