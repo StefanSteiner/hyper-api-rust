@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **`query_data` / `query_file` no longer interpolate `table_name` unescaped
+  into the scratch-table `DROP`.** A `table_name` containing a double quote
+  could end the quoted identifier and append further SQL to the cleanup
+  statement.
 - **`inspect_file` and JSON schema inference no longer panic on non-ASCII
   text.** Sample-value previews were truncated at a byte offset and ISO 8601
   date/timestamp detection sliced strings by byte index, so a multi-byte

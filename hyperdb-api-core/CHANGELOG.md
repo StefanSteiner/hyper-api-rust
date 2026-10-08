@@ -13,6 +13,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`Interval` `Display` kept the sign only when the time component was an hour
+  or more.** A negative interval under one hour (for example −30 minutes)
+  rendered as a positive `00:30:00`; it now renders `-00:30:00`.
+- **`AuthenticatedGrpcClient::has_table` returned `true` for every table.** It
+  judged existence by the byte length of the Arrow stream, which is non-empty
+  even for a zero-row result; it now counts rows.
+- **`AuthenticatedGrpcClient::get_table_labels` / `get_column_labels` escape
+  their `schema` and `table` arguments** instead of interpolating them into
+  the catalog query unescaped.
+
 ## [1.0.0-rc.3] - 2026-09-07
 
 ### Added

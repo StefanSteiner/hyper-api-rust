@@ -1939,7 +1939,7 @@ impl HyperMcpServer {
             // propagating the query error with `?` before the drop would
             // orphan the temp table (it then surfaces in `describe`).
             let query_result = engine.execute_query_to_json(&query_sql);
-            let _ = engine.execute_command(&format!("DROP TABLE IF EXISTS \"{temp_table}\""));
+            let _ = engine.execute_command(&drop_scratch_table_sql(&temp_table));
             let rows = query_result?;
 
             Ok(json!({
@@ -2002,7 +2002,7 @@ impl HyperMcpServer {
             // propagating the query error with `?` before the drop would
             // orphan the temp table (it then surfaces in `describe`).
             let query_result = engine.execute_query_to_json(&query_sql);
-            let _ = engine.execute_command(&format!("DROP TABLE IF EXISTS \"{temp_table}\""));
+            let _ = engine.execute_command(&drop_scratch_table_sql(&temp_table));
             let rows = query_result?;
 
             Ok(json!({
@@ -5377,6 +5377,16 @@ fn rand_suffix() -> String {
     format!("{}", t.as_nanos() % 1_000_000_000)
 }
 
+/// `DROP` statement for a `query_data` / `query_file` scratch table. The name
+/// embeds the caller-supplied `table_name`, so it must be quoted as an
+/// identifier rather than wrapped in bare quotes.
+fn drop_scratch_table_sql(temp_table: &str) -> String {
+    format!(
+        "DROP TABLE IF EXISTS \"{}\"",
+        temp_table.replace('"', "\"\"")
+    )
+}
+
 /// Replace whole-word occurrences of the identifier `needle` with
 /// `replacement` in `sql`. A match qualifies only when the characters on
 /// both sides are not identifier characters (`[A-Za-z0-9_]`), so rewriting
@@ -5624,6 +5634,24 @@ fn perform_copy(
         "row_count": row_count,
         "stats": { "operation": "copy_query", "elapsed_ms": elapsed_ms },
     }))
+}
+
+#[cfg(test)]
+mod drop_scratch_table_tests {
+    use super::drop_scratch_table_sql;
+
+    #[test]
+    fn drop_sql_escapes_embedded_quotes() {
+        assert_eq!(
+            drop_scratch_table_sql("_tmp_data_1"),
+            "DROP TABLE IF EXISTS \"_tmp_data_1\""
+        );
+        // A `table_name` of `x"; DROP TABLE victim; --` must stay one identifier.
+        assert_eq!(
+            drop_scratch_table_sql("_tmp_x\"; DROP TABLE victim; --_1"),
+            "DROP TABLE IF EXISTS \"_tmp_x\"\"; DROP TABLE victim; --_1\""
+        );
+    }
 }
 
 #[cfg(test)]

@@ -899,25 +899,20 @@ impl fmt::Display for Interval {
             ));
         }
         if self.microseconds != 0 || parts.is_empty() {
-            let total_seconds = self.microseconds / 1_000_000;
-            let micros = (self.microseconds % 1_000_000).abs();
+            // Take the sign once and format magnitudes: deriving it from the
+            // hours field alone drops it for any negative interval under 1h.
+            let sign = if self.microseconds < 0 { "-" } else { "" };
+            let abs = self.microseconds.unsigned_abs();
+            let total_seconds = abs / 1_000_000;
+            let micros = abs % 1_000_000;
             let hours = total_seconds / 3600;
             let minutes = (total_seconds % 3600) / 60;
             let seconds = total_seconds % 60;
             if micros == 0 {
-                parts.push(format!(
-                    "{:02}:{:02}:{:02}",
-                    hours,
-                    minutes.abs(),
-                    seconds.abs()
-                ));
+                parts.push(format!("{sign}{hours:02}:{minutes:02}:{seconds:02}"));
             } else {
                 parts.push(format!(
-                    "{:02}:{:02}:{:02}.{:06}",
-                    hours,
-                    minutes.abs(),
-                    seconds.abs(),
-                    micros
+                    "{sign}{hours:02}:{minutes:02}:{seconds:02}.{micros:06}"
                 ));
             }
         }
@@ -2763,5 +2758,32 @@ mod tests {
     fn numeric_from_f64_panics_on_huge_value() {
         let result = std::panic::catch_unwind(|| Numeric::from_f64(1e50, 0));
         assert!(result.is_err(), "from_f64 should panic for out-of-range");
+    }
+}
+
+#[cfg(test)]
+mod interval_display_tests {
+    use super::Interval;
+
+    #[test]
+    fn negative_time_component_keeps_its_sign() {
+        let minus_30_min = Interval::new(0, 0, -30 * 60 * 1_000_000);
+        assert_eq!(minus_30_min.to_string(), "-00:30:00");
+        let minus_90_min = Interval::new(0, 0, -90 * 60 * 1_000_000);
+        assert_eq!(minus_90_min.to_string(), "-01:30:00");
+        let minus_half_sec = Interval::new(0, 0, -500_000);
+        assert_eq!(minus_half_sec.to_string(), "-00:00:00.500000");
+        let mixed = Interval::new(14, -3, -45 * 1_000_000);
+        assert_eq!(mixed.to_string(), "1 year 2 mons -3 days -00:00:45");
+    }
+
+    #[test]
+    fn positive_and_zero_intervals_are_unchanged() {
+        assert_eq!(Interval::new(0, 0, 0).to_string(), "00:00:00");
+        assert_eq!(Interval::new(0, 0, 3_661_000_000).to_string(), "01:01:01");
+        assert_eq!(
+            Interval::new(0, 1, 1_500_000).to_string(),
+            "1 day 00:00:01.500000"
+        );
     }
 }

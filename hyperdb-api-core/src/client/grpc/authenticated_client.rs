@@ -45,6 +45,7 @@ use super::proto::{
     AttachedDatabase, CancelQueryParam, HyperServiceClient, OutputFormat, QueryParam,
 };
 use super::result::GrpcQueryResult;
+use crate::protocol::escape::escape_literal;
 
 /// Information about a database table.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -825,7 +826,7 @@ impl AuthenticatedGrpcClient {
         );
 
         let result = self.execute_query(&query).await?;
-        Ok(!result.arrow_data().is_empty() && result.arrow_data().len() > 8)
+        arrow_has_rows(&result.arrow_data())
     }
 
     /// Extracts a string column from Arrow IPC data.
@@ -932,15 +933,7 @@ impl AuthenticatedGrpcClient {
         &mut self,
         schema: &str,
     ) -> Result<std::collections::HashMap<String, String>> {
-        let query = format!(
-            r"SELECT c.relname as table_name,
-                      COALESCE(d.description, c.relname) as label
-               FROM pg_catalog.pg_class c
-               LEFT JOIN pg_catalog.pg_description d ON d.objoid = c.oid AND d.objsubid = 0
-               JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
-               WHERE n.nspname = '{schema}' AND c.relkind IN ('r', 'v', 'm')
-               ORDER BY c.relname"
-        );
+        let query = table_labels_query(schema);
 
         let result = self.execute_query(&query).await?;
         parse_label_pairs(&result.arrow_data())
@@ -968,16 +961,7 @@ impl AuthenticatedGrpcClient {
         schema: &str,
         table: &str,
     ) -> Result<std::collections::HashMap<String, String>> {
-        let query = format!(
-            r"SELECT a.attname as column_name,
-                      COALESCE(d.description, a.attname) as label
-               FROM pg_catalog.pg_attribute a
-               LEFT JOIN pg_catalog.pg_description d ON d.objoid = a.attrelid AND d.objsubid = a.attnum
-               JOIN pg_catalog.pg_class c ON a.attrelid = c.oid
-               JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
-               WHERE n.nspname = '{schema}' AND c.relname = '{table}' AND a.attnum > 0 AND NOT a.attisdropped
-               ORDER BY a.attnum"
-        );
+        let query = column_labels_query(schema, table);
 
         let result = self.execute_query(&query).await?;
         parse_label_pairs(&result.arrow_data())
@@ -1491,6 +1475,62 @@ impl AuthenticatedGrpcClientSync {
     }
 }
 
+/// Builds the catalog query behind [`AuthenticatedGrpcClient::get_table_labels`].
+fn table_labels_query(schema: &str) -> String {
+    let schema = escape_literal(schema);
+    format!(
+        r"SELECT c.relname as table_name,
+                  COALESCE(d.description, c.relname) as label
+           FROM pg_catalog.pg_class c
+           LEFT JOIN pg_catalog.pg_description d ON d.objoid = c.oid AND d.objsubid = 0
+           JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
+           WHERE n.nspname = {schema} AND c.relkind IN ('r', 'v', 'm')
+           ORDER BY c.relname"
+    )
+}
+
+/// Builds the catalog query behind [`AuthenticatedGrpcClient::get_column_labels`].
+fn column_labels_query(schema: &str, table: &str) -> String {
+    let schema = escape_literal(schema);
+    let table = escape_literal(table);
+    format!(
+        r"SELECT a.attname as column_name,
+                  COALESCE(d.description, a.attname) as label
+           FROM pg_catalog.pg_attribute a
+           LEFT JOIN pg_catalog.pg_description d ON d.objoid = a.attrelid AND d.objsubid = a.attnum
+           JOIN pg_catalog.pg_class c ON a.attrelid = c.oid
+           JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
+           WHERE n.nspname = {schema} AND c.relname = {table} AND a.attnum > 0 AND NOT a.attisdropped
+           ORDER BY a.attnum"
+    )
+}
+
+/// Returns whether an Arrow IPC stream contains at least one row.
+///
+/// A zero-row result is still a non-empty IPC stream (schema message plus
+/// end-of-stream marker), so the byte length says nothing about the row count.
+///
+/// # Errors
+///
+/// Returns [`crate::client::Error`] if the stream cannot be opened or a record
+/// batch fails to decode.
+fn arrow_has_rows(arrow_data: &[u8]) -> Result<bool> {
+    if arrow_data.is_empty() {
+        return Ok(false);
+    }
+    let reader = arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(arrow_data), None)
+        .map_err(|e| crate::client::Error::other(format!("Failed to parse Arrow data: {e}")))?;
+    for batch in reader {
+        let batch = batch.map_err(|e| {
+            crate::client::Error::other(format!("Failed to decode Arrow record batch: {e}"))
+        })?;
+        if batch.num_rows() > 0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Parses an Arrow IPC stream of `(name, label)` text pairs into a map.
 ///
 /// Shared by [`AuthenticatedGrpcClient::get_table_labels`] and
@@ -1587,7 +1627,7 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
 
-    use super::parse_label_pairs;
+    use super::{arrow_has_rows, column_labels_query, parse_label_pairs, table_labels_query};
 
     /// Encodes one record batch as an Arrow IPC stream, as the server would.
     fn ipc_stream(batch: &RecordBatch) -> Vec<u8> {
@@ -1719,5 +1759,28 @@ mod tests {
         let labels = parse_label_pairs(&ipc_stream(&batch)).expect("nulls are not an error");
         assert_eq!(labels.len(), 1, "the NULL-name row should be skipped");
         assert_eq!(labels.get("accounts").map(String::as_str), Some("Accounts"));
+    }
+
+    #[test]
+    fn label_queries_escape_single_quotes_in_names() {
+        let evil = "x' OR '1'='1";
+        let tq = table_labels_query(evil);
+        assert!(tq.contains("n.nspname = 'x'' OR ''1''=''1'"), "{tq}");
+        let cq = column_labels_query("public", evil);
+        assert!(cq.contains("c.relname = 'x'' OR ''1''=''1'"), "{cq}");
+        let cq = column_labels_query(evil, "t");
+        assert!(cq.contains("n.nspname = 'x'' OR ''1''=''1'"), "{cq}");
+    }
+
+    #[test]
+    fn arrow_has_rows_distinguishes_empty_result_from_non_empty() {
+        let with_rows = ipc_stream(&two_text_batch(vec!["a"], vec!["A"]));
+        let no_rows = ipc_stream(&two_text_batch(vec![], vec![]));
+        // The zero-row stream still carries a schema message.
+        assert!(no_rows.len() > 8);
+
+        assert!(arrow_has_rows(&with_rows).expect("decode"));
+        assert!(!arrow_has_rows(&no_rows).expect("decode"));
+        assert!(!arrow_has_rows(&[]).expect("decode"));
     }
 }
