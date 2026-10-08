@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Security
+
+- **Secrets no longer appear in `Debug` output or debug logs.**
+  `SalesforceAuthConfig` printed `client_secret`, and `OAuthTokenResponse`,
+  `OAuthToken`, `DataCloudTokenResponse` and `DataCloudToken` printed their
+  access-token values; all five now redact them. The token provider also no
+  longer logs the raw OAuth and DC JWT response bodies at `debug` level (it
+  logs their size instead).
+
 ## [1.0.0-rc.3] - 2026-09-07
 
 These changes first shipped in 1.0.0-rc.1.
