@@ -212,9 +212,14 @@ pub struct HyperProcess {
     /// The transport mode this process was started with.
     transport_mode: TransportMode,
     /// The socket directory for UDS connections (Unix only).
-    /// This directory is automatically cleaned up on drop.
+    /// Removed on drop only when [`Self::owns_socket_directory`] is set.
     #[cfg(unix)]
     socket_directory: Option<PathBuf>,
+    /// `true` when this process created `socket_directory` itself (the default
+    /// temp directory). A caller-supplied `domain_socket_directory` is never
+    /// ours to delete — it may hold unrelated data.
+    #[cfg(unix)]
+    owns_socket_directory: bool,
     /// The pipe name for Named Pipe connections (Windows only).
     #[cfg(windows)]
     pipe_name: Option<String>,
@@ -277,8 +282,8 @@ impl HyperProcess {
     /// process-wide [`IPC_INSTANCE_SEQ`] counter. The suffix is load-bearing:
     /// two concurrently-live IPC `HyperProcess` instances in one process must
     /// not share a socket path, or the second bind fails and surfaces as a
-    /// 60 s callback timeout. The `hyper-` prefix is also load-bearing — `Drop`
-    /// only cleans up directories whose basename `starts_with("hyper-")`.
+    /// 60 s callback timeout. `Drop` removes this directory
+    /// (and only this one) via `owns_socket_directory`.
     #[cfg(unix)]
     fn default_socket_dir() -> PathBuf {
         let seq = IPC_INSTANCE_SEQ.fetch_add(1, Ordering::Relaxed);
@@ -417,27 +422,28 @@ impl HyperProcess {
 
         // Create socket directory for UDS if needed (Unix only)
         #[cfg(unix)]
-        let socket_directory: Option<PathBuf> = if transport_mode == TransportMode::Ipc {
-            // Use custom directory if provided, otherwise create temp directory
-            let dir = if let Some(custom_dir) =
-                parameters.and_then(|p| p.domain_socket_directory.as_ref())
-            {
-                custom_dir.clone()
+        let (socket_directory, owns_socket_directory): (Option<PathBuf>, bool) =
+            if transport_mode == TransportMode::Ipc {
+                // Use custom directory if provided, otherwise create temp directory
+                let (dir, owned) = if let Some(custom_dir) =
+                    parameters.and_then(|p| p.domain_socket_directory.as_ref())
+                {
+                    (custom_dir.clone(), false)
+                } else {
+                    // Create a temp directory for the socket. The basename carries a
+                    // per-process monotonic suffix (`hyper-<pid>-<seq>`) so two
+                    // concurrently-live IPC instances in one process never share a
+                    // socket path — see `Self::default_socket_dir`.
+                    let temp_dir = Self::default_socket_dir();
+                    std::fs::create_dir_all(&temp_dir).map_err(|e| {
+                        Error::connection_with_io("Failed to create socket directory", e)
+                    })?;
+                    (temp_dir, true)
+                };
+                (Some(dir), owned)
             } else {
-                // Create a temp directory for the socket. The basename carries a
-                // per-process monotonic suffix (`hyper-<pid>-<seq>`) so two
-                // concurrently-live IPC instances in one process never share a
-                // socket path — see `Self::default_socket_dir`.
-                let temp_dir = Self::default_socket_dir();
-                std::fs::create_dir_all(&temp_dir).map_err(|e| {
-                    Error::connection_with_io("Failed to create socket directory", e)
-                })?;
-                temp_dir
+                (None, false)
             };
-            Some(dir)
-        } else {
-            None
-        };
 
         // On non-Unix platforms there is no UDS socket directory; the variable
         // is only referenced inside `#[cfg(unix)]` blocks so we do not need a
@@ -738,6 +744,8 @@ impl HyperProcess {
             log_dir: resolved_log_dir,
             #[cfg(unix)]
             socket_directory,
+            #[cfg(unix)]
+            owns_socket_directory,
             #[cfg(windows)]
             pipe_name,
         })
@@ -1176,14 +1184,13 @@ impl Drop for HyperProcess {
             let _ = self.do_shutdown(Some(Duration::from_secs(5)));
         }
 
-        // Clean up socket directory if we created one
+        // Clean up the socket directory only if we created it. A caller-supplied
+        // directory is left alone, even if its name happens to start with `hyper-`.
         #[cfg(unix)]
-        if let Some(ref dir) = self.socket_directory {
-            // Only clean up if it's a temp directory we created (contains our PID)
-            let dir_name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if dir_name.starts_with("hyper-") {
-                let _ = std::fs::remove_dir_all(dir);
-            }
+        if self.owns_socket_directory
+            && let Some(ref dir) = self.socket_directory
+        {
+            let _ = std::fs::remove_dir_all(dir);
         }
     }
 }
@@ -1505,7 +1512,7 @@ mod tests {
 
     /// Two IPC instances in one process must derive *distinct* default socket
     /// directories, or their sockets collide and the second bind 60 s-timeouts.
-    /// Also guards the `hyper-` prefix that `Drop`'s cleanup keys on.
+    /// Also guards the `hyper-` prefix that marks these directories in the temp dir.
     #[cfg(unix)]
     #[test]
     fn default_socket_dir_names_are_unique_and_prefixed() {
@@ -1516,7 +1523,7 @@ mod tests {
             let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
             assert!(
                 name.starts_with("hyper-"),
-                "socket dir basename must keep the `hyper-` prefix so Drop cleans it up: {name}"
+                "socket dir basename must keep the `hyper-` prefix: {name}"
             );
         }
     }

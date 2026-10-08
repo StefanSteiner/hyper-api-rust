@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   stored as `123.45` — a silent 10× magnitude error. The value is now rescaled
   to the column's declared scale; a value that would lose non-zero digits or
   overflow is rejected with `Error::Conversion` instead of being stored wrong.
+- **`HyperProcess` no longer deletes a caller-supplied socket directory on
+  drop.** Drop removed any IPC socket directory whose basename started with
+  `hyper-`, so a `domain_socket_directory` such as `~/hyper-data` was wiped with
+  everything in it. Only the temp directory the process created itself is
+  removed now.
 
 ## [1.0.0-rc.4] - 2026-09-08
 
