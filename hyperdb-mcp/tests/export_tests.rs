@@ -1,9 +1,10 @@
 // Copyright (c) 2026, Salesforce, Inc. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Tests for the export module: verifying each output format (CSV, Parquet,
-//! Hyper) produces valid files with correct row counts, and that both
-//! table-based and query-based exports work.
+//! Integration tests for export to CSV, Parquet, Arrow IPC, Iceberg, and Hyper.
+//!
+//! Covers table-based and query-based exports, `format_options`, overwrite
+//! handling, `source_db`, and type and constraint preservation.
 
 mod common;
 use common::TestEngine;
@@ -75,7 +76,7 @@ fn export_csv_from_query() {
 }
 
 /// Export an entire table to Parquet. Verify the row count and that the
-/// output file is non-empty (valid Parquet files have a magic footer).
+/// output file ends with the Parquet `PAR1` magic footer.
 #[test]
 fn export_parquet_from_table() {
     let te = TestEngine::new_ephemeral();
@@ -94,11 +95,11 @@ fn export_parquet_from_table() {
     };
     let result = export_to_file(&te.engine, &opts).unwrap();
     assert_eq!(result.rows, 2);
-    assert!(std::fs::metadata(path_str).unwrap().len() > 0);
+    assert!(std::fs::read(path_str).unwrap().ends_with(b"PAR1"));
 }
 
-/// Export as .hyper by copying the workspace file. Verify the output is
-/// a non-empty file (valid Hyper database file openable in Tableau Desktop).
+/// A `table` value is ignored for `format = "hyper"`; the export still
+/// writes a non-empty `.hyper` file.
 #[test]
 fn export_hyper_copies_workspace() {
     let te = TestEngine::new_ephemeral();
@@ -121,7 +122,7 @@ fn export_hyper_copies_workspace() {
 
 /// `format = "hyper"` with `source_db = Some("persistent")` snapshots
 /// the persistent attachment instead of the primary. Verifies the
-/// rejection lifted in iter 2 produces the right output.
+/// snapshot contains only the source database's tables.
 #[test]
 fn export_hyper_with_source_db_snapshots_persistent() {
     let te = TestEngine::new_ephemeral();
@@ -369,54 +370,21 @@ fn export_overwrite_true_replaces_existing_file() {
     assert!(contents.contains("Alice") && contents.contains("Bob"));
 }
 
-/// Regression test for #277: `export.rs`'s `CREATE DATABASE` /
-/// `ATTACH DATABASE` pair for `format: "hyper"` now routes through the
-/// same attach-context error mapper (`Engine::execute_attach_command`)
-/// that `attach.rs` uses, so a lock conflict on the export target
-/// surfaces as `RESOURCE_BUSY` instead of a generic `SqlError`.
+/// Regression test for #277: exporting `format: "hyper"` routes its
+/// `CREATE DATABASE` / `ATTACH DATABASE` pair through
+/// `Engine::execute_attach_command`, so a lock conflict on the target
+/// surfaces as `RESOURCE_BUSY` rather than a generic `SqlError`.
 ///
-/// **What this test does and doesn't prove**, from live investigation
-/// against the real pinned `hyperd`:
+/// `export_hyper` deletes any pre-existing target before `CREATE DATABASE`,
+/// so no external lock can be forced through the public API on Unix. The
+/// deterministic case is a target already attached under another alias in
+/// the same session, and the result differs per platform:
 ///
-/// - I confirmed live that a raw `ATTACH DATABASE` against a `.hyper`
-///   file another `hyperd` process holds open returns SQLSTATE `55006`
-///   ("the database file is locked by another process") — the
-///   `is_attach_lock_conflict` model `execute_attach_command` relies on
-///   is real, not hypothetical (see `engine_tests.rs`'s
-///   `execute_attach_command_maps_real_lock_conflict_to_resource_busy`,
-///   which reproduces it end to end through this exact helper).
-/// - However, `export_hyper` unconditionally deletes any pre-existing
-///   target before issuing `CREATE DATABASE` (deliberately avoiding
-///   `IF NOT EXISTS`, so a stale target is never silently reused — see
-///   the comment above the delete in `export.rs`). On Unix, `unlink`
-///   on an open file always succeeds regardless of who else has it
-///   open, so by the time `export_hyper`'s own `CREATE`/`ATTACH` run,
-///   the target is always a fresh, unlocked inode. I verified directly
-///   that exporting `format: "hyper"` over a path a *separate* `hyperd`
-///   process holds open currently succeeds silently on this platform —
-///   there is no live, non-flaky way to force `export_to_file`'s two
-///   statements to observe a genuine external lock through the public
-///   API. A tight racer thread attempting to attach the freshly
-///   created file in the gap between our own `CREATE` and `ATTACH`
-///   lost 5/5 attempts — the window is sub-millisecond.
-/// - What *is* live and deterministic is the case exercised below:
-///   exporting over a path that is already attached under a different
-///   alias **in the same session**. `CREATE DATABASE` (no `IF NOT
-///   EXISTS`) conflicts with hyperd's own per-connection registry and
-///   fails with SQLSTATE `42P04` ("database already exists") — a
-///   real, reachable error, but not one `is_resource_busy`'s phrase
-///   list (or SQLSTATE `55006`) matches, so it correctly stays
-///   `SqlError` both before and after this fix. This test pins that
-///   boundary: the routing change must not misclassify it.
-/// - **On Windows the same setup never reaches `CREATE DATABASE`**, and
-///   that is the interesting half. `hyperd` holds the attached file open,
-///   Windows refuses to unlink a file another process holds, and the
-///   pre-delete fails with `ERROR_SHARING_VIOLATION`. So the pre-delete —
-///   not the SQL — is where a contended export target actually surfaces,
-///   which is why it now classifies as `RESOURCE_BUSY` instead of
-///   `PERMISSION_DENIED`. This assertion is split per platform rather
-///   than pinned to the Unix answer: pinning only the Unix answer is what
-///   made this test fail on Windows CI when it was written.
+/// - **Unix:** the pre-delete unlinks the open file, and `CREATE DATABASE`
+///   fails with SQLSTATE `42P04` ("database already exists"). That does not
+///   match `is_resource_busy`, so it stays `SqlError`.
+/// - **Windows:** `hyperd` holds the file open, the pre-delete fails with
+///   `ERROR_SHARING_VIOLATION`, and the error classifies as `RESOURCE_BUSY`.
 #[test]
 fn export_hyper_over_same_session_attached_target_is_classified_per_platform() {
     let te = TestEngine::new_ephemeral();
@@ -867,7 +835,7 @@ fn arrow_ipc_export_round_trips_through_load_file() {
 }
 
 /// `format_options` must actually reach hyperd. Export the same table
-/// three times with different parquet `compression` values and confirm
+/// twice with different parquet `codec` values (`uncompressed`, `zstd`) and confirm
 /// the written file size differs — that's the cleanest proof the
 /// option ended up in the `WITH (...)` clause rather than getting
 /// silently dropped.

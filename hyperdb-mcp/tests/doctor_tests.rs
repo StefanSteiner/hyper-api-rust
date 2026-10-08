@@ -262,16 +262,16 @@ impl RunningHealthListener {
         }
     }
 
-    fn prime_accept_sleep(&self) {
+    fn prime_listener(&self) {
         let response = health::send_command(self.port, "PING")
             .expect("real health listener must answer the priming PING");
         assert!(
             response.starts_with("PONG hyperdb-mcp "),
             "unexpected health-listener PING response: {response:?}"
         );
-        // The response comes from a per-connection worker. Give the accept
-        // thread a small scheduling window to re-enter its real 100 ms
-        // WouldBlock sleep before launching the already-warm doctor child.
+        // The PONG comes from a per-connection worker; yield briefly so the
+        // accept thread is back in its readiness wait before the doctor
+        // child connects.
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
 }
@@ -1961,10 +1961,9 @@ fn doctor_cli_reports_live_from_discovery_via_real_health_listener() {
         let launcher_metadata = sandbox.launcher_metadata("hyperdb-mcp-test-wrapper");
         let missing_hyperd = sandbox.root.join("missing-hyperd");
 
-        // Warm the already-built child before starting the real listener. The
-        // accept loop no longer runs on a sleep cadence for the child to land
-        // inside, but keeping process-loader latency out of the measured
-        // attempt still makes the retry loop below cheaper.
+        // Warm the already-built child before starting the real listener.
+        // Keeping process-loader latency out of the measured attempt makes
+        // the repeated attempts below (every attempt must pass) cheaper.
         let warm_before = snapshot_tree(&sandbox.root);
         let warm = sandbox.run_with_options(
             &["doctor", "--json"],
@@ -1993,7 +1992,7 @@ fn doctor_cli_reports_live_from_discovery_via_real_health_listener() {
         std::fs::write(&discovery_path, &discovery_bytes).expect("write discovery fixture");
         let before = snapshot_tree(&sandbox.root);
 
-        listener.prime_accept_sleep();
+        listener.prime_listener();
         let output = sandbox.run_with_options(
             &["doctor", "--json"],
             Some(sandbox.persistent_path.as_os_str()),
@@ -2012,7 +2011,7 @@ fn doctor_cli_reports_live_from_discovery_via_real_health_listener() {
             failures.push(format!("attempt {attempt}: {failure}"));
         }
         if attempt == 1 {
-            listener.prime_accept_sleep();
+            listener.prime_listener();
             let human_output = sandbox.run_with_options(
                 &["doctor"],
                 Some(sandbox.persistent_path.as_os_str()),
@@ -2089,7 +2088,7 @@ fn doctor_cli_reports_live_from_scan_via_real_health_listener() {
 
         let listener = RunningHealthListener::start();
         let before = snapshot_tree(&sandbox.root);
-        listener.prime_accept_sleep();
+        listener.prime_listener();
         let output = sandbox.run_with_options(
             &["doctor", "--json"],
             Some(sandbox.persistent_path.as_os_str()),

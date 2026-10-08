@@ -341,9 +341,11 @@ fn health_listener_waits_for_command_after_accept() {
                 }
             }
 
-            // Keep the already-accepted first socket idle for well over the
-            // listener's 5ms accept-loop poll interval before sending its
-            // first command.
+            // An accepted socket must not inherit the listener's
+            // non-blocking mode: a non-blocking read would fail with
+            // WouldBlock at once. Keep the first socket idle for 350 ms,
+            // well inside the handler's 5 s read timeout, before sending
+            // its first command.
             std::thread::sleep(Duration::from_millis(350));
             idle_client.ping("delayed first-client")
         })();
@@ -435,9 +437,8 @@ fn health_protocol_report_hyperd_error_sets_flag() {
     let response = health::send_command(port, "REPORT_HYPERD_ERROR").unwrap();
     assert_eq!(response.trim(), "OK");
 
-    // The handler ran on a different thread; give it a moment to land the
-    // store. AcqRel ordering means the store is visible here as soon as the
-    // handler returns, but the response write is what unblocks send_command.
+    // The handler ran on a different thread. The flag is set before the OK
+    // reply is written, so it is observable as soon as send_command returns.
     assert!(
         state.consume_restart_request(),
         "REPORT_HYPERD_ERROR must set the restart-requested flag"
@@ -2240,7 +2241,10 @@ struct EnvGuard {
 impl EnvGuard {
     fn set(key: &str, value: &str) -> Self {
         let previous = std::env::var(key).ok();
-        // SAFETY: Callers hold ENV_LOCK, ensuring no concurrent env var access.
+        // SAFETY: every env mutation in this binary goes through EnvGuard under
+        // ENV_LOCK, so writes never race each other or the locked tests that
+        // read these keys. Tests that skip the lock read env only through std,
+        // which serialises its own accesses against set_var.
         unsafe { std::env::set_var(key, value) };
         Self {
             key: key.to_string(),
@@ -2250,7 +2254,7 @@ impl EnvGuard {
 
     fn remove(key: &str) -> Self {
         let previous = std::env::var(key).ok();
-        // SAFETY: Callers hold ENV_LOCK, ensuring no concurrent env var access.
+        // SAFETY: see EnvGuard::set; all env mutation is serialised by ENV_LOCK.
         unsafe { std::env::remove_var(key) };
         Self {
             key: key.to_string(),
@@ -2262,9 +2266,9 @@ impl EnvGuard {
 impl Drop for EnvGuard {
     fn drop(&mut self) {
         match &self.previous {
-            // SAFETY: Callers hold ENV_LOCK for the lifetime of this guard.
+            // SAFETY: see EnvGuard::set; the guard's owner holds ENV_LOCK.
             Some(val) => unsafe { std::env::set_var(&self.key, val) },
-            // SAFETY: Callers hold ENV_LOCK for the lifetime of this guard.
+            // SAFETY: see EnvGuard::set; the guard's owner holds ENV_LOCK.
             None => unsafe { std::env::remove_var(&self.key) },
         }
     }

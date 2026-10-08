@@ -1,15 +1,15 @@
-# hyper-client Development Guide
+# hyperdb-api-core `client` module: Development Guide
 
-Contributor-facing documentation for the `hyper-client` crate -- the connection layer
-between `hyperapi` (high-level API) and `hyper-protocol` (wire protocol).
+Contributor-facing documentation for the `client` module of the internal `hyperdb-api-core` crate -- the connection layer
+between `hyperdb-api` (high-level API) and the `protocol` module (wire protocol).
 
-For user-facing documentation, see [README.md](README.md).
+For user-facing documentation, see the [hyperdb-api README](../../hyperdb-api/README.md).
 
 ---
 
 ## Architecture Overview
 
-`hyper-client` provides two transport families with both sync and async variants:
+The `client` module provides two transport families with both sync and async variants:
 
 | Transport | Protocol | Capabilities | Variants |
 |-----------|----------|-------------|----------|
@@ -93,7 +93,7 @@ COPY IN uses the PostgreSQL COPY subprotocol:
 5. Server responds with `CommandComplete` + `ReadyForQuery`
 
 Supported formats: `HYPERBINARY` (default), `ARROWSTREAM`, `CSV`.
-The higher-level `hyperapi::Inserter` handles binary encoding; `CopyInWriter` is
+The higher-level `hyperdb_api::Inserter` handles binary encoding; `CopyInWriter` is
 a transport-level data pump.
 
 ### Connection Health and Desynchronization
@@ -152,7 +152,7 @@ directory) into Rust types via `tonic-build`. The generated code lives in
 To regenerate after proto changes:
 
 ```bash
-cargo build -p hyper-client
+cargo build -p hyperdb-api-core
 ```
 
 ---
@@ -198,7 +198,7 @@ via `GrpcConfig` (auto-detected from `https://` endpoints).
 Integration tests require a running Hyper server. The `tests/common/mod.rs` module
 provides `TestServer`, which:
 
-1. Starts a `HyperProcess` (via `hyperapi` dev-dependency)
+1. Starts a `HyperProcess` (via `hyperdb-api` dev-dependency)
 2. Creates a temporary database
 3. Provides `Config` and `Client` helpers for the test
 4. Cleans up on drop
@@ -207,7 +207,7 @@ provides `TestServer`, which:
 use crate::common::TestServer;
 
 #[test]
-fn test_something() -> hyperapi::Result<()> {
+fn test_something() -> hyperdb_api::Result<()> {
     let server = TestServer::new()?;
     let client = server.connect()?;
     // ... test with real server ...
@@ -215,19 +215,19 @@ fn test_something() -> hyperapi::Result<()> {
 }
 ```
 
-Test output (databases, logs) goes to `hyper-client/test_results/`.
+Test output (databases, logs) goes to `hyperdb-api-core/test_results/`.
 
 ### Running Tests
 
 ```bash
-# All hyper-client tests (requires hyperd on PATH or HYPERD_PATH set)
-cargo test -p hyper-client
+# All hyperdb-api-core tests (requires HYPERD_PATH or a discoverable .hyperd/current)
+cargo test -p hyperdb-api-core
 
 # Unit tests only (no server needed)
-cargo test -p hyper-client --lib
+cargo test -p hyperdb-api-core --lib
 
 # Specific test file
-cargo test -p hyper-client --test client_tests
+cargo test -p hyperdb-api-core --test client_tests
 ```
 
 ### TLS Tests
@@ -242,7 +242,7 @@ without requiring pre-generated certificates.
 - Use `TestServer::without_database()` for tests that manage databases explicitly
 - Use `#[test]` for sync tests, `#[tokio::test]` for async tests
 - Keep test databases in `test_results/` (auto-managed by `TestServer`)
-- gRPC tests live in `hyperapi/tests/` since they exercise the full stack
+- gRPC tests live in `hyperdb-api/tests/` since they exercise the full stack
 
 ---
 
@@ -250,7 +250,7 @@ without requiring pre-generated certificates.
 
 | Feature | Dependencies Added | What It Enables |
 |---------|--------------------|-----------------|
-| `salesforce-auth` | `hyperapi-salesforce`, `chrono`, `arrow` | `AuthenticatedGrpcClient`, `with_data_cloud_token()` on `GrpcConfig` |
+| `salesforce-auth` | `hyperdb-api-salesforce`, `arrow` | `AuthenticatedGrpcClient`, `with_data_cloud_token()` on `GrpcConfig` |
 
 Everything else (TCP clients, gRPC clients, TLS, auth) is always available.
 
@@ -304,7 +304,7 @@ See `cancel.rs` for the full rationale.
 
 ## Related Documentation
 
-- [Root DEVELOPMENT.md](../DEVELOPMENT.md) -- workspace-wide build, test, CI
-- [hyper-protocol README](../hyper-protocol/README.md) -- wire protocol details
-- [hyper-types README](../hyper-types/README.md) -- type system and binary formats
-- [hyperapi README](../hyperapi/README.md) -- high-level API built on this crate
+- [Root DEVELOPMENT.md](../../DEVELOPMENT.md) -- workspace-wide build, test, CI
+- [Protocol development guide](DEVELOPMENT-protocol.md) -- wire protocol details
+- [Types development guide](DEVELOPMENT-types.md) -- type system and binary formats
+- [hyperdb-api README](../../hyperdb-api/README.md) -- high-level API built on this crate

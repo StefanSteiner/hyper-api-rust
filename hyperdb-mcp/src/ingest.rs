@@ -578,7 +578,7 @@ where
 /// whatever the Rust inferrer emitted (`"INT"`, `"DOUBLE
 /// PRECISION"`, `"NUMERIC(15, 2)"`). Comparing through
 /// [`crate::schema::map_hyper_type`] collapses all known aliases
-/// into a single [`SqlType`].
+/// into a single [`hyperdb_api::SqlType`].
 ///
 /// If *either* side fails to parse (returns `None`), we err on the
 /// side of permissive: treat the pair as compatible and let Hyper

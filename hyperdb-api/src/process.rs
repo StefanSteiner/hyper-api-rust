@@ -828,10 +828,10 @@ impl HyperProcess {
     /// Parses a connection descriptor to extract host:port, socket path, or pipe path.
     ///
     /// Input formats:
-    /// - "tab.tcp://host:port" → "host:port"
-    /// - "tab.domain://<dir>/domain/<name>" → "<dir>/domain/<name>" (socket path)
-    /// - "tab.pipe://<host>/pipe/<name>" → "<host>/pipe/<name>" (named pipe)
-    /// - "tcp.grpc://host:port" → "host:port"
+    /// - `tab.tcp://host:port` → `host:port`
+    /// - `tab.domain://<dir>/domain/<name>` → `<dir>/domain/<name>` (socket path)
+    /// - `tab.pipe://<host>/pipe/<name>` → `<host>/pipe/<name>` (named pipe)
+    /// - `tcp.grpc://host:port` → `host:port`
     fn parse_connection_descriptor(descriptor: &str) -> Result<String> {
         // Handle domain socket format
         if let Some(rest) = descriptor.strip_prefix("tab.domain://") {
@@ -1204,6 +1204,23 @@ pub(crate) const NO_DEFAULT_PARAMETERS: &str = "no_default_parameters";
 /// Default log configuration for hyperd: file-based JSON logging.
 const DEFAULT_LOG_CONFIG: &str = "file,json,all,hyperd,0";
 
+/// Transport used for client connections to a [`HyperProcess`].
+///
+/// `HyperProcess` uses [`TransportMode::Tcp`] unless [`Parameters::set_transport_mode`]
+/// selects otherwise. [`TransportMode::Ipc`] (Unix domain sockets on Unix, named pipes
+/// on Windows) has lower connect and round-trip latency but slower large streamed
+/// reads than TCP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TransportMode {
+    /// Use IPC (Unix domain sockets on Unix, named pipes on Windows).
+    #[default]
+    Ipc,
+
+    /// Use TCP/IP connections.
+    /// Required when connecting from remote clients or when IPC is not available.
+    Tcp,
+}
+
 /// Parameters for configuring the Hyper server.
 ///
 /// When starting a [`HyperProcess`], a set of default parameters are automatically applied
@@ -1222,7 +1239,7 @@ const DEFAULT_LOG_CONFIG: &str = "file,json,all,hyperd,0";
 /// | `default_database_version` | `3` | File format version for newly created `.hyper` databases (v3 adds 128-bit NUMERIC support, required for DECIMAL128 parquet columns) |
 ///
 /// To disable these defaults, add the `no_default_parameters` key (for example
-/// `params.set("no_default_parameters", "")` via [`Parameters::set`].
+/// `params.set("no_default_parameters", "")`) via [`Parameters::set`].
 ///
 /// # Listen Modes
 ///
@@ -1253,52 +1270,13 @@ const DEFAULT_LOG_CONFIG: &str = "file,json,all,hyperd,0";
 /// # Transport Modes
 ///
 /// Use [`set_transport_mode`](Parameters::set_transport_mode) to control whether Hyper uses
-/// TCP or IPC (Unix Domain Sockets):
+/// TCP or IPC (Unix domain sockets on Unix, named pipes on Windows). TCP is the default:
 ///
 /// ```
 /// use hyperdb_api::{Parameters, TransportMode};
 ///
 /// let mut params = Parameters::new();
-/// params.set_transport_mode(TransportMode::Tcp); // Force TCP instead of IPC
-/// ```
-///
-/// Transport mode for `HyperProcess` connections.
-///
-/// Controls whether the server uses TCP or Unix Domain Sockets (IPC) for connections.
-/// On Unix systems, IPC is the default for better local performance.
-/// On Windows, TCP is always used.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum TransportMode {
-    /// Use IPC (Unix Domain Sockets on Unix, Named Pipes on Windows).
-    /// This is the default mode and provides better performance for local connections.
-    #[default]
-    Ipc,
-
-    /// Use TCP/IP connections.
-    /// Required when connecting from remote clients or when IPC is not available.
-    Tcp,
-}
-
-/// Parameters for configuring the Hyper server.
-///
-/// When starting a [`HyperProcess`], a set of default parameters are automatically applied
-/// (matching the C++ `HyperProcess` behavior). You can override these defaults or disable
-/// them entirely by adding the `no_default_parameters` key (for example
-/// `params.set("no_default_parameters", "")` via [`Parameters::set`].
-///
-/// # Transport Modes
-///
-/// Use [`set_transport_mode`](Self::set_transport_mode) to control whether Hyper uses
-/// TCP or IPC (Unix Domain Sockets on Unix systems).
-///
-/// # Example
-///
-/// ```
-/// use hyperdb_api::{Parameters, TransportMode};
-///
-/// let mut params = Parameters::new();
-/// params.set("log_file_size_limit", "100k");
-/// params.set_transport_mode(TransportMode::Tcp); // Force TCP instead of IPC
+/// params.set_transport_mode(TransportMode::Ipc); // opt into Unix domain sockets / named pipes
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct Parameters {
@@ -1327,8 +1305,8 @@ impl Parameters {
 
     /// Sets the transport mode (TCP or IPC/UDS).
     ///
-    /// By default, `HyperProcess` uses IPC (Unix Domain Sockets on Unix) for better
-    /// performance. Use `TransportMode::Tcp` if you need TCP connections.
+    /// By default, `HyperProcess` uses TCP. Pass `TransportMode::Ipc` to use Unix domain
+    /// sockets (Unix) or named pipes (Windows).
     ///
     /// # Example
     ///
@@ -1336,7 +1314,7 @@ impl Parameters {
     /// use hyperdb_api::{Parameters, TransportMode};
     ///
     /// let mut params = Parameters::new();
-    /// params.set_transport_mode(TransportMode::Tcp); // Use TCP instead of IPC
+    /// params.set_transport_mode(TransportMode::Ipc); // opt into IPC
     /// ```
     pub fn set_transport_mode(&mut self, mode: TransportMode) -> &mut Self {
         self.transport_mode = Some(mode);

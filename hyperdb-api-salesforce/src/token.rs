@@ -192,10 +192,11 @@ impl DataCloudTokenResponse {
 /// Sent as the `Authorization: Bearer <jwt>` header with every gRPC call
 /// to the Hyper query engine.
 ///
-/// The DC JWT has a ~2-hour lifetime (`exp` claim), but is proactively
-/// refreshed much earlier (every ~15 minutes by default) so that the
-/// underlying OAuth Access Token is revalidated before Salesforce's
-/// server-side inactivity timeout can invalidate it.
+/// The DC JWT has a ~2-hour lifetime (`exp` claim).
+/// [`DataCloudTokenProvider`](crate::DataCloudTokenProvider)
+/// refreshes it within 5 minutes of expiry; callers that also want age-based
+/// refresh, as `AuthenticatedGrpcClient` does every ~15 minutes, use
+/// [`Self::needs_refresh`].
 #[derive(Debug, Clone)]
 pub struct DataCloudToken {
     /// Token type (e.g., "Bearer")

@@ -77,8 +77,8 @@ enum FieldSource {
 ///
 /// # Attributes (field level)
 ///
-/// - `#[hyperdb(primary_key)]` — marks the column as NOT NULL (always true
-///   for non-`Option` fields, but documents intent).
+/// - `#[hyperdb(primary_key)]` — documents intent only; it emits no constraint.
+///   Nullability follows the field type (`Option<T>` is nullable).
 /// - `#[hyperdb(rename = "col")]` — use a different SQL column name.
 #[proc_macro_derive(Table, attributes(hyperdb))]
 pub fn table_derive(input: TokenStream) -> TokenStream {
@@ -248,9 +248,7 @@ fn expand_query_scalar(input: &TokenStream2) -> syn::Result<TokenStream2> {
         let sql_lit: Option<LitStr> = syn::parse2(quote!(#sql_expr)).ok();
         if let Some(sql_lit) = sql_lit {
             let sql_str = sql_lit.value();
-            // Validate SQL structure (syntax + table existence) using a dummy
-            // struct name that won't be in the registry — we only care about
-            // one-column check, not struct-field matching.
+            // Validate syntax, table registration, and that exactly one column is projected.
             match hyperdb_compile_check::validate_scalar_sql(&sql_str) {
                 Ok(()) => {}
                 Err(e) => {

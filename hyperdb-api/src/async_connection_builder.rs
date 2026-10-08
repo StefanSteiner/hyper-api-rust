@@ -75,8 +75,8 @@ impl AsyncConnectionBuilder {
         }
     }
 
-    #[must_use]
     /// Sets the database path.
+    #[must_use]
     pub fn database(mut self, path: impl AsRef<Path>) -> Self {
         self.database = Some(path.as_ref().to_path_buf());
         self
@@ -89,15 +89,15 @@ impl AsyncConnectionBuilder {
         self
     }
 
-    #[must_use]
     /// Sets the username for authentication.
+    #[must_use]
     pub fn user(mut self, user: impl Into<String>) -> Self {
         self.user = Some(user.into());
         self
     }
 
-    #[must_use]
     /// Sets the password for authentication.
+    #[must_use]
     pub fn password(mut self, password: impl Into<String>) -> Self {
         self.password = Some(password.into());
         self
@@ -111,45 +111,48 @@ impl AsyncConnectionBuilder {
     }
 
     /// Sets the query timeout.
+    ///
+    /// The value is recorded on the builder but no transport applies it, so
+    /// queries run until completion regardless of this setting.
     #[must_use]
     pub fn query_timeout(mut self, timeout: Duration) -> Self {
         self.query_timeout = Some(timeout);
         self
     }
 
-    #[must_use]
     /// Sets the application name sent to the server.
+    #[must_use]
     pub fn application_name(mut self, name: impl Into<String>) -> Self {
         self.application_name = Some(name.into());
         self
     }
 
-    #[must_use]
     /// Convenience method to set user and password at once.
+    #[must_use]
     pub fn auth(mut self, user: impl Into<String>, password: impl Into<String>) -> Self {
         self.user = Some(user.into());
         self.password = Some(password.into());
         self
     }
 
-    #[must_use]
     /// Convenience method to create a new database.
+    #[must_use]
     pub fn create_new_database(mut self, database_path: impl AsRef<Path>) -> Self {
         self.database = Some(database_path.as_ref().to_path_buf());
         self.create_mode = CreateMode::Create;
         self
     }
 
-    #[must_use]
     /// Convenience method to create database if it doesn't exist.
+    #[must_use]
     pub fn create_or_open_database(mut self, database_path: impl AsRef<Path>) -> Self {
         self.database = Some(database_path.as_ref().to_path_buf());
         self.create_mode = CreateMode::CreateIfNotExists;
         self
     }
 
-    #[must_use]
     /// Convenience method to open an existing database.
+    #[must_use]
     pub fn open_database(mut self, database_path: impl AsRef<Path>) -> Self {
         self.database = Some(database_path.as_ref().to_path_buf());
         self.create_mode = CreateMode::DoNotCreate;
@@ -165,10 +168,11 @@ impl AsyncConnectionBuilder {
 
     /// Builds and establishes the connection (async).
     ///
-    /// Transport is auto-detected from the endpoint URL:
+    /// Transport is auto-detected from the endpoint, with the same rules as
+    /// [`ConnectionBuilder`](crate::ConnectionBuilder):
     /// - `https://` / `http://` → gRPC
-    /// - `tab.domain://` → Unix domain socket (Unix only)
-    /// - `tab.pipe://` → named pipe (Windows only)
+    /// - `tab.domain://` or an absolute socket path → Unix domain socket (Unix only)
+    /// - `tab.pipe://` or a `\\host\pipe\name` path → named pipe (Windows only)
     /// - otherwise → TCP
     ///
     /// # Errors

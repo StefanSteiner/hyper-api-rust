@@ -1424,8 +1424,8 @@ impl Numeric {
 /// A geography (spatial) value.
 ///
 /// This type wraps raw geography bytes and provides type safety when working
-/// with spatial data. With the `geography` feature enabled, it also supports
-/// WKT/WKB parsing and conversion to/from `geo_types::Geometry`.
+/// with spatial data. It also supports WKT/WKB parsing and conversion to/from
+/// `geo_types::Geometry`.
 ///
 /// # Binary Format Notes
 ///
@@ -1434,14 +1434,13 @@ impl Numeric {
 /// 1. **Hyper's Legacy Format**: Data read from Hyper query results is stored in
 ///    Hyper's proprietary legacy serialization format. This format is **not** WKB-compatible.
 ///
-/// 2. **WKB Format**: When created via `from_wkt()` or `from_wkb()` (with the
-///    `geography` feature), data is stored in WKB (Well-Known Binary) format.
+/// 2. **WKB Format**: When created via `from_wkt()` or `from_wkb()`, data is
+///    stored in WKB (Well-Known Binary) format.
 ///
-/// Methods like `to_geometry()` and `to_wkt()` (available with the `geography`
-/// feature) expect WKB format and will **fail** when called on data in Hyper's
-/// legacy format.
+/// Methods like `to_geometry()` and `to_wkt()` expect WKB format and will **fail**
+/// when called on data in Hyper's legacy format.
 ///
-/// # Basic Usage (Always Available)
+/// # Basic Usage
 ///
 /// ```no_run
 /// use hyperdb_api_core::types::Geography;
@@ -1453,12 +1452,12 @@ impl Numeric {
 /// let bytes: &[u8] = geo.as_bytes();
 /// ```
 ///
-/// # WKT/WKB Parsing (Requires `geography` Feature)
+/// # WKT/WKB Parsing
 ///
-/// ```ignore
+/// ```
 /// use hyperdb_api_core::types::Geography;
 ///
-/// // Create from WKT string (requires "geography" feature)
+/// // Create from WKT string
 /// let geo = Geography::from_wkt("POINT(-122.4194 37.7749)")?;
 ///
 /// // Convert to geo-types for processing
@@ -1466,6 +1465,7 @@ impl Numeric {
 ///
 /// // Export as WKT
 /// let wkt_string = geo.to_wkt()?;
+/// # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 /// ```
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Geography {
@@ -1504,9 +1504,8 @@ impl Geography {
     /// # Format Compatibility
     ///
     /// Data read from Hyper is in Hyper's proprietary legacy format, **not** WKB.
-    /// Methods like `to_geometry()` and `to_wkt()` (available with the `geography`
-    /// feature) expect WKB format and will **fail** when called on data created
-    /// via this method. Use `format()` to check the format before calling these methods.
+    /// Methods like `to_geometry()` and `to_wkt()` expect WKB format and will **fail**
+    /// when called on data created via this method. Use `format()` to check the format before calling these methods.
     pub fn from_bytes(data: impl Into<Vec<u8>>) -> Self {
         Self {
             data: data.into(),
@@ -1530,8 +1529,7 @@ impl Geography {
     /// Use this to check whether WKB-dependent methods like `to_geometry()`
     /// and `to_wkt()` will work on this value.
     ///
-    /// Note: When the `geography` feature is enabled, there's also a `format()`
-    /// method that performs runtime detection and returns the actual data.
+    /// See also `format()`, which performs runtime detection on the actual data.
     pub fn binary_format(&self) -> GeographyBinaryFormat {
         self.format
     }
@@ -1673,7 +1671,7 @@ impl FromHyperBinary for Geography {
 }
 
 // =============================================================================
-// Geography - WKT/WKB support (requires `geography` feature)
+// Geography - WKT/WKB support
 // =============================================================================
 
 mod geo_impl {
@@ -1722,13 +1720,13 @@ mod geo_impl {
         ///
         /// # Example
         ///
-        /// ```ignore
+        /// ```
         /// use hyperdb_api_core::types::Geography;
         ///
-        /// // Requires "geography" feature
         /// let point = Geography::from_wkt("POINT(-122.4194 37.7749)")?;
         /// let line = Geography::from_wkt("LINESTRING(0 0, 1 1, 2 2)")?;
         /// let polygon = Geography::from_wkt("POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))")?;
+        /// # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
         /// ```
         ///
         /// # Errors
@@ -1844,13 +1842,13 @@ mod geo_impl {
         ///
         /// # Example
         ///
-        /// ```ignore
+        /// ```
         /// use hyperdb_api_core::types::Geography;
         /// use geo_types::Point;
         ///
-        /// // Requires "geography" feature
         /// let point = Point::new(-122.4194, 37.7749);
         /// let geo = Geography::from_geometry(&point.into())?;
+        /// # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
         /// ```
         ///
         /// # Errors

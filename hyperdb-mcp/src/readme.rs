@@ -63,8 +63,9 @@ When you need to remember something, pick the lighter tool:
 
 Both persist the same way: default is the local database (lost on
 restart); pass `database: \"persistent\"` to keep either one across
-sessions. The KV and `load_*` tools also accept the `persist: true`
-shorthand; `execute` takes `database` only.
+sessions. The KV tools, `load_data`, `load_file`, `load_files`, and
+`watch_directory` also accept the `persist: true` shorthand; `execute`
+takes `database` only, and `load_iceberg` always loads into local.
 
 ### Routing data to a destination
 
@@ -132,6 +133,7 @@ alias. `copy_query` also retains `target_database`.
 
 ### Query
 - `query` — run a read-only SELECT / WITH / EXPLAIN / SHOW / VALUES.
+  Max 10,000 rows; check `truncated` / `total_rows`.
 - `execute` — run one or more DDL/DML statements as an atomic batch.
   `sql` is an array; multi-element batches run inside a transaction
   (all commit or all roll back). Disabled in read-only mode.
@@ -155,9 +157,9 @@ interop; `.hyper` export snapshots every table for Tableau.
   `append` / `merge`. Use `merge` to upsert by `merge_key` (column
   name or list); new columns in the incoming file are auto-added via
   `ALTER TABLE`.
-- `load_files` — load many files in parallel. Files must share a
-  schema (or be unioned). `merge` mode is not supported here — call
-  `load_file` per-file if you need merge.
+- `load_files` — load many files in parallel; each entry
+  `{path, table, mode?}` loads into its own table. `merge` mode is
+  not supported here — call `load_file` per-file if you need merge.
 - `load_data` — load inline JSON / CSV into a named database table.
 - `load_iceberg` — load an Apache Iceberg table by absolute path to its
   root directory; supports snapshot pinning via `metadata_filename` or
@@ -173,7 +175,7 @@ interop; `.hyper` export snapshots every table for Tableau.
 - `sample` — return schema + first N rows of a table. Use this before
   writing a non-trivial query.
 - `inspect_file` — dry-run schema inference on a CSV / Parquet / Arrow
-  IPC file without loading it.
+  IPC / JSON file without loading it.
 - `status` — plugin and native/API identity; daemon/Hyper connection facts;
   local/persistent paths; table count; disk usage; watchers; attachments;
   read-only flag.
@@ -182,7 +184,8 @@ interop; `.hyper` export snapshots every table for Tableau.
   `named_pipe`), `host` + `port` (TCP only, else null), `socket_path`
   (IPC only, else null), and `connection_descriptor` — the scheme-
   qualified string `hyperd` emits and the Hyper API accepts, e.g.
-  `tab.tcp://host:port`. TCP on every platform today.
+  `tab.tcp://host:port`. The shared daemon uses IPC; a private
+  `hyperd` (`--no-daemon` or daemon fallback) uses TCP.
   Both full and degraded responses report `default_database: \"local\"`.
   When
   `engine_busy: true`, the response is partial and non-definitive:
@@ -308,8 +311,10 @@ scale 0 and truncates decimal places. Example: `41.54178215::numeric`
 - **`copy_query` modes:** `create` requires the target not exist;
   `append` requires it does; `replace` drops and recreates atomically.
 - **`load_file` merge mode:** `mode = \"merge\"` requires `merge_key`
-  (column name or list of column names). Rows whose key matches an
-  existing row UPDATE; non-matching rows INSERT. Columns present in
+  (column name or list of column names). Rows whose key matches are
+  deleted and replaced by the incoming row (target columns absent from
+  the file become NULL; duplicate incoming keys all insert);
+  non-matching rows INSERT. Columns present in
   the incoming file but not the target are auto-added via
   `ALTER TABLE ADD COLUMN` (nullable; existing rows fill with NULL).
   **Type changes on existing columns are rejected** — use `replace`
@@ -392,8 +397,8 @@ differences from standard PostgreSQL:
        WHERE NOT EXISTS (SELECT 1 FROM settings WHERE key = 'theme')\"
   ]})
   ```
-  Single-element arrays auto-commit (same as the legacy single-statement
-  shape). Mixing DDL with DML in one batch is rejected — Hyper aborts
+  A single-element array runs one auto-commit statement. Mixing DDL
+  with DML in one batch is rejected — Hyper aborts
   such transactions with SQLSTATE 0A000. Issue DDL in its own `execute`
   call. Do NOT include `BEGIN` / `COMMIT` / `ROLLBACK` / `SAVEPOINT` in
   batch elements — the tool manages the transaction for you and these
@@ -440,7 +445,7 @@ export({
 
 // Refresh existing rows + auto-add new columns (upsert by job_id).
 // Use this when you re-parsed source data with extra fields and want
-// to update the table in place without dropping it.
+// to refresh the table in place without dropping it.
 load_file({
   \"path\": \"/tmp/extract_failures-with-host.json\",
   \"table\": \"extract_timing_failures\",
@@ -448,7 +453,7 @@ load_file({
   \"merge_key\": \"job_id\"
 })
 
-// Single-statement execute (auto-commit, same as before)
+// Single-statement execute (auto-commit)
 execute({
   \"sql\": [\"DELETE FROM events WHERE created_at < CURRENT_DATE - INTERVAL '90' DAY\"]
 })

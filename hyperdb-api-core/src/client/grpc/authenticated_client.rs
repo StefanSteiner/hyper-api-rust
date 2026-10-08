@@ -225,8 +225,8 @@ impl AuthenticatedGrpcClient {
     /// Sets the transfer mode for queries.
     ///
     /// - `Sync`: Wait for complete results (best for small results)
-    /// - `Async`: Stream results as they become available
-    /// - `Adaptive`: Server chooses based on result size (default)
+    /// - `Async`: Returns only the result header; all chunks are fetched with `GetQueryResult`
+    /// - `Adaptive`: Returns the first chunk inline and fetches the rest with `GetQueryResult` (default)
     #[must_use]
     pub fn with_transfer_mode(mut self, mode: TransferMode) -> Self {
         self.transfer_mode = mode;
@@ -398,9 +398,10 @@ impl AuthenticatedGrpcClient {
     ///
     /// # Errors
     ///
-    /// - Returns [`Error::Authentication`] if the DC JWT cannot be
-    ///   refreshed through the underlying Salesforce token provider
-    ///   (including after the auth-retry budget is exhausted).
+    /// - Returns [`Error::Authentication`] if the proactive DC JWT refresh
+    ///   fails, or [`Error::Config`] / [`Error::Connection`] if the channel
+    ///   cannot be rebuilt. If a refresh triggered by an auth failure fails,
+    ///   the original request error is returned.
     /// - Propagates any error from
     ///   [`GrpcClient::execute_query_with_params_and_options`](super::GrpcClient::execute_query_with_params_and_options) —
     ///   SQL / transport / protocol failures.
@@ -469,8 +470,10 @@ impl AuthenticatedGrpcClient {
     ///
     /// # Errors
     ///
-    /// - Returns [`Error::Authentication`] if every retry attempt
-    ///   still surfaces an auth error after forcing a token refresh.
+    /// - Returns [`Error::Authentication`] if the proactive DC JWT refresh
+    ///   fails, or [`Error::Config`] / [`Error::Connection`] if the channel
+    ///   cannot be rebuilt. If a refresh triggered by an auth failure fails,
+    ///   the original request error is returned.
     /// - Propagates any other [`Error`] from the underlying gRPC
     ///   executor (SQL errors, transport failures).
     pub async fn execute_query_with_options(
@@ -576,8 +579,11 @@ impl AuthenticatedGrpcClient {
     ///
     /// # Errors
     ///
-    /// - Returns [`Error::Other`] if every retry attempt still
-    ///   fails with an auth error after forcing a token refresh.
+    /// - Returns [`Error::Authentication`] if the proactive DC JWT refresh
+    ///   fails, or [`Error::Config`] / [`Error::Connection`] if the channel
+    ///   cannot be rebuilt.
+    /// - Returns the server's auth error if it persists after one forced
+    ///   DC JWT refresh, or if that refresh fails.
     /// - Propagates any error from
     ///   [`GrpcClient::cancel_query`](super::GrpcClient::cancel_query) (transport failure, `tonic::Status`).
     pub async fn cancel_query(&mut self, query_id: &str) -> Result<()> {
@@ -636,7 +642,7 @@ impl AuthenticatedGrpcClient {
     /// Returns a list of schema names from the database.
     ///
     /// This queries the `pg_catalog` to get all user-defined schemas,
-    /// excluding system schemas like '`pg_catalog`', '`pg_temp`', and '`pg_toast`'.
+    /// excluding the `pg_catalog`, `pg_temp`, `pg_toast` and `information_schema` schemas.
     ///
     /// # Example
     ///
@@ -677,7 +683,7 @@ impl AuthenticatedGrpcClient {
     /// Returns a list of table information from the database.
     ///
     /// This queries the `pg_catalog` to get all tables, views, and materialized views,
-    /// excluding system schemas.
+    /// excluding tables in `pg_catalog` and `pg_toast`.
     ///
     /// # Returns
     ///
@@ -1252,10 +1258,12 @@ impl AuthenticatedGrpcClient {
     /// Checks if an error is an authentication error that should trigger
     /// a DC JWT refresh and query retry.
     ///
-    /// Only matches gRPC `UNAUTHENTICATED` (code 16) and HTTP 401 errors,
-    /// which are the server-side signals that the DC JWT is no longer valid.
-    /// Broader substring matches (e.g. "token", "expired") are intentionally
-    /// avoided to prevent spurious retries on unrelated errors.
+    /// Returns true for any [`Error::Authentication`] (gRPC `UNAUTHENTICATED` or
+    /// `PERMISSION_DENIED`, SQLSTATE class 28, or a client-side DC JWT failure)
+    /// and for any error whose message contains `unauthenticated`,
+    /// `unauthorized` or `401`. Broader substring matches (e.g. "token",
+    /// "expired") are intentionally avoided to prevent spurious retries on
+    /// unrelated errors.
     fn is_auth_error(error: &Error) -> bool {
         if matches!(error, Error::Authentication(_)) {
             return true;

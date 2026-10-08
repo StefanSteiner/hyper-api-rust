@@ -1097,8 +1097,8 @@ enum TemporalKind {
 
 /// How to interpret the x column when extracting f64 axis positions.
 ///
-/// Drives [`group_series`] and the corresponding rendering branch in
-/// [`line_or_scatter`] / [`draw_bar`]. `Temporal` is the new mode added
+/// Drives `group_series` and the corresponding rendering branch in
+/// [`line_or_scatter`] / [`draw_bar`]. `Temporal` is the mode
 /// for proportional time-axis rendering: x positions are real Unix
 /// epoch seconds (so 6 hours apart on the wire are 6 hours apart on
 /// the chart), and tick labels are formatted via chrono.

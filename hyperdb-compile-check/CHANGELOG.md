@@ -32,8 +32,6 @@ surface, and consumers should depend on `hyperdb-api-derive` instead.
 
 ### Changed
 
-- **BREAKING:** the minimum supported Rust version is now **1.88**, up from
+- The minimum supported Rust version is now **1.88**, up from
   1.81, and the crate is compiled with **edition 2024**. 1.88 is the version
   Red Hat Enterprise Linux 9.7 ships as `rust-toolset`.
-- The `arrow` dependency moved from **58** to **59**, in lockstep with
-  `hyperdb-api`.

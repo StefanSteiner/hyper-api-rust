@@ -21,7 +21,7 @@ reviewed 2026-09-04 against the full 92-guideline export.
 
 [msft-about]: https://microsoft.github.io/rust-guidelines/guidelines/index.html
 [msft-all]: https://microsoft.github.io/rust-guidelines/agents/all.txt
-[msft-changelog]: https://microsoft.github.io/rust-guidelines/changelog.html
+[msft-changelog]: https://microsoft.github.io/rust-guidelines/changelog/index.html
 
 This page cites the subset that is either machine-enforced here or has been a
 live review topic; the remainder are adopted by reference.

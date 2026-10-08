@@ -788,7 +788,7 @@ fn public_docs_database_and_read_only_contract() {
 }
 
 /// The executable smoke guide, demo commentary, and unreleased changelog must
-/// describe the surfaces added or corrected in this release candidate.
+/// describe the current KV and smoke-guide surfaces.
 /// This catches mutations to the smoke sequence/result examples and release
 /// note claims that omit mandatory KV response fields or no longer match KV
 /// routing or Hyper-export side effects.

@@ -19,7 +19,7 @@
 //! detects the [`crate::error::ErrorCode::ConnectionLost`] error, drops the
 //! engine, and transparently re-creates it on the next call. This auto-reconnect
 //! path covers both transport-level failures and the `"desynchronized"` state
-//! surfaced by the `hyper-client` layer's bounded drain.
+//! surfaced by the bounded drain in `hyperdb_api_core::client`.
 //!
 //! # Workspace Model
 //!
@@ -329,8 +329,7 @@ fn create_table_statements(
 /// Closures receive this rather than `&Engine` for a reason: the guard
 /// holds `&mut Connection`, so the borrow checker will not let the same
 /// connection be driven around the transaction. That statically rules out
-/// the "statement escaped the transaction" bug class that the previous
-/// `&self` + `*_unguarded` shape could only address by convention.
+/// the "statement escaped the transaction" bug class.
 #[derive(Debug)]
 pub struct EngineTransaction<'conn> {
     txn: Transaction<'conn>,
@@ -429,10 +428,8 @@ pub struct Engine {
     /// User-data persistent database. Attached under alias `"persistent"`
     /// during [`Engine::new`]. `None` in `--ephemeral-only` mode.
     persistent_path: Option<PathBuf>,
-    /// `true` when the persistent `.hyper` file was just created during
-    /// engine construction (so the catalog-seed step should fire). Reset
-    /// to `false` after the server consumes it via
-    /// [`Self::take_persistent_was_created`].
+    /// `true` when engine construction created the persistent `.hyper`
+    /// file. Read via [`Self::persistent_was_just_created`]; never reset.
     persistent_was_created: bool,
     /// Cached "_table_catalog exists in `<alias>`" probes, keyed by
     /// canonical alias (lowercase). Populated on first call to
@@ -857,9 +854,9 @@ impl Engine {
         let set_sql = format!("SET schema_search_path = '{}'", alias.replace('\'', "''"));
         self.execute_command(&set_sql)?;
 
-        // `AssertUnwindSafe` is sound for the same reason it is in
-        // `ScopedSearchPath`'s `Drop`: the only state that outlives the
-        // unwind is a session variable we are about to overwrite anyway.
+        // `AssertUnwindSafe` is sound here: after a panic in `f`, the only
+        // work done on `self` is the `SET` that restores the search path,
+        // and the panic is then re-raised unchanged.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
 
         let restore_sql = format!(
@@ -922,10 +919,9 @@ impl Engine {
     }
 
     /// `true` when this engine just created the persistent `.hyper` file
-    /// during construction. The server consumes this signal once to
-    /// decide whether to seed `_table_catalog`; subsequent reads stay
-    /// `true` (the flag isn't reset — it's a fact about the engine's
-    /// startup, not a one-shot signal).
+    /// during construction.
+    ///
+    /// The flag is a fact about the engine's startup and is never reset.
     pub fn persistent_was_just_created(&self) -> bool {
         self.persistent_was_created
     }
@@ -1033,7 +1029,7 @@ impl Engine {
     /// functionally equivalent to a successful rollback).
     ///
     /// This is the correctness primitive for ingest operations: it lets
-    /// per-row `INSERT` loops (Parquet, Arrow, JSON) leave zero partial data
+    /// the per-row `INSERT` loop of JSON ingest leave zero partial data
     /// on failure. The CSV `COPY FROM` path is already atomic at the
     /// statement level, but wrapping it in a transaction costs nothing and
     /// makes per-row INSERT loops atomic across the whole batch.
@@ -1560,10 +1556,9 @@ impl Engine {
     ///
     /// Avoids the `Catalog::has_table` probe entirely — we just run the sample
     /// SELECT first and translate a Hyper "table does not exist" error into
-    /// our own [`ErrorCode::TableNotFound`]. This sidesteps the old pattern
-    /// where a racy `has_table` silently returning `Err` would be rewritten
-    /// to `false` and surface as a spurious `TableNotFound` for tables that
-    /// actually exist.
+    /// our own [`ErrorCode::TableNotFound`]. A racy `has_table` that silently
+    /// returned `Err` would otherwise be rewritten to `false` and surface as a
+    /// spurious `TableNotFound` for tables that actually exist.
     ///
     /// # Errors
     ///
@@ -1892,9 +1887,8 @@ fn row_value_to_json(row: &hyperdb_api::Row, idx: usize, sql_type: &SqlType) -> 
             .unwrap_or(Value::Null);
     }
     if oid_val == oids::NUMERIC.0 {
-        // `Row` is schema-aware as of the upstream NUMERIC fix — it
-        // carries an `Arc<ResultSchema>` and `row.get::<Numeric>()`
-        // reads the scale from the column's
+        // `Row` is schema-aware: it carries an `Arc<ResultSchema>` and
+        // `row.get::<Numeric>()` reads the scale from the column's
         // `SqlType::Numeric { precision, scale }` descriptor before
         // dispatching on the buffer length. That covers all three
         // NUMERIC wire shapes the server can send on a query result:
@@ -1903,12 +1897,8 @@ fn row_value_to_json(row: &hyperdb_api::Row, idx: usize, sql_type: &SqlType) -> 
         //   * 16-byte `BigNumeric`  (precision > 18)
         //   * Arrow `Decimal128`/`Decimal256` (gRPC transport)
         //
-        // Prior to the upstream fix, `type_modifier` was being dropped
-        // during `RowDescription` parsing so the scale presented here
-        // was always `0`, the 8-byte form wasn't decodable at all, and
-        // `AVG` results fell through to `Null`. All of that is now
-        // handled inside `hyperdb-api`; this function only needs to pick
-        // the JSON shape.
+        // Scale and width decoding are handled inside `hyperdb-api`; this
+        // function only needs to pick the JSON shape.
         //
         // `Numeric::to_string()` uses the decoded scale and is exact.
         // Ordinary query results retain their established compact JSON
@@ -2121,11 +2111,6 @@ pub fn resolve_log_dir(persistent_db_path: Option<&str>) -> PathBuf {
     }
 }
 
-/// Build the `{name, columns, row_count}` JSON for a single table, shared
-/// between [`Engine::describe_tables`] (bulk) and [`Engine::describe_table`]
-/// (single) so both paths emit byte-identical shapes. A missing table
-/// surfaces as the underlying Hyper "relation does not exist" error; single-
-/// table callers should run it through `translate_table_missing`.
 /// Describe columns of `table_name` in attached database `db_alias` by
 /// querying that database's `pg_catalog.pg_attribute` directly. Used when
 /// the connection-bound `Catalog` API can't see the target database.
@@ -2163,6 +2148,10 @@ fn describe_columns_via_pg_catalog(
         .collect())
 }
 
+/// Build the `{name, columns, row_count}` JSON for a single table, shared
+/// between [`Engine::describe_tables`] (bulk) and [`Engine::describe_table`]
+/// (single) so both paths emit byte-identical shapes. Callers check existence
+/// first; a missing table surfaces as the underlying catalog error.
 fn describe_table_with_catalog(catalog: &Catalog<'_>, name: &str) -> Result<Value, McpError> {
     let def = catalog.get_table_definition(name).map_err(McpError::from)?;
     let row_count = catalog.get_row_count(name).unwrap_or(0);
@@ -2207,7 +2196,6 @@ fn translate_table_missing(err: McpError, table_name: &str) -> McpError {
 /// `SHOW`, or `VALUES`. Anything else (`CREATE`, `INSERT`, `UPDATE`, `DELETE`,
 /// `DROP`, `ALTER`, `COPY`, ...) is considered mutating.
 ///
-/// The check is a simple prefix match after trimming and upper-casing the first
 /// Checks whether the first SQL keyword indicates a read-only statement.
 ///
 /// Strips leading whitespace and SQL comments (line `--` and block `/* */`)
@@ -2648,11 +2636,10 @@ mod statement_helper_tests {
 mod endpoint_description_tests {
     use super::*;
 
-    /// The TCP shape every `hyperdb-mcp` session uses today: both the daemon
-    /// (`daemon::run` sets `TransportMode::Tcp` explicitly) and the local
-    /// fallback (`HyperProcess` defaults to TCP on every platform) hand the
-    /// engine a `host:port` string. The descriptor must round-trip back to
-    /// the `tab.tcp://` form `hyperd` sent over its callback connection.
+    /// The TCP shape a private `hyperd` uses (`--no-daemon` or the daemon
+    /// fallback; `HyperProcess` defaults to TCP on every platform): the
+    /// engine receives a `host:port` string. The descriptor must round-trip
+    /// back to the `tab.tcp://` form `hyperd` sent over its callback connection.
     #[test]
     fn tcp_endpoint_decomposes_into_host_port_and_descriptor() {
         let described = describe_endpoint("127.0.0.1:64687");

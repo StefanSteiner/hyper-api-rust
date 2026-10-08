@@ -6,7 +6,7 @@
 //! Wraps arbitrary user SQL in a CTE and runs it against the shared
 //! `CompileTimeDb`, returning the `ResultSchema` without touching any rows.
 //!
-//! # Critical: query execution is lazy (Phase 0 S6)
+//! # Query execution is lazy
 //!
 //! `Connection::execute_query()` does NOT run the query on the TCP transport.
 //! The query only executes — and server errors / the `RowDescription` (schema)
@@ -32,7 +32,7 @@ pub fn dry_run(db: &mut CompileTimeDb, user_sql: &str) -> Result<ResultSchema> {
     let wrapped = format!("WITH __hdb_q AS ({user_sql}) SELECT * FROM __hdb_q LIMIT 0");
     let mut rowset = db.conn.execute_query(&wrapped)?;
 
-    // Force execution (Phase 0 S6): LIMIT 0 returns Ok(None) from next_chunk
+    // Force execution: LIMIT 0 returns Ok(None) from next_chunk
     // but populates the schema cache first.
     rowset.next_chunk()?;
 

@@ -372,15 +372,16 @@ query_data(data: '[{"region":"West","revenue":1200},...]', sql: 'SELECT region, 
 Ingest a file and run a SQL query in a single call. Streams from disk — handles files of any size.
 
 ```text
-query_file(path: '/tmp/sales.parquet', sql: 'SELECT TOP 10 * FROM sales ORDER BY amount DESC')
+query_file(path: '/tmp/sales.parquet', sql: 'SELECT TOP 10 * FROM data ORDER BY amount DESC')
 ```
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `path` | string | yes | Path to CSV / JSON / JSONL / Parquet / Arrow IPC file |
 | `sql` | string | yes | SQL query to run |
-| `table_name` | string | no | Table name — defaults to filename stem |
+| `table_name` | string | no | Table name for use in SQL — defaults to `"data"` |
 | `schema` | object | no | Partial column-name → type map (see [Schema Overrides](#schema-overrides)) |
+| `json_extract_path` | string | no | Dot-separated path to a nested array in a JSON wrapper file (numeric segments index arrays) |
 
 ### Database Tools
 
@@ -399,6 +400,8 @@ load_data(table: 'customers', data: '[{"id":1,"name":"Alice"},...]')
 | `format` | string | no | `"json"` or `"csv"` — auto-detected |
 | `mode` | string | no | `"replace"` (default) or `"append"` |
 | `schema` | object | no | Partial column-name → type map (see [Schema Overrides](#schema-overrides)) |
+| `database` | string | no | Target database: `"local"` (default), `"persistent"`, or a writable attached alias |
+| `persist` | boolean | no | Shorthand for `database: "persistent"`; `database` wins if both are set |
 
 #### `load_file`
 
@@ -412,8 +415,12 @@ load_file(table: 'orders', path: '/tmp/orders.csv')
 |-----------|------|----------|-------------|
 | `table` | string | yes | Table name |
 | `path` | string | yes | Path to CSV / JSON / JSONL / Parquet / Arrow IPC file |
-| `mode` | string | no | `"replace"` (default) or `"append"` |
+| `mode` | string | no | `"replace"` (default), `"append"`, or `"merge"` (upsert by `merge_key`; new columns auto-added) |
+| `merge_key` | string or array | for merge | Column(s) matching incoming rows to existing rows; rejected for other modes |
 | `schema` | object | no | Partial column-name → type map (see [Schema Overrides](#schema-overrides)) |
+| `json_extract_path` | string | no | Dot-separated path to a nested array in a JSON wrapper file |
+| `database` | string | no | Target database: `"local"` (default), `"persistent"`, or a writable attached alias |
+| `persist` | boolean | no | Shorthand for `database: "persistent"`; `database` wins if both are set |
 
 When you're unsure of the right types — or recovering from a previous
 `SCHEMA_MISMATCH` — call [`inspect_file`](#inspect_file) first. It reports the
@@ -442,9 +449,63 @@ load_iceberg(table: 'sales', path: '/lake/warehouse/db/sales')
 Schema overrides are not accepted — hyperd derives the schema from the
 Iceberg table metadata.
 
+#### `load_files`
+
+Load several files in parallel, each into its own table. One entry's failure does not abort the others.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `files` | array | yes | Entries with `table`, `path`, and optional `mode` (`"replace"` or `"append"`; `"merge"` and `merge_key` are rejected), `schema`, and `json_extract_path` |
+| `concurrency` | integer | no | Maximum concurrent ingests; defaults to `min(files, 8)`, capped at 16 |
+| `database` | string | no | Target database for every entry: `"local"` (default), `"persistent"`, or a writable attached alias |
+| `persist` | boolean | no | Shorthand for `database: "persistent"`; `database` wins if both are set |
+
+#### `attach_database` / `detach_database` / `list_attached_databases`
+
+Attach another `.hyper` file for the session and reference its tables as `<alias>.public.<table>`. `detach_database` takes only `alias`; `list_attached_databases` lists the current attachments.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `alias` | string | yes | SQL identifier; cannot be `local` |
+| `path` | string | yes | Absolute path to the `.hyper` file |
+| `kind` | string | no | Attachment kind; defaults to `"local_file"`, the only kind supported |
+| `writable` | boolean | no | Default `false`; required for writes and `copy_query` targets |
+| `on_missing` | string | no | `"error"` (default) or `"create"` (needs `writable: true`; the parent directory must exist) |
+
+#### `copy_query`
+
+Run a read-only `SELECT` / `WITH` / `VALUES` statement and land the result in a target table, possibly in another database.
+
+```text
+copy_query(sql: 'SELECT * FROM src.public.customers', target_table: 'customers_copy', mode: 'create', temp_attach: [...])
+```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `sql` | string | yes | Read-only statement; reference attached tables as `<alias>.public.<table>` |
+| `target_table` | string | yes | Unqualified destination table in the `public` schema |
+| `mode` | string | yes | `"create"` (error if it exists), `"append"` (error if missing), or `"replace"` |
+| `target_database` | string | no | Destination alias; defaults to local. Attached aliases must be writable |
+| `temp_attach` | array | no | Databases attached for this call only and detached afterwards |
+
+#### `set_table_metadata`
+
+Record prose metadata for a table that already has a catalog entry. Unset fields stay unchanged; an empty string clears a field.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `table` | string | yes | Table name |
+| `source_url` | string | no | Where the data came from |
+| `source_description` | string | no | What the dataset contains |
+| `purpose` | string | no | Why the data is loaded |
+| `license` | string | no | License or attribution requirements |
+| `notes` | string | no | Refresh instructions, gotchas, caveats |
+| `data_url` | string | no | Machine-actionable download URL for the raw data |
+| `database` | string | no | Catalog to write: local and persistent share one catalog; a writable attached alias uses its own |
+
 #### `query`
 
-Run a **read-only** SQL query against local (default), persistent, or an attached database. Accepts `SELECT`, `WITH`, `EXPLAIN`, `SHOW`, `VALUES`. For DDL/DML use `execute`.
+Run a **read-only** SQL query against local (default), persistent, or an attached database. Accepts `SELECT`, `WITH`, `EXPLAIN`, `SHOW`, `VALUES`. For DDL/DML use `execute`. Results are capped at 10,000 rows; larger results return `truncated: true` plus `total_rows` — add `LIMIT`/`GROUP BY` or use `export` for the full set.
 
 ```text
 query(sql: 'SELECT c.name, SUM(o.amount) FROM orders o JOIN customers c ON o.customer_id = c.id GROUP BY c.name')
@@ -495,7 +556,7 @@ sample(table: 'orders', n: 10)
 
 #### `inspect_file`
 
-Dry-run schema inference on a CSV, Parquet, or Arrow IPC file **without ingesting
+Dry-run schema inference on a CSV, JSON, JSONL, Parquet, or Arrow IPC file **without ingesting
 it**. Returns the exact schema `load_file` / `query_file` would use (including
 the full-file numeric widening pass) plus per-column `min`, `max`, `null_count`,
 and `sample_values`. Nothing is written to Hyper and `hyperd` is not even
@@ -712,6 +773,8 @@ watch_directory(path: '/tmp/inbox', table: 'events')
 unwatch_directory(path: '/tmp/inbox')
 ```
 
+`watch_directory` also accepts `max_concurrent` (files ingested in parallel; default 4, capped at 32), `database`, and `persist`.
+
 **Producer protocol (`.ready` sentinel):**
 
 1. Write data file (e.g. `foo.csv`) and close it.
@@ -728,6 +791,10 @@ Key properties:
 - **Cleanup** — dropping the server or calling `unwatch_directory` terminates the background thread.
 
 ### Utility Tools
+
+#### `get_readme`
+
+Returns the LLM-facing tool index, parameter rules, and usage examples. It takes no parameters and is allowed in read-only mode.
 
 #### `status`
 
@@ -932,7 +999,7 @@ execute(sql: [
 
 Both statements run inside a single Hyper transaction — they commit together or both roll back. No race window between them.
 
-> **Tip:** For file-based upserts (merging updated data from a CSV/JSON file into an existing table), use `load_file` with `mode: "merge"` and a `merge_key` instead of writing manual SQL — it handles the UPDATE/INSERT logic automatically and also auto-adds new columns.
+> **Tip:** For file-based upserts (merging updated data from a CSV/JSON file into an existing table), use `load_file` with `mode: "merge"` and a `merge_key` instead of writing manual SQL — it handles the delete-and-reinsert by key automatically and also auto-adds new columns.
 
 ### Transactions
 
@@ -1011,6 +1078,10 @@ Errors include a machine-readable code and a suggestion:
 | `READ_ONLY_VIOLATION` | Mutating op in read-only mode | Use `query_*` / `inspect_file`, or restart without `--read-only` |
 | `RESOURCE_BUSY` | The reserved persistent attachment hit file contention (SQLSTATE 55006) | Run `hyperdb-mcp doctor`; compare client/daemon identities; close the possible owner (Hyper, Tableau, or another process), or copy/select another `.hyper` file; retry |
 | `CONNECTION_LOST` | `hyperd` crashed or wire protocol desynchronized | Retry — the server tears down the engine and reconnects on the next call |
+| `INVALID_ARGUMENT` | Bad parameter (relative path, duplicate saved-query name, invalid alias) | Fix the argument per the message |
+| `EMPTY_DATA` | Input has zero rows or columns | Check the source data |
+| `PERMISSION_DENIED` | Filesystem permission denied, or `export` with `overwrite: false` hit an existing file | Choose another path or fix permissions |
+| `INTERNAL_ERROR` | Unexpected server failure | Retry; report with `hyperdb-mcp doctor` output |
 
 Server-returned errors include a machine-readable `code`, a `message`, and a
 `suggestion` with concrete retry guidance. The `SCHEMA_MISMATCH` suggestion for
@@ -1044,4 +1115,3 @@ the executable or its containing directory, or install it under an ancestor's
 - **[hyperdb-api](../hyperdb-api/)** — Core Rust API (sync/async connections, inserter, query)
 - **[DEVELOPMENT.md](DEVELOPMENT.md)** — Internal architecture, design decisions, contributor guide
 - **[ROADMAP.md](ROADMAP.md)** — Forward-looking design sketches for features that aren't built yet
-- **[Design Spec](../docs/specs/hyperdb-mcp-design.md)** — Full design document

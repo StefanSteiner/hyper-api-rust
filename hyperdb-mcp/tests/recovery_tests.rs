@@ -1,9 +1,15 @@
 // Copyright (c) 2026, Salesforce, Inc. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Regression tests for the Claude-session bug: `sample` returning a
-//! spurious `TABLE_NOT_FOUND` due to a racy `has_table` probe, and the
-//! connection-lost detection heuristics that drive auto-reconnect.
+//! Regression tests for engine recovery and connection-loss handling.
+//!
+//! - `sample` must not return a spurious `TABLE_NOT_FOUND` from a racy
+//!   `has_table` probe.
+//! - The connection-lost classifier must recognize transport errors and
+//!   ignore SQL errors, which drives auto-reconnect.
+//! - A slow daemon error report must not hold the engine mutex.
+//! - The watchdog meta-tests and the `hyperd` identity guard keep the
+//!   self-child harness itself reliable.
 
 mod common;
 
@@ -132,6 +138,7 @@ fn slow_health_report_does_not_hold_engine_mutex() {
     }
 }
 
+/// Meta-test: the watchdog reaps `hyperd` and preserves the exit code of a child that fails.
 #[test]
 fn slow_health_watchdog_reaps_hyperd_after_child_failure() {
     match child_mode().as_deref() {
@@ -159,6 +166,7 @@ fn slow_health_watchdog_reaps_hyperd_after_child_failure() {
     );
 }
 
+/// Meta-test: the watchdog reaps `hyperd` after a child that hangs times out.
 #[test]
 fn slow_health_watchdog_reaps_hyperd_after_child_timeout() {
     match child_mode().as_deref() {
@@ -472,8 +480,8 @@ fn run_slow_health_mutex_child() {
         started_at: "2026-08-14T00:00:00Z".to_string(),
         version: hyperdb_mcp::version::MCP_VERSION.to_string(),
     };
-    // Discovery is the only routing input: Task 5 must carry this effective
-    // health port through the engine and into the loss-report path. The child
+    // Discovery is the only routing input: the engine must route
+    // `REPORT_HYPERD_ERROR` to this effective health port. The child
     // intentionally does not mutate the process-global daemon-port setting.
     discovery::write_discovery_file(&daemon_info).expect("write isolated daemon discovery");
 

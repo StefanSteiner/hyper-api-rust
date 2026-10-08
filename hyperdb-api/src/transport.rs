@@ -12,7 +12,7 @@
 
 use crate::error::{Error, Result};
 
-/// Transport type indicator (public for introspection).
+/// Transport type indicator (crate-internal).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TransportType {
     /// TCP connection using `PostgreSQL` wire protocol.
@@ -85,12 +85,12 @@ pub(crate) enum Transport {
     Grpc(Box<GrpcTransport>),
 }
 
-/// TCP transport using hyper-client.
+/// TCP transport using `hyperdb_api_core::client`.
 pub(crate) struct TcpTransport {
     pub(crate) client: hyperdb_api_core::client::Client,
 }
 
-/// gRPC transport using hyper-client's gRPC module.
+/// gRPC transport using the `hyperdb_api_core::client::grpc` module.
 pub(crate) struct GrpcTransport {
     pub(crate) client: hyperdb_api_core::client::grpc::GrpcClientSync,
     pub(crate) config: hyperdb_api_core::client::grpc::GrpcConfig,
@@ -121,7 +121,7 @@ impl Transport {
     pub(crate) fn supports_writes(&self) -> bool {
         match self {
             Transport::Tcp(_) => true,
-            Transport::Grpc(_) => false, // TODO: Server capability check in future
+            Transport::Grpc(_) => false,
         }
     }
 

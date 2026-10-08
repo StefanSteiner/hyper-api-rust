@@ -34,9 +34,9 @@ use serde_json::{Map, Value};
 /// Specifies what to export and where.
 ///
 /// For row-oriented formats (`csv`, `parquet`, `arrow_ipc`, `iceberg`)
-/// exactly one of `sql` or `table` must be provided; `sql` takes priority
-/// if both are set. For `hyper` format both are ignored — every user
-/// table in the workspace is copied into a new `.hyper` file.
+/// provide `sql` or `table`; `sql` takes priority if both are set. For
+/// `hyper` format both are ignored — every user table in the workspace
+/// is copied into a new `.hyper` file.
 #[derive(Debug, Default)]
 pub struct ExportOptions {
     /// A SELECT query whose results will be exported. Ignored when
@@ -166,12 +166,13 @@ pub fn export_to_file(engine: &Engine, opts: &ExportOptions) -> Result<ExportRes
     }
 }
 
-/// Render an option key like `compression` into `compression` after
-/// validating it's a safe identifier. We pass the whole `WITH (...)`
-/// clause into hyperd as SQL, so an unchecked key like `foo) --` would
-/// let a caller rewrite the statement. Allow only lowercase
-/// letters, digits, and underscores, starting with a letter or
-/// underscore — hyperd's own option names all fit this shape.
+/// Validate that an option key like `codec` is a safe identifier.
+///
+/// We pass the whole `WITH (...)` clause into hyperd as SQL, so an
+/// unchecked key like `foo) --` would let a caller rewrite the
+/// statement. Allow only ASCII letters, digits, and underscores,
+/// starting with a letter or underscore — hyperd's own option names all
+/// fit this shape.
 fn validate_option_key(key: &str) -> Result<(), McpError> {
     let bad = key.is_empty()
         || !key
@@ -298,8 +299,8 @@ fn export_csv(
 /// `COPY ... WITH (format => 'parquet')`. Types (NUMERIC precision,
 /// DATE, TIMESTAMP, non-null flags, ...) are preserved exactly —
 /// hyperd writes its own Arrow schema from the query's `RowDescription`,
-/// bypassing the JSON round-trip the previous Rust-side pipeline used.
-/// Caller can override via `format_options` (e.g. `{"compression":
+/// bypassing any JSON round-trip.
+/// Caller can override via `format_options` (e.g. `{"codec":
 /// "zstd", "rows_per_row_group": 100000}`).
 fn export_parquet(
     engine: &Engine,
@@ -355,8 +356,6 @@ fn export_arrow_ipc(
 ///   or file already exists there and `overwrite` is true, we remove
 ///   it first — hyperd's `COPY TO` refuses to write into an existing
 ///   non-empty Iceberg location.
-/// - The SELECT must return at least one row. An empty query succeeds
-///   but produces an empty table metadata file.
 fn export_iceberg(
     engine: &Engine,
     sql: &str,
@@ -432,25 +431,6 @@ fn walk_dir_size(dir: &std::path::Path) -> std::io::Result<u64> {
     Ok(total)
 }
 
-/// Export the workspace tables as a new `.hyper` file. Issues
-/// `CREATE DATABASE` + `ATTACH DATABASE` against the target path and
-/// populates it with one constraint-preserving copy per user table.
-///
-/// We can't just `std::fs::copy(workspace, target)` because on Windows
-/// hyperd holds the workspace file open with an exclusive lock, and
-/// Windows blocks any concurrent open of a locked file (Unix allows it
-/// via shared handle semantics). Going through hyperd keeps this
-/// cross-platform at the cost of only copying tables — views,
-/// sequences, and other catalog objects in the source are not
-/// reproduced. That's acceptable for the current callers (LLMs
-/// exporting workspace data for Tableau Desktop), but documented here
-/// so a future caller that needs full catalog fidelity knows why.
-///
-/// Within a table the copy is faithful: `NOT NULL`, `DEFAULT`,
-/// `ASSUMED PRIMARY KEY`, and `ASSUMED UNIQUE` all survive. Anything that
-/// could not be reproduced comes back in
-/// [`ExportResult::schema_fidelity`] so the caller can say so out loud
-/// instead of handing back a quietly degraded backup.
 /// True when a filesystem error means "another process is holding this file
 /// open" rather than "you lack permission to touch it".
 ///
@@ -471,6 +451,25 @@ fn is_file_in_use(err: &std::io::Error) -> bool {
         || (cfg!(windows) && matches!(err.raw_os_error(), Some(32 | 33)))
 }
 
+/// Export the workspace tables as a new `.hyper` file. Issues
+/// `CREATE DATABASE` + `ATTACH DATABASE` against the target path and
+/// populates it with one constraint-preserving copy per user table.
+///
+/// We can't just `std::fs::copy(workspace, target)` because on Windows
+/// hyperd holds the workspace file open with an exclusive lock, and
+/// Windows blocks any concurrent open of a locked file (Unix allows it
+/// via shared handle semantics). Going through hyperd keeps this
+/// cross-platform at the cost of only copying tables — views,
+/// sequences, and other catalog objects in the source are not
+/// reproduced. That's acceptable for the current callers (LLMs
+/// exporting workspace data for Tableau Desktop), but documented here
+/// so a future caller that needs full catalog fidelity knows why.
+///
+/// Within a table the copy is faithful: `NOT NULL`, `DEFAULT`,
+/// `ASSUMED PRIMARY KEY`, and `ASSUMED UNIQUE` all survive. Anything that
+/// could not be reproduced comes back in
+/// [`ExportResult::schema_fidelity`] so the caller can say so out loud
+/// instead of handing back a quietly degraded backup.
 fn export_hyper(
     engine: &Engine,
     path: &str,

@@ -40,7 +40,7 @@ pub enum VersionSource {
 /// Configuration passed to [`install`].
 #[derive(Debug, Clone)]
 pub struct InstallOptions {
-    /// Root directory under which `<version_tag>/` and `current/` are created.
+    /// Root directory under which `<version>/` and `current/` are created.
     pub dest_root: PathBuf,
     /// Which release to resolve. See [`VersionSource`].
     pub version_source: VersionSource,

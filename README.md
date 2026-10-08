@@ -115,7 +115,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-hyperdb-api = { path = "hyperdb-api" }
+hyperdb-api = "1.0"
 ```
 
 #### Installing the CLIs
@@ -291,13 +291,20 @@ window functions, CTEs, complex JOINs, and type-safe query composition:
 
 ```toml
 [dependencies]
-sea-query = "0.32"
-sea-query-hyperdb = { path = "sea-query-hyperdb" }
+sea-query = "1.0"
+sea-query-hyperdb = "1.0"
 ```
 
 ```rust
-use sea_query::{Query, Expr, Iden};
+use sea_query::{Expr, ExprTrait, Iden, Query};
 use sea_query_hyperdb::HyperQueryBuilder;
+
+#[derive(Iden)]
+enum Users {
+    Table,
+    Name,
+    Age,
+}
 
 let sql = Query::select()
     .column(Users::Name)
@@ -315,7 +322,7 @@ and Refresh Token flows:
 
 ```toml
 [dependencies]
-hyperdb-api-salesforce = { path = "hyperdb-api-salesforce" }
+hyperdb-api-salesforce = "1.0"
 ```
 
 ```rust

@@ -17,8 +17,9 @@
 //! 2. **`<log_dir>/hyperdb-mcp.log`** — append-only file, same log filter.
 //!    The path is reported in the `status` tool's `logs.client_log` field.
 //!
-//! Both `hyperd` and the client write to the same `log_dir` (see
-//! [`hyperdb_mcp::engine::resolve_log_dir`]). Check the `status` tool for
+//! With a private `hyperd`, both it and the client write to the same `log_dir`
+//! (see [`hyperdb_mcp::engine::resolve_log_dir`]); the shared daemon's `hyperd`
+//! logs under the daemon state directory instead. Check the `status` tool for
 //! the exact paths.
 
 use clap::{Parser, Subcommand};
@@ -33,7 +34,7 @@ use hyperdb_mcp::server::HyperMcpServer;
 use rmcp::ServiceExt;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
-// Both MCP_VERSION and HYPERDB_GIT_HASH are env! string literals, so this
+// Both CARGO_PKG_VERSION and HYPERDB_GIT_HASH are env! string literals, so this
 // concat! resolves at compile time into a single &'static str — exactly
 // what clap wants for the `version = ...` attribute.
 const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), ".r", env!("HYPERDB_GIT_HASH"));

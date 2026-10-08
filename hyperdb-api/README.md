@@ -107,7 +107,7 @@ async fn main() -> Result<()> {
     let hyper = HyperProcess::new(None, None)?;
     let endpoint = hyper.require_endpoint()?;
 
-    let config = PoolConfig::new(&endpoint, "pooled.hyper")
+    let config = PoolConfig::new(endpoint, "pooled.hyper")
         .create_mode(CreateMode::CreateIfNotExists)
         .max_size(10);
 
@@ -364,7 +364,7 @@ if catalog.has_table("public.users")? {
 Type-safe SQL identifier handling with automatic escaping:
 
 ```rust
-use hyperdb_api::{Name, TableName};
+use hyperdb_api::{table_name, Name, TableName};
 
 // Simple construction
 let name = Name::try_new("users")?;
@@ -444,7 +444,7 @@ ASCII `A-Z a-z 0-9 _ . -`; anything else returns `Error::InvalidName`.
 Thread-safe cancellation from another thread:
 
 ```rust
-let conn = Arc::new(Connection::create_or_open(&hyper, "test.hyper")?);
+let conn = Arc::new(Connection::new(&hyper, "test.hyper", CreateMode::CreateIfNotExists)?);
 // ... in another thread:
 conn.cancel()?;  // Cancels running query (SQLSTATE 57014)
 ```
@@ -453,7 +453,7 @@ conn.cancel()?;  // Cancels running query (SQLSTATE 57014)
 
 ```rust
 conn.set_notice_receiver(Some(Box::new(|notice| {
-    println!("Notice: {} ({})", notice.message, notice.severity.as_deref().unwrap_or(""));
+    println!("Notice: {} ({})", notice.message(), notice.severity().unwrap_or(""));
 })));
 ```
 
@@ -462,7 +462,7 @@ conn.set_notice_receiver(Some(Box::new(|notice| {
 Per-query performance metrics from Hyper's internal log:
 
 ```rust
-use hyperdb_api::query_stats::LogFileStatsProvider;
+use hyperdb_api::LogFileStatsProvider;
 
 conn.enable_query_stats(LogFileStatsProvider::from_process(&hyper));
 conn.execute_command("SELECT * FROM users")?;
@@ -517,13 +517,20 @@ window functions, CTEs, complex JOINs, and type-safe query composition.
 
 ```toml
 [dependencies]
-sea-query = "0.32"
+sea-query = "1.0"
 sea-query-hyperdb = "1.0"
 ```
 
 ```rust
-use sea_query::{Query, Expr, Iden};
+use sea_query::{Expr, ExprTrait, Iden, Query};
 use sea_query_hyperdb::HyperQueryBuilder;
+
+#[derive(Iden)]
+enum Users {
+    Table,
+    Name,
+    Age,
+}
 
 let sql = Query::select()
     .column(Users::Name)
@@ -559,4 +566,4 @@ crates.io-friendly.)
 
 ## License
 
-Apache-2.0
+Licensed under either of [Apache License, Version 2.0](https://github.com/tableau/hyper-api-rust/blob/main/LICENSE-APACHE.txt) or [MIT license](https://github.com/tableau/hyper-api-rust/blob/main/LICENSE-MIT.txt), at your option.

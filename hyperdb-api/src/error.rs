@@ -190,7 +190,7 @@ pub enum Error {
 
     // ---- Column / row mapping ------------------------------------------
     /// Structured error for named-column access in row decoding. Used
-    /// by `FromRow` impls and `Row::try_get` / `Row::get_by_name` to
+    /// by `FromRow` impls (through `RowAccessor`) and `Row::get_by_name` to
     /// signal which column failed and why.
     #[error("column {name}: {kind}")]
     Column {

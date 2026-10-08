@@ -17,8 +17,10 @@ use hyperdb_api_core::client::Config;
 /// # Transport Auto-Detection
 ///
 /// The transport is automatically detected from the endpoint URL:
-/// - `https://` or `http://` → gRPC transport (read-only)
-/// - Otherwise → TCP transport (e.g., `localhost:7483`)
+/// - `https://` or `http://` → gRPC (read-only)
+/// - `tab.domain://...` or an absolute socket path → Unix domain socket (Unix only)
+/// - `tab.pipe://...` or a `\\host\pipe\name` path → named pipe (Windows only)
+/// - otherwise `host:port` → TCP (e.g., `localhost:7483`)
 ///
 /// # Example
 ///
@@ -55,7 +57,8 @@ pub struct ConnectionBuilder {
     user: Option<String>,
     password: Option<String>,
     login_timeout: Option<Duration>,
-    /// Query timeout — cancel queries that exceed this duration.
+    /// Query timeout; recorded but not applied by any transport (see the
+    /// `query_timeout` setter).
     query_timeout: Option<Duration>,
     /// Application name sent to the server during connection startup.
     application_name: Option<String>,
@@ -74,7 +77,7 @@ impl ConnectionBuilder {
     ///
     /// # Arguments
     ///
-    /// * `endpoint` - The server endpoint (host:port).
+    /// * `endpoint` - The server endpoint; see [`ConnectionBuilder`] for the accepted forms.
     pub fn new(endpoint: impl Into<String>) -> Self {
         Self {
             endpoint: endpoint.into(),
@@ -89,8 +92,8 @@ impl ConnectionBuilder {
         }
     }
 
-    #[must_use]
     /// Sets the database path.
+    #[must_use]
     pub fn database(mut self, path: impl AsRef<Path>) -> Self {
         self.database = Some(path.as_ref().to_path_buf());
         self
@@ -105,23 +108,23 @@ impl ConnectionBuilder {
         self
     }
 
-    #[must_use]
     /// Sets the username for authentication.
     ///
     /// Default is "`tableau_internal_user`".
+    #[must_use]
     pub fn user(mut self, user: impl Into<String>) -> Self {
         self.user = Some(user.into());
         self
     }
 
-    #[must_use]
     /// Sets the password for authentication.
+    #[must_use]
     pub fn password(mut self, password: impl Into<String>) -> Self {
         self.password = Some(password.into());
         self
     }
 
-    /// Sets the login timeout.
+    /// Sets the login timeout (TCP connections only).
     #[must_use]
     pub fn login_timeout(mut self, timeout: Duration) -> Self {
         self.login_timeout = Some(timeout);
@@ -130,49 +133,50 @@ impl ConnectionBuilder {
 
     /// Sets the query timeout.
     ///
-    /// Queries that exceed this duration will be cancelled automatically.
-    /// Default is no timeout (queries run until completion).
+    /// The value is recorded on the builder but no transport applies it, so
+    /// queries run until completion regardless of this setting.
     #[must_use]
     pub fn query_timeout(mut self, timeout: Duration) -> Self {
         self.query_timeout = Some(timeout);
         self
     }
 
-    #[must_use]
     /// Sets the application name sent to the server.
     ///
-    /// This appears in server logs and can be used for monitoring.
+    /// This appears in server logs and can be used for monitoring. It applies
+    /// to TCP connections only.
+    #[must_use]
     pub fn application_name(mut self, name: impl Into<String>) -> Self {
         self.application_name = Some(name.into());
         self
     }
 
-    #[must_use]
     /// Convenience method to set user and password at once.
+    #[must_use]
     pub fn auth(mut self, user: impl Into<String>, password: impl Into<String>) -> Self {
         self.user = Some(user.into());
         self.password = Some(password.into());
         self
     }
 
-    #[must_use]
     /// Convenience method to create a new database.
+    #[must_use]
     pub fn create_new_database(mut self, database_path: impl AsRef<Path>) -> Self {
         self.database = Some(database_path.as_ref().to_path_buf());
         self.create_mode = CreateMode::Create;
         self
     }
 
-    #[must_use]
     /// Convenience method to create database if it doesn't exist.
+    #[must_use]
     pub fn create_or_open_database(mut self, database_path: impl AsRef<Path>) -> Self {
         self.database = Some(database_path.as_ref().to_path_buf());
         self.create_mode = CreateMode::CreateIfNotExists;
         self
     }
 
-    #[must_use]
     /// Convenience method to open an existing database.
+    #[must_use]
     pub fn open_database(mut self, database_path: impl AsRef<Path>) -> Self {
         self.database = Some(database_path.as_ref().to_path_buf());
         self.create_mode = CreateMode::DoNotCreate;
@@ -210,12 +214,20 @@ impl ConnectionBuilder {
     /// Builds and establishes the connection.
     ///
     /// The transport is automatically detected from the endpoint URL:
-    /// - `https://` or `http://` → gRPC transport
-    /// - Otherwise → TCP transport
+    /// - `https://` or `http://` → gRPC (read-only)
+    /// - `tab.domain://...` or an absolute socket path → Unix domain socket (Unix only)
+    /// - `tab.pipe://...` or a `\\host\pipe\name` path → named pipe (Windows only)
+    /// - otherwise `host:port` → TCP
+    ///
+    /// `application_name` and `login_timeout` apply to TCP connections only.
     ///
     /// # Errors
     ///
-    /// Returns an error if the connection fails or if database creation fails.
+    /// - Returns [`Error::Config`] if the endpoint cannot be parsed.
+    /// - Returns [`Error::FeatureNotSupported`] for a gRPC endpoint with a create mode other than [`CreateMode::DoNotCreate`].
+    /// - Returns [`Error::Connection`] or [`Error::Timeout`] if the transport handshake fails.
+    /// - Returns [`Error::Authentication`] if authentication is rejected.
+    /// - Returns [`Error::Server`] or [`Error::Internal`] if the database creation or attach SQL fails.
     pub fn build(self) -> Result<Connection> {
         let transport_type = detect_transport_type(&self.endpoint);
 

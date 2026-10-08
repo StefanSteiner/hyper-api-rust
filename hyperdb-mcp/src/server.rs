@@ -332,15 +332,13 @@ pub struct LoadFilesEntry {
     pub table: String,
     /// Absolute path to a CSV, Parquet, Arrow IPC, or JSON file.
     pub path: String,
-    /// `"replace"` (default), `"append"`, or `"merge"` — see
-    /// [`LoadFileParams::mode`] for semantics.
+    /// `"replace"` (default) or `"append"`; `"merge"` is rejected.
     pub mode: Option<String>,
     /// Partial schema override keyed by column name.
     pub schema: Option<Value>,
     /// Optional JSON extract path — see `LoadFileParams::json_extract_path`.
     pub json_extract_path: Option<String>,
-    /// When `mode = "merge"`, the column(s) to match on for upsert. See
-    /// [`LoadFileParams::merge_key`].
+    /// Rejected if set: `load_files` does not support merge.
     pub merge_key: Option<MergeKey>,
 }
 
@@ -353,7 +351,7 @@ pub struct LoadFilesParams {
     pub files: Vec<LoadFilesEntry>,
     /// Maximum number of concurrent ingest tasks. Each task checks out
     /// its own connection from a pool sized to match. Default:
-    /// `min(files.len(), 8)`. Large parquet ingests are I/O-bound on
+    /// `min(files.len(), 8)`; capped at 16. Large parquet ingests are I/O-bound on
     /// hyperd's side; more connections don't help past a certain point
     /// and can starve the primary connection.
     pub concurrency: Option<u32>,
@@ -515,11 +513,11 @@ pub struct ChartParams {
     pub title: Option<String>,
     /// Output format: "png" (default) or "svg"
     pub format: Option<String>,
-    /// Width in pixels (default 800)
+    /// Width in pixels (default 800, clamped to 200-4096)
     pub width: Option<u32>,
-    /// Height in pixels (default 480)
+    /// Height in pixels (default 480, clamped to 150-4096)
     pub height: Option<u32>,
-    /// Number of bins for histograms (default 20)
+    /// Number of bins for histograms (default 20, max 500)
     pub bins: Option<u32>,
     /// Force the x column to evenly spaced categorical positions. By default,
     /// line/scatter DATE, TIMESTAMP, and TIMESTAMPTZ values use proportional
@@ -1149,10 +1147,9 @@ impl HyperMcpServer {
             watchers: Arc::new(crate::watcher::WatcherRegistry::new()),
             saved_queries,
             subscriptions: Arc::new(SubscriptionRegistry::new()),
-            // The catalog policy is now uniform: seed `_table_catalog`
-            // whenever MCP creates a fresh `.hyper` file. The opt-out
-            // `--bare` path was removed; users wanting a pristine file
-            // can `DROP TABLE _table_catalog` after creation.
+            // `_table_catalog` is seeded whenever MCP creates a fresh
+            // `.hyper` file; users wanting a pristine file can
+            // `DROP TABLE _table_catalog` after creation.
             attachments: Arc::new(AttachRegistry::new()),
             workspace_path: persistent_path,
             read_only,
@@ -1522,8 +1519,7 @@ impl HyperMcpServer {
     }
 
     /// Idempotently create and reconcile `_table_catalog` on first call
-    /// per engine. No-op in bare or read-only mode (read-only can't
-    /// mutate; bare callers never wanted the catalog in the first place).
+    /// per engine. No-op in read-only mode, which cannot mutate.
     ///
     /// Catalog failures during bootstrap are logged at WARN but do not
     /// fail the outer tool call — a broken catalog should never block a
@@ -1644,7 +1640,7 @@ impl HyperMcpServer {
             // Bootstrap the catalog exactly once per engine. Intentionally
             // runs *inside* `with_engine` (not `ensure_engine`) so the
             // catalog SQL can see errors classified via the normal error
-            // path. No-op in bare or read-only mode.
+            // path. No-op in read-only mode.
             self.ensure_catalog_ready(engine);
             let result = f(engine);
             let connection_lost = result
@@ -2282,7 +2278,7 @@ impl HyperMcpServer {
                 return Self::err_content(McpError::new(
                     ErrorCode::InvalidArgument,
                     format!(
-                        "load_files does not support mode=merge yet (entry {idx}, table \
+                        "load_files does not support mode=merge (entry {idx}, table \
                          '{}'). Call load_file once per file when you need merge semantics.",
                         entry.table
                     ),
@@ -2803,9 +2799,8 @@ impl HyperMcpServer {
             let (per_statement, affected_total, operation): (Vec<Value>, u64, &'static str) =
                 engine.with_search_path(target_db.as_deref(), |engine| {
                 if params.sql.len() == 1 {
-                    // Singletons skip BEGIN/COMMIT — same auto-commit behavior
-                    // as the pre-batch `execute` tool, and DDL singletons stay
-                    // legal (Hyper auto-commits DDL anyway).
+                    // Singletons skip BEGIN/COMMIT and run in auto-commit mode,
+                    // so DDL singletons stay legal (Hyper auto-commits DDL anyway).
                     let stmt = &params.sql[0];
                     let t = crate::stats::StatsTimer::start();
                     let affected = engine.execute_command(stmt)?;
@@ -2996,8 +2991,8 @@ impl HyperMcpServer {
                 x_measure_column,
             )?;
 
-            // Parse color_map: skip entries whose hex string is malformed,
-            // logging them via the description rather than hard-failing.
+            // Parse color_map: entries whose hex string is malformed are
+            // silently dropped and fall back to the default palette.
             let color_map = params
                 .color_map
                 .as_ref()
@@ -3214,12 +3209,14 @@ impl HyperMcpServer {
         }
     }
 
-    /// Dry-run schema inference on a file (CSV, Parquet, Arrow IPC) without
-    /// ingesting it. Returns the inferred schema plus per-column diagnostics
-    /// (`null_count`, `min`, `max`, `sample_values`) so an LLM can construct
-    /// a safer `schema` override for `load_file` / `load_data`.
+    /// Dry-run schema inference on a CSV, JSON, JSONL, Parquet, or Arrow IPC file.
+    ///
+    /// Nothing is ingested. Returns the inferred schema plus per-column
+    /// diagnostics (`null_count`, `sample_values`, and CSV-only `min` / `max`)
+    /// so an LLM can construct a safer `schema` override for `load_file` /
+    /// `load_data`.
     #[tool(
-        description = "Dry-run schema inference on a CSV / Parquet / Arrow IPC file without ingesting. Returns the schema load_file would use (including the full-file numeric widening pass), plus per-column null_count, min, max, and sample_values. Use this BEFORE load_file if you are unsure about types or ran into a SchemaMismatch / numeric overflow — then pass an explicit `schema` override on the subsequent load_file call. Use `json_extract_path` to inspect a nested data array inside a JSON wrapper file (e.g., MCP tool responses saved to disk)."
+        description = "Dry-run schema inference on a CSV / JSON / JSONL / Parquet / Arrow IPC file without ingesting. Returns the schema load_file would use (including the full-file numeric widening pass), plus per-column null_count and sample_values (CSV/JSON) and min/max (CSV only). Use this BEFORE load_file if you are unsure about types or ran into a SchemaMismatch / numeric overflow — then pass an explicit `schema` override on the subsequent load_file call. Use `json_extract_path` to inspect a nested data array inside a JSON wrapper file (e.g., MCP tool responses saved to disk)."
     )]
     #[expect(
         clippy::unused_self,
@@ -3253,7 +3250,7 @@ impl HyperMcpServer {
     /// Export query results or a table to CSV, Parquet, Arrow IPC,
     /// Apache Iceberg, or a new `.hyper` file.
     #[tool(
-        description = "Export a query result or table to a file via hyperd's native server-side writers; every format round-trips back through `load_file` / `load_iceberg`. `format`: parquet (recommended default) / csv / arrow_ipc / iceberg / hyper. Requires `sql` or `table` — except `iceberg` and `hyper`, and `hyper` ignores both and snapshots every user table into a `.hyper` file openable in Tableau Desktop (a faithful backup; check `schema_fidelity` in the response). `path` is a single file except `iceberg`, which is a directory hyperd creates. `format_options` passes through to hyperd's `COPY ... WITH (...)` (e.g. parquet `codec`, csv `delimiter`). `database` selects the source. See get_readme for per-format tradeoffs."
+        description = "Export a query result or table to a file via hyperd's native server-side writers; every format round-trips back through `load_file` / `load_iceberg`. `format`: parquet (recommended default) / csv / arrow_ipc / iceberg / hyper. Requires `sql` or `table` — except `hyper`, which ignores both and snapshots every user table into a `.hyper` file openable in Tableau Desktop (a faithful backup; check `schema_fidelity` in the response). `path` is a single file except `iceberg`, which is a directory hyperd creates. `format_options` passes through to hyperd's `COPY ... WITH (...)` (e.g. parquet `codec`, csv `delimiter`). `database` selects the source. See get_readme for per-format tradeoffs."
     )]
     fn export(
         &self,
@@ -3375,10 +3372,9 @@ impl HyperMcpServer {
         if let Err(e) = self.check_writable("save_query") {
             return Self::err_content(e);
         }
-        // Enforce read-only SQL at save time. This is belt-and-braces: the
-        // result resource runs via `execute_query_to_json` which would
-        // reject DDL/DML anyway, but rejecting here produces a clearer
-        // error and prevents the row landing in the meta-table at all.
+        // Enforce read-only SQL at save time. This is the only guard: the
+        // result resource re-runs the stored SQL verbatim via
+        // `execute_query_to_json`, which does not classify statements.
         if !is_read_only_sql(&params.sql) {
             return Self::err_content(McpError::new(
                 ErrorCode::SqlError,
@@ -3920,11 +3916,11 @@ impl HyperMcpServer {
     )]
     #[expect(
         clippy::unused_self,
-        reason = "the #[tool] macro dispatches on &self; signature must match the rest of the tool surface even though this tool is stateless"
+        reason = "kept as a &self method for a uniform tool surface; this tool is stateless"
     )]
     #[expect(
         clippy::unnecessary_wraps,
-        reason = "uniform Result<CallToolResult, rmcp::ErrorData> across all tools so the #[tool_router] dispatcher has one signature shape"
+        reason = "uniform Result<CallToolResult, rmcp::ErrorData> return type across all tools"
     )]
     fn get_readme(&self) -> Result<CallToolResult, rmcp::ErrorData> {
         Ok(CallToolResult::success(vec![ContentBlock::text(
@@ -4027,8 +4023,8 @@ impl HyperMcpServer {
         // Reject if any active watcher targets this alias. Otherwise the
         // watcher's pool would keep ingesting into the now-detached
         // workspace path; or, if the user re-attached the same alias to
-        // a different file, into the wrong database. Fixed by stopping
-        // the watcher first via `unwatch_directory`.
+        // a different file, into the wrong database. The caller must stop
+        // the watcher with `unwatch_directory` first.
         if let Ok(watchers) = self.watchers.watchers.lock() {
             let conflict = watchers
                 .values()
@@ -4064,15 +4060,9 @@ impl HyperMcpServer {
         }
     }
 
-    /// List currently attached databases.
+    /// List currently attached databases with a best-effort visible-table count.
     ///
-    /// Named `list_attached_databases` (not `list_attached`) so it
-    /// sits alongside `attach_database` / `detach_database` as a
-    /// symmetric verb-database trio. The earlier `list_attached`
-    /// name broke the pattern and consistently misled LLM callers
-    /// into hallucinating `list_attached_databases` anyway, so the
-    /// tool now matches the name the models were already reaching
-    /// for.
+    /// Named to pair with `attach_database` / `detach_database`.
     #[tool(
         description = "List every database currently attached under an alias: kind, path/endpoint, writable flag, attach time, and (best-effort) a count of visible public-schema tables."
     )]
@@ -4227,7 +4217,7 @@ impl HyperMcpServer {
             // stub and the data it describes can't diverge — a new
             // engine might not even have the catalog materialized yet.
             // Skipped when the destination is an attached database
-            // (their catalog isn't ours) or when the server is bare /
+            // (their catalog isn't ours) or when the server is
             // read-only. `after_ingest_catalog_update` logs WARN on
             // failure, matching how `load_file` / `load_data` /
             // `execute` register their provenance.
