@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The installer now validates the release `version` before using it as a
+  directory name.** A version such as `../victim` made the install step
+  `remove_dir_all` a path outside the install root. A version containing
+  anything other than ASCII alphanumerics, `.`, `-`, `_` or `+` (or equal to
+  `.` / `..`) is rejected with the new `Error::InvalidVersion` variant.
+
 ## [1.0.0-rc.3] - 2026-09-07
 
 Entries accumulated under `[Unreleased]` from 0.1.1 until this section was
