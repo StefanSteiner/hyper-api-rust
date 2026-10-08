@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`Date`, `Timestamp` and `OffsetTimestamp` query parameters were bound with
+  the wrong epoch.** `ToSqlParam::encode_param` sent absolute Julian-based
+  values, but Hyper's binary `Bind` expects PostgreSQL-epoch values (days /
+  microseconds since 2000-01-01) and applies the Julian offset itself, so a
+  bound `2024-01-15` came back as `8736-02-22`. The parameters now send
+  PG-epoch values. The `Inserter` (HyperBinary COPY) path was unaffected.
+- **`Inserter::add_numeric` and `AsyncInserter::add_numeric` ignored the
+  value's own scale.** The unscaled integer was written as-is, so
+  `Numeric::new(12345, 1)` (1234.5) inserted into a `NUMERIC(10, 2)` column was
+  stored as `123.45` — a silent 10× magnitude error. The value is now rescaled
+  to the column's declared scale; a value that would lose non-zero digits or
+  overflow is rejected with `Error::Conversion` instead of being stored wrong.
+
 ## [1.0.0-rc.4] - 2026-09-08
 
 ### Fixed
