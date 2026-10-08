@@ -10,7 +10,10 @@
   "files": [
     "hyperdb-mcp",
     "hyperd",
-    "LICENSE-HYPERD"
+    "LICENSE-HYPERD",
+    "LICENSE-MIT.txt",
+    "LICENSE-APACHE.txt",
+    "NOTICE"
   ],
   "license": "MIT OR Apache-2.0",
   "engines": {

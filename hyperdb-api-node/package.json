@@ -50,7 +50,10 @@
     "index.js",
     "index.d.ts",
     "arrow.mjs",
-    "pool.mjs"
+    "pool.mjs",
+    "LICENSE-MIT.txt",
+    "LICENSE-APACHE.txt",
+    "NOTICE"
   ],
   "peerDependencies": {
     "apache-arrow": ">=14.0.0"
