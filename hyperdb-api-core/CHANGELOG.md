@@ -13,7 +13,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **`client::grpc::TransferMode` is now a crate-owned enum** (`Sync`, `Async`,
+  `Adaptive`) with `From` conversions to the generated protobuf type, replacing
+  the re-export of the prost type. `GrpcColumnInfo`'s `name` and `sql_type`
+  fields are now `pub(crate)`; use the accessors.
+
 ### Fixed
+
+- **A cancelled COPY write could wedge the async connection.** Dropping a COPY
+  write future mid-frame left a partial `CopyData` frame on the wire, so the
+  queued `CopyFail` was read as part of that frame and
+  `drain_pending_copy_cancel` waited forever for `ReadyForQuery`.
+  `AsyncRawConnection` now tracks an in-flight write: after an interrupted
+  write the connection reports unhealthy, no `CopyFail` is queued, and
+  `finish_copy` / `cancel_copy` refuse to run on it. The post-cancel drain is
+  also bounded and marks the connection desynchronized instead of looping.
 
 - **`Interval` `Display` kept the sign only when the time component was an hour
   or more.** A negative interval under one hour (for example −30 minutes)

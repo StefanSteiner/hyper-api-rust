@@ -72,11 +72,11 @@ review; point to them when requesting changes.
 ### API design
 
 - **M-WEASEL-WORDS.** Avoid weasel words (`Service`, `Manager`, `Factory`,
-  `Helper`). Prefer names that describe what the type *is* or *does*. One
-  legitimate exception in this repo: `ConnectionManager` in
-  [hyperdb-api/src/pool.rs](../hyperdb-api/src/pool.rs), which matches
-  `deadpool::Manager` trait nomenclature. Upstream also rules out accepting
-  builders as parameters: where repeatable instantiation is needed, take
+  `Helper`). Prefer names that describe what the type *is* or *does*. The
+  crate-private `ConnectionManager` in
+  [hyperdb-api/src/pool.rs](../hyperdb-api/src/pool.rs) is the one place the
+  word appears; it implements `deadpool::Manager` and is not public API.
+  Upstream also rules out accepting builders as parameters: where repeatable instantiation is needed, take
   `impl Fn() -> Foo` rather than a `FooBuilder`.
 - **M-SHORT-NAMES.** At most two short words per identifier (`AppConfig`, not
   `GlobalApplicationConfig`); no crate or module prefix baked into the name

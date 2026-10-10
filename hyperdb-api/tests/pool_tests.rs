@@ -139,9 +139,10 @@ async fn async_pool_status_and_take() {
 }
 
 /// A closed pool refuses checkouts with a `hyperdb_api::Error`, not a
-/// deadpool error type.
+/// deadpool error type. It is `InvalidOperation` (retrying cannot succeed),
+/// not `Connection` (which callers treat as transient).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn async_pool_get_after_close_is_connection_error() {
+async fn async_pool_get_after_close_is_invalid_operation() {
     let (_hyper, endpoint) = fresh_server("pool_async_closed").unwrap();
     let config = PoolConfig::new(&endpoint, db_path("pool_async_closed"))
         .create_mode(CreateMode::CreateAndReplace)
@@ -156,8 +157,8 @@ async fn async_pool_get_after_close_is_connection_error() {
         .await
         .expect_err("closed pool must refuse checkout");
     assert!(
-        matches!(err, hyperdb_api::Error::Connection { .. }),
-        "expected Error::Connection, got {err:?}"
+        matches!(err, hyperdb_api::Error::InvalidOperation(_)),
+        "expected Error::InvalidOperation, got {err:?}"
     );
 }
 
@@ -168,7 +169,10 @@ async fn async_pool_get_surfaces_connect_error() {
     // Nothing listens on port 1; the first checkout has to open a connection.
     let config = PoolConfig::new("127.0.0.1:1", db_path("pool_async_connect_err"))
         .create_mode(CreateMode::CreateAndReplace)
-        .max_size(1);
+        .max_size(1)
+        // Guard only: refusal is immediate on Linux and macOS, but a
+        // filtering firewall or Windows' SYN retries would otherwise stall.
+        .create_timeout(Some(Duration::from_secs(30)));
     let pool = create_pool(config).unwrap();
 
     let err = pool.get().await.expect_err("nothing is listening");
@@ -176,6 +180,27 @@ async fn async_pool_get_surfaces_connect_error() {
         matches!(err, hyperdb_api::Error::Connection { .. }),
         "expected Error::Connection, got {err:?}"
     );
+}
+
+/// A `create_timeout` that elapses is `Error::Timeout`. The listener accepts
+/// the TCP connection (the kernel does, via the backlog) but never answers
+/// the startup message, so the connect hangs until the timeout fires.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn async_pool_create_timeout_is_timeout_error() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let config = PoolConfig::new(addr.to_string(), db_path("pool_async_create_timeout"))
+        .create_mode(CreateMode::CreateAndReplace)
+        .max_size(1)
+        .create_timeout(Some(Duration::from_millis(300)));
+    let pool = create_pool(config).unwrap();
+
+    let err = pool.get().await.expect_err("the server never answers");
+    assert!(
+        matches!(err, hyperdb_api::Error::Timeout(_)),
+        "expected Error::Timeout, got {err:?}"
+    );
+    drop(listener);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

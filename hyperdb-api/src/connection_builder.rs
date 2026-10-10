@@ -62,7 +62,7 @@ pub struct ConnectionBuilder {
     /// Application name sent to the server during connection startup.
     application_name: Option<String>,
     /// Transfer mode for gRPC connections (ignored for TCP)
-    transfer_mode: Option<hyperdb_api_core::client::grpc::TransferMode>,
+    transfer_mode: Option<crate::grpc::TransferMode>,
 }
 
 impl Default for ConnectionBuilder {
@@ -229,7 +229,7 @@ impl ConnectionBuilder {
     /// }
     /// ```
     #[must_use]
-    pub fn transfer_mode(mut self, mode: hyperdb_api_core::client::grpc::TransferMode) -> Self {
+    pub fn transfer_mode(mut self, mode: crate::grpc::TransferMode) -> Self {
         self.transfer_mode = Some(mode);
         self
     }

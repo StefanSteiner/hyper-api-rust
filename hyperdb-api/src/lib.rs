@@ -114,7 +114,7 @@
 //! # Public Modules
 //!
 //! - [`copy`] — CSV/text export and import via COPY protocol
-//! - [`pool`] — Async connection pooling (deadpool-based)
+//! - [`pool`] — Async connection pooling
 //! - [`grpc`] — gRPC transport types for Arrow IPC queries
 //!
 //! # Bulk Data Loading

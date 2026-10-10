@@ -368,5 +368,5 @@ fn print_best_practices() {
     println!("   Once data is retrieved, process it with async code (HTTP, file I/O).\n");
 
     println!("7. Consider connection pooling for high load");
-    println!("   See the connection_pool example for deadpool integration.\n");
+    println!("   See the connection_pool example for async connection pooling.\n");
 }

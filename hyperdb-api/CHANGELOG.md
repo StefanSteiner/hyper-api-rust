@@ -33,19 +33,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `pool::Pool` and `pool::PooledConnection` were aliases of
   `deadpool::managed::Pool` / `Object`; they are now `hyperdb-api` types, and
   `pool::ConnectionManager` is crate-private. `Pool::get` returns
-  `hyperdb_api::Result<PooledConnection>` — a wait/create/recycle timeout is
-  `Error::Timeout`, a closed pool is `Error::Connection`, and a failed connect
-  is the underlying error — so the `.map_err(|e| Error::internal(e.to_string()))`
-  adapter is no longer needed. `Pool::status` returns `PoolStatus` (as
-  `ConnectionPool` does), and `PooledConnection::take` frees the slot. The
-  `deadpool` version is no longer part of this crate's semver surface.
+  `hyperdb_api::Result<PooledConnection>` — a wait or create timeout is
+  `Error::Timeout`, a closed pool is `Error::InvalidOperation`, and a failed
+  connect is the underlying error — so the
+  `.map_err(|e| Error::internal(e.to_string()))` adapter is no longer needed.
+  A connection that fails its recycle check (or whose recycle times out) is
+  discarded and replaced, never reported to the caller. `Pool::status` returns
+  `PoolStatus` (as `ConnectionPool` does), and `PooledConnection::take` frees
+  the slot. The `deadpool` version is no longer part of this crate's semver
+  surface. The deadpool-only API is gone with it: `Pool::resize`, `retain`,
+  `timeout_get`, `manager` and `weak`, `status().waiting`, and
+  `Object::id`, `metrics`, `AsRef` and `AsMut`.
+- **BREAKING: `hyperdb_api::grpc::TransferMode` is now a `hyperdb-api-core`
+  enum (`Sync`, `Async`, `Adaptive`)** instead of the prost-generated type, so
+  no protobuf type appears in `GrpcConfig::transfer_mode` or
+  `ConnectionBuilder::transfer_mode`. `Adaptive` stays the default; the
+  protocol's `Unspecified` value is no longer constructible.
+- **BREAKING: `GrpcColumnInfo` no longer has public fields.** Use
+  `GrpcColumnInfo::name()` and `type_name()`.
+- **`HyperProcess` makes a caller-supplied `domain_socket_directory`
+  absolute.** A relative directory produced an endpoint string such as
+  `rs-123/hyper` that `Connection::new` could not resolve; the endpoint now
+  always starts with `/` on Unix.
 
 ### Added
 
 - **`AsyncConnection::copy_in_hyperbinary`** streams a pre-encoded
   `HyperBinary` buffer (for example from `InsertChunk`) into a table with
   `COPY ... FROM STDIN`, slicing it under `hyperd`'s COPY packet cap, and
-  returns the inserted row count.
+  returns the inserted row count. The buffer must start with exactly one
+  HyperBinary header (the first `InsertChunk::take()` of a fresh or cleared
+  chunk); a headerless buffer is rejected with `Error::InvalidOperation`. The
+  future is not cancel-safe: dropping it mid-write leaves the connection
+  reporting unhealthy, so a pool evicts it on the next checkout.
 - **`HyperProcess::connection_endpoint_string`**, and `Pool::close` /
   `Pool::is_closed` on the async pool.
 

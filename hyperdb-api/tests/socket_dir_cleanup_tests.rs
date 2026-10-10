@@ -47,3 +47,41 @@ fn default_socket_dir_is_removed_on_drop() {
     };
     assert!(!dir.exists(), "default socket dir should be cleaned up");
 }
+
+/// `connection_endpoint_string` must be connectable even when the caller gave
+/// a relative socket directory: a relative path would be taken for a TCP host
+/// by `Connection::new`, so the directory is made absolute up front.
+#[test]
+fn relative_socket_directory_yields_connectable_endpoint_string() {
+    let rel = std::path::PathBuf::from(format!("rs-{}", std::process::id()));
+    std::fs::create_dir_all(&rel).expect("create relative dir");
+
+    /// Removes the test's leftovers even when an assertion panics.
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+            let _ = std::fs::remove_file("rel_socket.hyper");
+        }
+    }
+    let _cleanup = Cleanup(rel.clone());
+
+    let mut params = Parameters::new();
+    params.set_transport_mode(TransportMode::Ipc);
+    params.set_domain_socket_directory(&rel);
+    let hyper = HyperProcess::new(None, Some(&params)).expect("start hyperd over IPC");
+    let endpoint = hyper
+        .connection_endpoint_string()
+        .expect("IPC process has an endpoint");
+    assert!(
+        endpoint.starts_with('/'),
+        "endpoint must be absolute so it is routed to the Unix socket: {endpoint}"
+    );
+    let conn = hyperdb_api::Connection::new(
+        &hyper,
+        "rel_socket.hyper",
+        hyperdb_api::CreateMode::CreateAndReplace,
+    )
+    .expect("connect over the relative-dir socket");
+    conn.execute_command("SELECT 1").expect("query");
+}

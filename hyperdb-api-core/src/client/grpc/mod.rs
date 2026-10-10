@@ -126,7 +126,7 @@ pub use result::{GrpcColumnInfo, GrpcQueryResult, GrpcResultChunk};
 pub use authenticated_client::{AuthenticatedGrpcClient, AuthenticatedGrpcClientSync, TableInfo};
 
 // Re-export transfer mode for users who want to specify it
-pub use proto::hyper_service::query_param::TransferMode;
+pub use config::TransferMode;
 
 // Re-export output format for advanced users
 pub use proto::hyper_service::OutputFormat;

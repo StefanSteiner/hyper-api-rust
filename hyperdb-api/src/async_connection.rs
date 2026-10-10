@@ -1119,20 +1119,37 @@ impl AsyncConnection {
 
     /// Streams a pre-encoded `HyperBinary` buffer into `table` with `COPY ... FROM STDIN`.
     ///
-    /// `data` must hold rows in the `HyperBinary` format for the table's columns,
-    /// in definition order — for example the output of
-    /// [`InsertChunk`](crate::InsertChunk). The buffer is sent in 64 MiB slices
-    /// because `hyperd` rejects COPY packets above ~150 MB. Returns the number of
-    /// rows the server reports as inserted; an empty buffer inserts nothing and
-    /// returns `0`.
+    /// `data` must be one complete `HyperBinary` stream for the table's
+    /// columns, in definition order: exactly one `HyperBinary` header followed
+    /// by the rows. That is the buffer from the **first**
+    /// [`InsertChunk::take`](crate::InsertChunk::take) of a fresh (or
+    /// [`clear`](crate::InsertChunk::clear)ed) chunk. Later `take()` calls on
+    /// the same chunk return rows without a header, and two buffers
+    /// concatenated carry two headers; both are rejected. The buffer is sent
+    /// in 64 MiB slices because `hyperd` rejects COPY packets above ~150 MB.
+    /// Returns the number of rows the server reports as inserted; an empty
+    /// buffer inserts nothing and returns `0`.
     ///
     /// Most callers want [`AsyncInserter`](crate::AsyncInserter), which encodes
     /// rows for you. Use this when the bytes are already encoded.
+    ///
+    /// # Cancel safety
+    ///
+    /// Not cancel-safe. Dropping the returned future before it resolves (for
+    /// example through `tokio::time::timeout` or `select!`) can leave a
+    /// partial message on the wire. The connection then reports itself
+    /// unhealthy and every later call on it fails with
+    /// [`Error::Connection`]; discard it and open a new one. A pooled
+    /// connection in that state is evicted by the default
+    /// [`RecycleStrategy::SelectOne`](crate::pool::RecycleStrategy::SelectOne)
+    /// probe the next time it is checked out.
     ///
     /// # Errors
     ///
     /// - Returns [`Error::feature_not_supported`] on a gRPC connection, which
     ///   cannot run COPY.
+    /// - Returns [`Error::invalid_operation`] if `data` does not start with a
+    ///   `HyperBinary` header.
     /// - Returns an error if the server rejects the COPY or the connection
     ///   fails while sending.
     pub async fn copy_in_hyperbinary(&self, table: &TableDefinition, data: &[u8]) -> Result<u64> {
@@ -1148,12 +1165,16 @@ impl AsyncConnection {
                  gRPC connections do not support COPY operations.",
             )
         })?;
+        if !data.starts_with(hyperdb_api_core::protocol::copy::HYPER_BINARY_HEADER) {
+            return Err(Error::invalid_operation(
+                "copy_in_hyperbinary: data must start with a HyperBinary header \
+                 (use the first InsertChunk::take() of a fresh chunk)",
+            ));
+        }
         let columns: Vec<&str> = table.columns.iter().map(|c| c.name.as_str()).collect();
         let table_name = table.qualified_name();
 
-        let mut writer = client
-            .copy_in_arc_with_format(&table_name, &columns, "HYPERBINARY")
-            .await?;
+        let mut writer = client.copy_in(&table_name, &columns).await?;
         for slice in data.chunks(MAX_COPY_CHUNK) {
             writer.send_direct(slice).await?;
             writer.flush_stream().await?;

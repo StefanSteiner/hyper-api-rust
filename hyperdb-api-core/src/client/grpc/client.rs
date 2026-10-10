@@ -14,10 +14,10 @@ use tracing::{debug, info, warn};
 use crate::client::error::{Error, Result};
 
 use super::config::GrpcConfig;
+use super::config::TransferMode;
 use super::error::from_grpc_status;
 use super::executor::{GrpcChunkStream, GrpcQueryExecutor};
 use super::params::{ParameterStyle, QueryParameters};
-use super::proto::hyper_service::query_param::TransferMode;
 use super::proto::{
     AttachedDatabase, CancelQueryParam, HyperServiceClient, OutputFormat, QueryParam,
 };
@@ -555,7 +555,7 @@ impl GrpcClient {
     /// # When do you have a `query_id`?
     ///
     /// The server assigns a `query_id` for queries started in
-    /// [`TransferMode::Async`](super::proto::hyper_service::query_param::TransferMode)
+    /// [`TransferMode::Async`]
     /// (long-running queries that the client polls). Grab it from
     /// [`GrpcQueryResult::query_id`](super::result::GrpcQueryResult::query_id)
     /// after `execute_query_with_options(..., TransferMode::Async)` returns.

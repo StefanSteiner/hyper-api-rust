@@ -56,7 +56,7 @@ executable, obtained with `make download-hyperd`. See
 - **Dual Architecture** — sync (`Connection`) and async (`AsyncConnection`) APIs
 - **Typed Row Mapping** — `#[derive(FromRow)]` structs, including streaming `stream_as` for constant-memory typed queries
 - **Compile-time SQL Validation** — opt-in `query_as!` macro checks SQL against your schema at build time (red squigglies in VS Code)
-- **Connection Pooling** — async pooling via `deadpool` for high-concurrency applications
+- **Connection Pooling** — async connection pooling for high-concurrency applications
 - **Key-Value Store** — string-native `KvStore` / `AsyncKvStore` backed by a single fixed table
 - **Arrow Integration** — insert and read data in Arrow IPC stream format
 - **gRPC Transport** — read-only access with Arrow IPC and load balancing support
@@ -261,7 +261,7 @@ The API ships 14 examples in `hyperdb-api/examples/` plus 2 companion crate exam
 | `async_usage` | `AsyncConnection` and Tokio patterns |
 | `threaded_inserter` | Multi-threaded bulk insertion with `InsertChunk`/`ChunkSender` |
 | `grpc_query` | gRPC transport, Arrow IPC results |
-| `connection_pool` | Async connection pooling with deadpool |
+| `connection_pool` | Async connection pooling |
 | `transactions` | RAII guards, multi-table rollback, DDL, reconnect semantics |
 
 ### Running Examples

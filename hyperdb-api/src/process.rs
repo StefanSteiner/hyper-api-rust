@@ -428,7 +428,13 @@ impl HyperProcess {
                 let (dir, owned) = if let Some(custom_dir) =
                     parameters.and_then(|p| p.domain_socket_directory.as_ref())
                 {
-                    (custom_dir.clone(), false)
+                    // Absolutized: the directory is rendered into the endpoint
+                    // string, and a relative path would be taken for a TCP
+                    // host when handed back to `Connection::new`.
+                    (
+                        std::path::absolute(custom_dir).unwrap_or_else(|_| custom_dir.clone()),
+                        false,
+                    )
                 } else {
                     // Create a temp directory for the socket. The basename carries a
                     // per-process monotonic suffix (`hyper-<pid>-<seq>`) so two

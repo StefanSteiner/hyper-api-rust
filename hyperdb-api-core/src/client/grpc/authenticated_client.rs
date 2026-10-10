@@ -37,10 +37,10 @@ use std::collections::HashMap;
 use crate::client::error::{Error, Result};
 use hyperdb_api_salesforce::{DataCloudToken, SharedTokenProvider};
 
+use super::config::TransferMode;
 use super::error::from_grpc_status;
 use super::executor::GrpcQueryExecutor;
 use super::params::{ParameterStyle, QueryParameters};
-use super::proto::hyper_service::query_param::TransferMode;
 use super::proto::{
     AttachedDatabase, CancelQueryParam, HyperServiceClient, OutputFormat, QueryParam,
 };

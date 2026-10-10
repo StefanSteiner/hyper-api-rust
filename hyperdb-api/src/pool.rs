@@ -251,7 +251,7 @@ pub struct PoolConfig {
     /// [`RecycleStrategy::SelectOne`].
     pub recycle: RecycleStrategy,
     /// Maximum time to wait for a slot to become available on
-    /// [`get`](managed::Pool::get). `None` waits indefinitely (the default).
+    /// [`get`](Pool::get). `None` waits indefinitely (the default).
     pub wait_timeout: Option<Duration>,
     /// Maximum time to wait for a new connection to be created. `None` disables
     /// the cap (the default).
@@ -615,18 +615,23 @@ impl Pool {
     ///
     /// # Errors
     ///
-    /// - Returns [`Error::Timeout`] if `wait_timeout`, `create_timeout` or
-    ///   `recycle_timeout` elapses.
-    /// - Returns [`Error::Connection`] if the pool has been [closed](Self::close).
+    /// - Returns [`Error::Timeout`] if `wait_timeout` or `create_timeout`
+    ///   elapses.
+    /// - Returns [`Error::InvalidOperation`] if the pool has been
+    ///   [closed](Self::close). Retrying cannot succeed.
     /// - Returns the underlying error if opening a connection fails or an
     ///   `after_connect` hook rejects it.
+    ///
+    /// A connection that fails, or exceeds `recycle_timeout`, during its
+    /// recycle probe is not reported: the pool discards it and hands out
+    /// another one (opening a new connection if needed).
     pub async fn get(&self) -> Result<PooledConnection> {
         match self.inner.get().await {
             Ok(inner) => Ok(PooledConnection { inner }),
             Err(managed::PoolError::Backend(e)) => Err(e),
             Err(e @ managed::PoolError::Timeout(_)) => Err(Error::timeout(e.to_string())),
             Err(managed::PoolError::Closed) => {
-                Err(Error::connection("the connection pool is closed"))
+                Err(Error::invalid_operation("the connection pool is closed"))
             }
             Err(e) => Err(Error::internal(e.to_string())),
         }
@@ -1214,14 +1219,20 @@ impl ConnectionPool {
     }
 }
 
-/// A snapshot of [`ConnectionPool`] occupancy.
+/// A snapshot of pool occupancy, returned by [`ConnectionPool::status`] and
+/// [`Pool::status`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PoolStatus {
     /// Number of idle connections currently available.
+    ///
+    /// For the async [`Pool`] this is the number of idle connections not
+    /// already claimed by a task blocked in [`get`](Pool::get), so it can read
+    /// lower than the number physically idle while callers are waiting.
     pub idle: usize,
     /// Total live connections (idle + checked out).
     pub size: usize,
-    /// Configured maximum pool size.
+    /// Configured maximum pool size. The async [`Pool`] reports `0` once it
+    /// has been [closed](Pool::close).
     pub max_size: usize,
 }
 

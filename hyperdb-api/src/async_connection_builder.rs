@@ -51,7 +51,7 @@ pub struct AsyncConnectionBuilder {
     login_timeout: Option<Duration>,
     query_timeout: Option<Duration>,
     application_name: Option<String>,
-    transfer_mode: Option<hyperdb_api_core::client::grpc::TransferMode>,
+    transfer_mode: Option<crate::grpc::TransferMode>,
 }
 
 impl Default for AsyncConnectionBuilder {
@@ -173,7 +173,7 @@ impl AsyncConnectionBuilder {
 
     /// Sets the transfer mode for gRPC connections (ignored for TCP).
     #[must_use]
-    pub fn transfer_mode(mut self, mode: hyperdb_api_core::client::grpc::TransferMode) -> Self {
+    pub fn transfer_mode(mut self, mode: crate::grpc::TransferMode) -> Self {
         self.transfer_mode = Some(mode);
         self
     }
