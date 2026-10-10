@@ -74,7 +74,7 @@ impl AsyncConnection {
     ///
     /// # Errors
     ///
-    /// - Returns [`Error::Io`] / [`Error::Connection`] if the handshake with
+    /// - Returns [`Error::Connection`] if the handshake with
     ///   the server fails.
     /// - Returns [`Error::Server`] if the `CreateMode` SQL (`CREATE`
     ///   / `DROP` / `ATTACH`) is rejected by the server.
@@ -100,7 +100,7 @@ impl AsyncConnection {
     /// # Errors
     ///
     /// - Returns [`Error::Authentication`] if authentication is rejected.
-    /// - Returns [`Error::Io`] if the endpoint cannot be reached.
+    /// - Returns [`Error::Connection`] if the endpoint cannot be reached.
     /// - Returns [`Error::Server`] if the `CreateMode` SQL is rejected.
     pub async fn connect_with_auth(
         endpoint: &str,
@@ -130,7 +130,7 @@ impl AsyncConnection {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Io`] or [`Error::Connection`] if the TCP handshake
+    /// Returns [`Error::Connection`] if the TCP handshake
     /// with `endpoint` fails.
     pub async fn without_database(endpoint: &str) -> Result<Self> {
         let transport = AsyncTransport::connect_tcp(endpoint).await?;
@@ -253,7 +253,7 @@ impl AsyncConnection {
     /// - Returns [`Error::FeatureNotSupported`] on gRPC transports that do not yet
     ///   support write operations.
     /// - Returns [`Error::Server`] if the SQL fails to parse or execute.
-    /// - Returns [`Error::Io`] on transport-level I/O failures.
+    /// - Returns [`Error::Connection`] on transport-level I/O failures.
     pub async fn execute_command(&self, sql: &str) -> Result<u64> {
         let token = self.stats_before_query(sql);
         let result = self.transport.execute_command(sql).await;
@@ -303,7 +303,7 @@ impl AsyncConnection {
     /// # Errors
     ///
     /// - Returns [`Error::Server`] if the SQL is rejected by the server.
-    /// - Returns [`Error::Io`] on transport-level I/O failures while
+    /// - Returns [`Error::Connection`] on transport-level I/O failures while
     ///   opening the stream.
     pub async fn execute_query(&self, query: &str) -> Result<AsyncRowset<'_>> {
         let token = self.stats_before_query(query);
@@ -722,7 +722,7 @@ impl AsyncConnection {
     ///   are TCP-only).
     /// - Returns [`Error::Server`] if the server rejects the statement at
     ///   `Parse`, `Bind`, or `Execute` time.
-    /// - Returns [`Error::Io`] on transport-level I/O failures.
+    /// - Returns [`Error::Connection`] on transport-level I/O failures.
     pub async fn query_params(
         &self,
         query: &str,
@@ -764,7 +764,7 @@ impl AsyncConnection {
     /// - Returns [`Error::FeatureNotSupported`] on gRPC transports.
     /// - Returns [`Error::Server`] if the server rejects the statement at
     ///   `Parse`, `Bind`, or `Execute` time.
-    /// - Returns [`Error::Io`] on transport-level I/O failures.
+    /// - Returns [`Error::Connection`] on transport-level I/O failures.
     pub async fn command_params(
         &self,
         query: &str,
@@ -1018,7 +1018,7 @@ impl AsyncConnection {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Server`] or [`Error::Io`] if the `SELECT 1`
+    /// Returns [`Error::Server`] or [`Error::Connection`] if the `SELECT 1`
     /// round-trip fails — i.e. the connection is no longer usable.
     pub async fn ping(&self) -> Result<()> {
         self.execute_command("SELECT 1").await?;
@@ -1072,7 +1072,7 @@ impl AsyncConnection {
     ///
     /// - Returns [`Error::FeatureNotSupported`] on gRPC transports — cancellation is not
     ///   yet implemented for gRPC.
-    /// - Returns [`Error::Connection`] or [`Error::Io`] if the cancel-request
+    /// - Returns [`Error::Connection`] if the cancel-request
     ///   connection to the server fails.
     pub async fn cancel(&self) -> Result<()> {
         self.transport.cancel().await
@@ -1217,7 +1217,7 @@ impl AsyncConnection {
     ///   are TCP-only).
     /// - Returns [`Error::Server`] if the server rejects the `Parse`
     ///   message (SQL syntax error, unknown OID).
-    /// - Returns [`Error::Io`] on transport-level I/O failures.
+    /// - Returns [`Error::Connection`] on transport-level I/O failures.
     pub async fn prepare_typed(
         &self,
         query: &str,
@@ -1260,7 +1260,7 @@ impl AsyncConnection {
     /// - Returns [`Error::FeatureNotSupported`] on gRPC transports.
     /// - Returns [`Error::Server`] if the server rejects the `Parse`
     ///   message.
-    /// - Returns [`Error::Io`] on transport-level I/O failures.
+    /// - Returns [`Error::Connection`] on transport-level I/O failures.
     pub async fn prepare_typed_arc(
         self: &Arc<Self>,
         query: &str,

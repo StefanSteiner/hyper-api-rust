@@ -387,7 +387,7 @@ pub trait ChunkSource: Send {
     ///
     /// Implementations return whatever transport error the underlying
     /// source produces (typically [`Error::Server`] from a gRPC stream or
-    /// [`Error::Io`] on network failures).
+    /// [`Error::Connection`] on network failures).
     fn next_chunk(&mut self) -> Result<Option<Bytes>>;
 }
 

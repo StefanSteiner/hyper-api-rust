@@ -392,8 +392,8 @@ impl Connection {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Connection`] if the TCP or gRPC handshake fails, and
-    /// [`Error::Io`] if the endpoint cannot be reached.
+    /// Returns [`Error::Connection`] if the TCP or gRPC handshake fails or the
+    /// endpoint cannot be reached.
     pub fn without_database(endpoint: &str) -> Result<Self> {
         crate::ConnectionBuilder::new(endpoint).build()
     }
@@ -1868,7 +1868,7 @@ impl Connection {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Server`] or [`Error::Io`] if the `SELECT 1`
+    /// Returns [`Error::Server`] or [`Error::Connection`] if the `SELECT 1`
     /// round-trip fails — i.e. the connection is no longer usable.
     pub fn ping(&self) -> Result<()> {
         self.execute_command("SELECT 1")?;
@@ -1951,7 +1951,7 @@ impl Connection {
     ///
     /// - Returns [`Error::FeatureNotSupported`] on gRPC connections, which do not
     ///   support query cancellation.
-    /// - Returns [`Error::Connection`] or [`Error::Io`] if the separate
+    /// - Returns [`Error::Connection`] if the separate
     ///   cancel-request connection to the server fails.
     pub fn cancel(&self) -> Result<()> {
         match &self.transport {

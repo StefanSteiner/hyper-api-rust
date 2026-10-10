@@ -100,7 +100,7 @@ impl<'conn> PreparedStatement<'conn> {
     ///   gRPC transport (prepared statements are TCP-only).
     /// - Returns [`Error::Server`] if the server rejects `Bind` or
     ///   `Execute` (type mismatch, runtime error while streaming).
-    /// - Returns [`Error::Io`] on transport-level I/O failures.
+    /// - Returns [`Error::Connection`] on transport-level I/O failures.
     pub fn query(&self, params: &[&dyn ToSqlParam]) -> Result<Rowset<'conn>> {
         let (encoded, formats) = encode_params(params);
         let client = tcp_client(self.connection)?;
@@ -121,7 +121,7 @@ impl<'conn> PreparedStatement<'conn> {
     /// - Returns [`Error::FeatureNotSupported`] on gRPC transport.
     /// - Returns [`Error::Server`] if the server rejects `Bind` or
     ///   `Execute`.
-    /// - Returns [`Error::Io`] on transport-level I/O failures.
+    /// - Returns [`Error::Connection`] on transport-level I/O failures.
     pub fn execute(&self, params: &[&dyn ToSqlParam]) -> Result<u64> {
         let (encoded, formats) = encode_params(params);
         let client = tcp_client(self.connection)?;

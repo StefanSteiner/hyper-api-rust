@@ -295,8 +295,9 @@ See `cancel.rs` for the full rationale.
 - `GrpcClient` duplicates query-building logic between `execute_query_with_options`
   and `execute_query_with_params_and_options` -- should be unified
 - `AsyncClient` lacks a streaming query mode equivalent to `QueryStream`
-- Connection pooling exists as `deadpool` integration but is not yet exposed
-  as a first-class API in this crate
+- Connection pooling is not part of this crate. It lives in `hyperdb-api`'s
+  `pool` module, which wraps `deadpool` behind its own `Pool` and
+  `PooledConnection` types
 - `TlsConfig` / `TlsMode` are defined but not yet wired into `Config`'s
   builder (TLS is configured at a lower level currently)
 

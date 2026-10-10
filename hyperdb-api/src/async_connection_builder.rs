@@ -189,7 +189,7 @@ impl AsyncConnectionBuilder {
     ///
     /// # Errors
     ///
-    /// - Returns [`Error::Io`] or [`Error::Connection`] if the transport
+    /// - Returns [`Error::Connection`] if the transport
     ///   handshake fails (TCP refused, TLS rejected, named-pipe not
     ///   found, gRPC channel setup failure).
     /// - Returns [`Error::Authentication`] if authentication is rejected.
