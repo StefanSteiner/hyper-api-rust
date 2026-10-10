@@ -227,6 +227,8 @@ pub use connection_builder::ConnectionBuilder;
 pub use error::{ColumnErrorKind, Error, Result};
 pub use params::{ParamFormat, ToSqlParam};
 pub use prepared::PreparedStatement;
+// TLS settings for TCP connections (`ConnectionBuilder::tls` and friends).
+pub use hyperdb_api_core::client::tls::{ParseTlsModeError, TlsConfig, TlsMode};
 // Re-export Notice for callback registrants. `hyperdb-api-core`'s
 // `client::Error` is intentionally NOT re-exported — callers match
 // directly on the flat `Error` enum this crate defines.

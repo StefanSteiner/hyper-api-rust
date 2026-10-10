@@ -66,7 +66,12 @@ pub enum Error {
     #[error("authentication failed: {0}")]
     Authentication(String),
 
-    /// TLS handshake or configuration failure.
+    /// TLS negotiation, handshake or certificate-verification failure.
+    ///
+    /// Includes a server that refuses TLS when the configured
+    /// [`TlsMode`](crate::TlsMode) requires it, and a server rejecting the
+    /// client certificate. Unreadable certificate files and invalid TLS
+    /// option combinations are [`Self::Config`] instead.
     #[error("TLS error: {0}")]
     Tls(String),
 
@@ -540,6 +545,7 @@ impl From<hyperdb_api_core::client::Error> for Error {
                 sqlstate: None,
             },
             CoreError::Config(_) => Error::Config(chain),
+            CoreError::Tls(_) => Error::Tls(chain),
             CoreError::Timeout(_) => Error::Timeout(chain),
             CoreError::Cancelled { sqlstate, .. } => Error::Cancelled {
                 message: chain,
@@ -650,6 +656,7 @@ mod tests {
             CoreError::protocol("test message"),
             CoreError::io("test message"),
             CoreError::config("test message"),
+            CoreError::tls("test message"),
             CoreError::timeout("test message"),
             CoreError::cancelled("test message"),
             CoreError::closed("test message"),
@@ -665,6 +672,16 @@ mod tests {
                 "{rendered} mapping lost the message: {public}",
             );
         }
+    }
+
+    #[test]
+    fn from_client_tls_error_stays_tls() {
+        let public: Error = CoreError::tls("unknown issuer").into();
+        assert!(
+            matches!(public, Error::Tls(ref m) if m == "unknown issuer"),
+            "got {public:?}"
+        );
+        assert_eq!(public.to_string(), "TLS error: unknown issuer");
     }
 
     #[test]
