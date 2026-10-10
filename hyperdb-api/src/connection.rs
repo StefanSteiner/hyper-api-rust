@@ -1849,6 +1849,21 @@ impl Connection {
         }
     }
 
+    /// Returns true if the connection is encrypted with TLS.
+    ///
+    /// For TCP, true when TLS was negotiated — set with
+    /// [`ConnectionBuilder::tls`](crate::ConnectionBuilder::tls); a
+    /// [`TlsMode::Prefer`](crate::TlsMode::Prefer) connection to a server that
+    /// declined TLS reports false. For gRPC, true for an `https://` endpoint.
+    /// Always false over a Unix domain socket or a named pipe.
+    #[must_use]
+    pub fn is_tls(&self) -> bool {
+        match &self.transport {
+            Transport::Tcp(tcp) => tcp.client.is_tls(),
+            Transport::Grpc(grpc) => grpc.config.is_tls(),
+        }
+    }
+
     /// Actively checks that the connection is healthy by executing a trivial query.
     ///
     /// Unlike [`is_alive`](Self::is_alive) which only checks local state,

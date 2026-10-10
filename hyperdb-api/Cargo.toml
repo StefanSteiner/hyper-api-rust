@@ -68,6 +68,8 @@ futures = "0.3"
 rand = { workspace = true }
 serde = { workspace = true }
 sysinfo = { workspace = true }
+# Certificates for the TLS tests against a real hyperd
+rcgen = "0.14"
 
 # B4 compile-time validation end-to-end integration tests
 [[test]]

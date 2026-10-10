@@ -1014,6 +1014,21 @@ impl AsyncConnection {
         }
     }
 
+    /// Returns true if the connection is encrypted with TLS.
+    ///
+    /// For TCP, true when TLS was negotiated — set with
+    /// [`AsyncConnectionBuilder::tls`](crate::AsyncConnectionBuilder::tls); a
+    /// [`TlsMode::Prefer`](crate::TlsMode::Prefer) connection to a server that
+    /// declined TLS reports false. For gRPC, true for an `https://` endpoint.
+    /// Always false over a Unix domain socket or a named pipe.
+    #[must_use]
+    pub fn is_tls(&self) -> bool {
+        match &self.transport {
+            AsyncTransport::Tcp(tcp) => tcp.client.is_tls(),
+            AsyncTransport::Grpc(grpc) => grpc.config.is_tls(),
+        }
+    }
+
     /// Actively pings the server with `SELECT 1` (async).
     ///
     /// # Errors

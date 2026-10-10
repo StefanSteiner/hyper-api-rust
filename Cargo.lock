@@ -1814,6 +1814,7 @@ dependencies = [
  "hyperdb-api-derive",
  "libc",
  "rand 0.10.3",
+ "rcgen",
  "serde",
  "serde_json",
  "smallvec",

@@ -17,8 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   root, and the README states the policy: a major bump of a re-exported crate
   is a `hyperdb-api` major.
 - **Breaking:** `PreparedStatement::query` and `AsyncPreparedStatement::query`
-  now return a rowset borrowing the *statement* (`Rowset<'s>` /
-  `AsyncRowset<'s>`), not just the connection. Previously a rowset could
+  now return a rowset borrowing the *statement* (`Rowset<'stmt>` /
+  `AsyncRowset<'stmt>`), not just the connection. Previously a rowset could
   outlive its statement, and dropping the statement then deadlocked on the
   connection lock the rowset still held. The compiler now rejects that code.
 - **BREAKING: `SqlType` is `#[non_exhaustive]`, and so are the struct variants
@@ -91,6 +91,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   reporting unhealthy, so a pool evicts it on the next checkout.
 - **`HyperProcess::connection_endpoint_string`**, and `Pool::close` /
   `Pool::is_closed` on the async pool.
+- **TLS for TCP connections.** Until now every TCP connection was plaintext,
+  whatever the server offered. `ConnectionBuilder::tls` and
+  `AsyncConnectionBuilder::tls` take a `TlsMode` or a `TlsConfig` (both
+  re-exported from the crate root) with libpq `sslmode` semantics: `Disable`
+  (the default), `Prefer`, `Require`, `VerifyCa` and `VerifyFull`, plus a root
+  certificate, a client certificate for mutual TLS, and a server-name
+  override. `Prefer` falls back to plaintext only when the server declines
+  TLS, never after a failed handshake or verification. A query cancel for a
+  TLS session is sent over TLS. `Connection::is_tls` and
+  `AsyncConnection::is_tls` report whether the session is encrypted.
+  - Over a Unix domain socket or a named pipe, `Prefer` connects in plaintext
+    and the modes that require TLS fail with `Error::FeatureNotSupported`. A
+    gRPC connection picks TLS through its `https://` scheme and rejects
+    `tls()` the same way.
+  - The `Connection::connect*` shortcuts and `Connection::new` stay
+    plaintext.
+  - TLS session resumption is disabled: `hyperd` requests client certificates
+    without an OpenSSL session ID context, so it aborts every resumed
+    handshake (and a cancel would resume).
 
 ### Fixed
 

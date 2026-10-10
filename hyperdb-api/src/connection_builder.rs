@@ -8,6 +8,7 @@ use crate::connection::{Connection, CreateMode};
 use crate::error::{Error, Result};
 use crate::transport::{Transport, TransportType, detect_transport_type};
 use hyperdb_api_core::client::Config;
+use hyperdb_api_core::client::tls::{TlsConfig, TlsMode};
 
 /// A builder for creating database connections.
 ///
@@ -63,6 +64,8 @@ pub struct ConnectionBuilder {
     application_name: Option<String>,
     /// Transfer mode for gRPC connections (ignored for TCP)
     transfer_mode: Option<crate::grpc::TransferMode>,
+    /// TLS settings for TCP connections.
+    tls: TlsConfig,
 }
 
 impl Default for ConnectionBuilder {
@@ -101,6 +104,7 @@ impl ConnectionBuilder {
             query_timeout: None,
             application_name: None,
             transfer_mode: None, // Use default (Adaptive)
+            tls: TlsConfig::default(),
         }
     }
 
@@ -206,6 +210,54 @@ impl ConnectionBuilder {
         self
     }
 
+    /// Sets the TLS configuration for a TCP connection.
+    ///
+    /// The default is [`TlsMode::Disable`]. A bare [`TlsMode`] converts into a
+    /// [`TlsConfig`]; use [`TlsConfig`] to add a root certificate, a client
+    /// certificate for mutual TLS, or a server-name override. The modes follow
+    /// libpq's `sslmode`:
+    ///
+    /// | Mode | Encrypted | Server certificate checked |
+    /// |------|-----------|----------------------------|
+    /// | [`Disable`](TlsMode::Disable) | never | — |
+    /// | [`Prefer`](TlsMode::Prefer) | if the server offers TLS, else plaintext | chain, only if a root certificate is set |
+    /// | [`Require`](TlsMode::Require) | always | chain, only if a root certificate is set |
+    /// | [`VerifyCa`](TlsMode::VerifyCa) | always | chain, against the root certificate |
+    /// | [`VerifyFull`](TlsMode::VerifyFull) | always | chain and host name |
+    ///
+    /// Over a Unix domain socket or a named pipe, [`TlsMode::Prefer`]
+    /// connects in plaintext and every mode that requires TLS fails
+    /// [`build`](Self::build) with [`Error::FeatureNotSupported`]. A gRPC
+    /// endpoint picks TLS through its `https://` scheme, so any mode other
+    /// than [`TlsMode::Disable`] fails there with
+    /// [`Error::FeatureNotSupported`] too. A query cancel for a TLS session
+    /// is sent over TLS. TLS negotiation counts against
+    /// [`login_timeout`](Self::login_timeout) (30 seconds by default; zero
+    /// means no limit).
+    ///
+    /// The `Connection::connect*` shortcuts and `Connection::new` always
+    /// connect in plaintext; use this builder for TLS.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use hyperdb_api::{ConnectionBuilder, Result, TlsConfig, TlsMode};
+    ///
+    /// fn main() -> Result<()> {
+    ///     let conn = ConnectionBuilder::new("hyper.example.com:7483")
+    ///         .database("example.hyper")
+    ///         .tls(TlsConfig::new(TlsMode::VerifyFull).root_cert("ca.pem"))
+    ///         .build()?;
+    ///     assert!(conn.is_tls());
+    ///     Ok(())
+    /// }
+    /// ```
+    #[must_use]
+    pub fn tls(mut self, tls: impl Into<TlsConfig>) -> Self {
+        self.tls = tls.into();
+        self
+    }
+
     /// Sets the transfer mode for gRPC connections.
     ///
     /// This setting is ignored for TCP connections.
@@ -246,9 +298,13 @@ impl ConnectionBuilder {
     ///
     /// # Errors
     ///
-    /// - Returns [`Error::Config`] if the endpoint cannot be parsed.
-    /// - Returns [`Error::FeatureNotSupported`] for a gRPC endpoint with a create mode other than [`CreateMode::DoNotCreate`].
+    /// - Returns [`Error::Config`] if the endpoint cannot be parsed, or if the
+    ///   TLS settings are invalid or a certificate file cannot be read.
+    /// - Returns [`Error::FeatureNotSupported`] for a gRPC endpoint with a create mode other than [`CreateMode::DoNotCreate`],
+    ///   or with a [`tls`](Self::tls) mode other than [`TlsMode::Disable`], and for a Unix-socket or named-pipe endpoint
+    ///   whose [`tls`](Self::tls) mode requires TLS.
     /// - Returns [`Error::Connection`] or [`Error::Timeout`] if the transport handshake fails.
+    /// - Returns [`Error::Tls`] if TLS negotiation or certificate verification fails.
     /// - Returns [`Error::Authentication`] if authentication is rejected.
     /// - Returns [`Error::Server`] or [`Error::Internal`] if the database creation or attach SQL fails.
     pub fn build(self) -> Result<Connection> {
@@ -286,6 +342,7 @@ impl ConnectionBuilder {
         if let Some(timeout) = self.login_timeout {
             config = config.with_connect_timeout(timeout);
         }
+        config = config.with_tls(self.tls);
 
         let db_path_str = self
             .database
@@ -338,6 +395,7 @@ impl ConnectionBuilder {
         if let Some(password) = &self.password {
             config = config.with_password(password);
         }
+        config = config.with_tls(self.tls);
 
         let db_path_str = self
             .database
@@ -391,6 +449,7 @@ impl ConnectionBuilder {
         if let Some(password) = &self.password {
             config = config.with_password(password);
         }
+        config = config.with_tls(self.tls);
 
         let db_path_str = self
             .database
@@ -419,6 +478,11 @@ impl ConnectionBuilder {
         if self.query_timeout.is_some() {
             return Err(Error::feature_not_supported(
                 "query_timeout is not supported on gRPC connections",
+            ));
+        }
+        if self.tls.mode() != TlsMode::Disable {
+            return Err(Error::feature_not_supported(
+                "tls is not supported on gRPC connections; use an https:// endpoint for TLS",
             ));
         }
 

@@ -13,8 +13,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **`client::tls`: TLS for TCP connections**, negotiated with PostgreSQL's
+  `SSLRequest` and libpq `sslmode` semantics. `TlsConfig` / `TlsMode` (with
+  `ParseTlsModeError`) are set through `Config::with_tls` and read back with
+  `Config::tls`. `Client::is_tls` and `AsyncClient::is_tls` report the
+  outcome, and `SyncStream::Tls` / `AsyncStream::Tls` carry the encrypted
+  stream. A cancel request for a TLS session is sent over TLS. Session
+  resumption is disabled, because `hyperd` aborts every resumed handshake.
+
+### Removed
+
+- **`SyncStream::try_clone`.** A rustls stream cannot be cloned, and nothing
+  called it.
+
 ### Changed
 
+- **`Config`'s `FromStr` error type is `client::Error`** (was `String`). The
+  libpq TLS keys (`sslmode`, `sslrootcert`, `sslcert`, `sslkey`, ...) are
+  rejected with `Error::Config` instead of being forwarded to the server as
+  startup options, where they were silently ignored.
 - **`SqlType` and its struct variants (`Numeric`, `Varchar`, `Char`) are
   `#[non_exhaustive]`.** `SqlType::try_numeric` is the non-panicking
   counterpart of `SqlType::numeric` for untrusted precision and scale.

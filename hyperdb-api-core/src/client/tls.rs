@@ -43,11 +43,6 @@
 //! assert_eq!("verify-ca".parse::<TlsMode>(), Ok(TlsMode::VerifyCa));
 //! ```
 
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "wired into the clients in the next change")
-)]
-
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
@@ -306,7 +301,7 @@ impl TlsConnector {
             .map_err(|e| Error::config(format!("TLS protocol configuration: {e}")))?
             .dangerous()
             .with_custom_certificate_verifier(verifier);
-        let config = match &tls.client_cert {
+        let mut config = match &tls.client_cert {
             Some((cert_path, key_path)) => builder
                 .with_client_auth_cert(
                     load_certs(cert_path, "client certificate")?,
@@ -315,6 +310,12 @@ impl TlsConnector {
                 .map_err(|e| Error::config(format!("invalid client certificate or key: {e}")))?,
             None => builder.with_no_client_auth(),
         };
+        // hyperd requests client certificates (`verify_peer`) without setting
+        // an OpenSSL session ID context, so it aborts every resumed handshake
+        // with an `internal_error` alert. The cancel request reuses this
+        // connector and would resume. libpq never resumes either: it builds a
+        // fresh `SSL_CTX` per connection.
+        config.resumption = rustls::client::Resumption::disabled();
 
         let name = tls.server_name.as_deref().unwrap_or_else(|| {
             // An IPv6 host arrives as `[::1]`; the brackets are URL syntax.
@@ -477,6 +478,22 @@ impl Fallback {
             Fallback::AllowPlaintext
         } else {
             Fallback::Deny
+        }
+    }
+}
+
+/// Checks `tls` for a Unix-domain-socket or named-pipe connection, which has
+/// no TLS: [`TlsMode::Prefer`] connects in plaintext, as libpq does over a
+/// Unix socket, and every mode that requires TLS is rejected rather than
+/// silently downgraded.
+pub(crate) fn reject_on_ipc(tls: &TlsConfig) -> Result<()> {
+    match tls.mode() {
+        TlsMode::Disable | TlsMode::Prefer => Ok(()),
+        TlsMode::Require | TlsMode::VerifyCa | TlsMode::VerifyFull => {
+            Err(Error::feature_not_supported(format!(
+                "TLS mode {} is only available over TCP; use a host:port endpoint",
+                tls.mode()
+            )))
         }
     }
 }
