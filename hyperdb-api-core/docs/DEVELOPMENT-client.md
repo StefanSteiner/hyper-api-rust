@@ -27,7 +27,7 @@ src/
   connection.rs           # RawConnection<S> -- sync wire protocol engine
   async_connection.rs     # AsyncRawConnection<S> -- async wire protocol engine
   auth.rs                 # Authentication: cleartext, MD5, SCRAM-SHA-256
-  tls.rs                  # TLS config and rustls integration
+  tls.rs                  # TlsConfig/TlsMode, SSLRequest negotiation, verifiers, TLS cancel
   cancel.rs               # Cancellable trait (transport-agnostic cancel)
   endpoint.rs             # ConnectionEndpoint (TCP, Unix, Named Pipe)
   sync_stream.rs          # SyncStream (TCP/Unix/Pipe wrapper for sync I/O)
@@ -52,7 +52,6 @@ tests/
   client_tests.rs         # Sync client integration tests
   copy_tests.rs           # COPY protocol tests
   prepared_statement_tests.rs
-  tls_tests.rs            # TLS with self-signed certs (rcgen)
   async_copy_cancel_tests.rs
 ```
 
@@ -178,13 +177,21 @@ handshake are documented in `auth.rs` module-level rustdoc.
 
 ## TLS Internals
 
-TLS is implemented via `rustls` (pure Rust, no OpenSSL dependency). The
-implementation lives in `tls.rs` and `tls::rustls_impl`.
+TLS for PG-wire TCP connections uses `rustls` (pure Rust, no OpenSSL) and
+lives in `tls.rs`. `Config::with_tls` takes a `TlsConfig`; `hyperdb-api`'s
+connection builders and pools pass theirs through it. The rustdoc on
+`client::tls` is the reference for the details:
 
-- Root certificates: system roots via `webpki-roots` + optional custom CA
-- Client certificates: optional mutual TLS (mTLS)
-- Key formats: PEM (PKCS#8 or PKCS#1 for private keys)
-- TLS modes: `Disable`, `Prefer`, `Require`, `VerifyCA`, `VerifyFull`
+- `TlsMode` follows libpq's `sslmode` names, with sqlx's choices where they
+  differ: `Disable` is the default, and `Prefer` falls back to plaintext only
+  when the server declines the `SSLRequest`, never after a failed handshake
+  or certificate check.
+- A configured root certificate is the only trust anchor. `VerifyFull`
+  without one trusts the bundled `webpki-roots`; the OS store and
+  `~/.postgresql/` are never read.
+- A cancel request for a TLS session goes over TLS, never plaintext.
+- Session resumption is disabled: `hyperd` aborts a resumed handshake with
+  `internal_error`.
 
 gRPC TLS is handled separately by `tonic`'s built-in TLS support, configured
 via `GrpcConfig` (auto-detected from `https://` endpoints).
@@ -232,9 +239,13 @@ cargo test -p hyperdb-api-core --test client_tests
 
 ### TLS Tests
 
-`tls_tests.rs` generates self-signed certificates at runtime using `rcgen`
-(dev-dependency) to test TLS handshake, mTLS, and certificate verification
-without requiring pre-generated certificates.
+The unit tests in `tls.rs` run the client against a fake PG-wire server on a
+local thread, which answers the `SSLRequest` and runs a rustls server. They
+cover the verifiers, each `SSLRequest` answer, and cancel over TLS, which
+`hyperd` cannot prove because it accepts a plaintext cancel too. The end-to-end tests against a real `hyperd`
+started with `ssl_key` / `ssl_certificate` are in
+`hyperdb-api/tests/tls_tests.rs`. Both generate their certificates at runtime
+with `rcgen`.
 
 ### Writing New Tests
 
@@ -298,8 +309,6 @@ See `cancel.rs` for the full rationale.
 - Connection pooling is not part of this crate. It lives in `hyperdb-api`'s
   `pool` module, which wraps `deadpool` behind its own `Pool` and
   `PooledConnection` types
-- `TlsConfig` / `TlsMode` are defined but not yet wired into `Config`'s
-  builder (TLS is configured at a lower level currently)
 
 ---
 

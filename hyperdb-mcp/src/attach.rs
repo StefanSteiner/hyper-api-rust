@@ -134,7 +134,8 @@ pub enum AttachSource {
         /// Canonical absolute path to the `.hyper` file.
         path: PathBuf,
     },
-    // Future: Tcp  { endpoint: String, auth: Option<TcpAuth> },
+    // Future: Tcp  { endpoint: String, auth: Option<TcpAuth>, tls: TlsConfig },
+    //   (`hyperdb_api::TlsConfig`, passed to the builder's `tls()`)
     // Future: Grpc { endpoint: String, auth: Option<GrpcAuth> }, // writable always false
 }
 

@@ -62,7 +62,7 @@ executable, obtained with `make download-hyperd`. See
 - **gRPC Transport** — read-only access with Arrow IPC and load balancing support
 - **Full Type Support** — all Hyper types including Numeric, Geography, Intervals
 - **Salesforce Auth** — OAuth 2.0 and JWT Bearer Token flows for Data Cloud
-- **TLS** — via rustls (always-on, pure Rust)
+- **TLS** — for TCP connections and pools, with libpq `sslmode` semantics, via rustls (always-on, pure Rust)
 - **Formal Verification** — Kani proof harnesses for model-checked correctness
 
 ## Quick Start

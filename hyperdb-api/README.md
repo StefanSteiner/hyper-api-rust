@@ -475,6 +475,28 @@ ASCII `A-Z a-z 0-9 _ . -`; anything else returns `Error::InvalidName`.
 
 ## Connection Features
 
+### TLS
+
+TCP connections use TLS through the builders' `tls()`, with libpq `sslmode`
+names: `Disable` (the default), `Prefer`, `Require`, `VerifyCa` and
+`VerifyFull`. `PoolConfig` and `SyncPoolConfig` take the same setting; the
+`Connection::new` / `connect*` shortcuts stay plaintext.
+
+```rust
+use hyperdb_api::{ConnectionBuilder, TlsConfig, TlsMode};
+
+let conn = ConnectionBuilder::new("hyper.example.com:7483")
+    .database("data.hyper")
+    .tls(TlsConfig::new(TlsMode::VerifyFull).root_cert("ca.pem"))
+    .build()?;
+assert!(conn.is_tls());
+```
+
+A `hyperd` serves TLS when started with the `ssl_key` and `ssl_certificate`
+settings (`Parameters::set`) over the TCP transport. gRPC picks TLS from its
+`https://` scheme instead. See `TlsMode` for how each mode treats a server
+without TLS and which certificate checks it runs.
+
 ### Query Cancellation
 
 Thread-safe cancellation from another thread:
