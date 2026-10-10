@@ -84,6 +84,8 @@ use crate::protocol::message::frontend;
 ///
 /// - The default is `Disable`, not libpq's `prefer`: `hyperd` is usually a
 ///   local engine with TLS off.
+/// - libpq's `allow` (plaintext first, TLS only if the server insists) is not
+///   offered; use `Prefer`.
 /// - `Prefer` falls back to plaintext only when the server answers that it
 ///   has no TLS. A failed handshake or certificate check is an error, never a
 ///   downgrade.
@@ -163,7 +165,11 @@ impl fmt::Display for ParseTlsModeError {
             f,
             "invalid TLS mode `{}`; expected one of: disable, prefer, require, verify-ca, verify-full",
             self.input
-        )
+        )?;
+        if self.input == "allow" {
+            f.write_str(" (libpq's `allow` is not supported; use `prefer`)")?;
+        }
+        Ok(())
     }
 }
 
@@ -1554,6 +1560,10 @@ mod tests {
         for name in ["disable", "prefer", "require", "verify-ca", "verify-full"] {
             assert!(message.contains(name), "{name} missing from {message}");
         }
+        assert!(!message.contains("allow"), "got {message}");
+
+        let message = "allow".parse::<TlsMode>().unwrap_err().to_string();
+        assert!(message.contains("use `prefer`"), "got {message}");
     }
 
     #[test]

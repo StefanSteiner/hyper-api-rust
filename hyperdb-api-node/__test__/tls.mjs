@@ -146,6 +146,14 @@ async function main() {
       });
       await assert.rejects(plaintext.acquire(), /SSL/);
       await plaintext.close();
+
+      // `tls: null` means no TLS, like leaving it out.
+      const nullTls = new ConnectionPool(endpoint, join(dir, 'pool.hyper'), {
+        createMode: CreateMode.DoNotCreate,
+        tls: null,
+      });
+      await assert.rejects(nullTls.acquire(), /SSL/);
+      await nullTls.close();
     }
 
     console.log('7. An unknown HyperProcess transport is rejected...');

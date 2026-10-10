@@ -27,9 +27,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - **`SyncStream::try_clone`.** A rustls stream cannot be cloned, and nothing
   called it.
+- **The old, never-wired `client::tls` surface:** `TlsConfig`'s public fields
+  (`verify_server`, `ca_cert_path`, `client_cert_path`, `client_key_path`,
+  `server_name`), `TlsConfig::danger_accept_invalid_certs`, the `TlsMode`
+  helpers `is_enabled` / `is_required` / `verify_server` / `verify_hostname`,
+  and the `rustls_impl` module (`create_connector`, `TlsStream`,
+  `wrap_stream`).
 
 ### Changed
 
+- **`client::tls` is reshaped around libpq `sslmode`** (BREAKING).
+  `TlsConfig::new` takes the `TlsMode`; `ca_cert` is now `root_cert`;
+  `TlsMode::VerifyCA` is now `TlsMode::VerifyCa`; `TlsConfig`'s fields are
+  private (`TlsConfig::mode` reads the mode back).
+- **`client::Error` has a new `Tls` variant** (BREAKING for exhaustive
+  matches; the enum is not `#[non_exhaustive]`), built with `Error::tls`.
+  Handshake and certificate failures, including a `rustls::Error` surfacing
+  through I/O, map to it.
+- **`SyncStream` / `AsyncStream` gained a `Tls` variant, and `is_tcp()` is
+  `true` for it** (a TLS stream runs over TCP); `is_tls()` tells them apart.
 - **`Config`'s `FromStr` error type is `client::Error`** (was `String`). The
   libpq TLS keys (`sslmode`, `sslrootcert`, `sslcert`, `sslkey`, ...) are
   rejected with `Error::Config` instead of being forwarded to the server as

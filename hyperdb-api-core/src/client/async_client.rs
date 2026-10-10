@@ -72,7 +72,7 @@ impl std::fmt::Debug for AsyncClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AsyncClient")
             .field("process_id", &self.process_id)
-            .field("secret_key", &self.secret_key)
+            .field("secret_key", &"<redacted>")
             .field("endpoint", &self.endpoint)
             .field(
                 "notice_receiver",

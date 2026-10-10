@@ -309,7 +309,7 @@ export class ConnectionPool {
    * endpoint, while the builder rejects any but `DoNotCreate`.
    */
   #connect() {
-    if (this.#tls === undefined) {
+    if (this.#tls == null) {
       return Connection.connect(this.#endpoint, this.#databasePath, this.#createMode);
     }
     return new ConnectionBuilder(this.#endpoint)

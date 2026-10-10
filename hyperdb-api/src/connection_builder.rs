@@ -231,9 +231,9 @@ impl ConnectionBuilder {
     /// endpoint picks TLS through its `https://` scheme, so any mode other
     /// than [`TlsMode::Disable`] fails there with
     /// [`Error::FeatureNotSupported`] too. A query cancel for a TLS session
-    /// is sent over TLS. TLS negotiation counts against
+    /// is sent over TLS. The TLS handshake must finish within
     /// [`login_timeout`](Self::login_timeout) (30 seconds by default; zero
-    /// means no limit).
+    /// means no limit); the TCP connect itself is not bounded by it.
     ///
     /// The `Connection::connect*` shortcuts and `Connection::new` always
     /// connect in plaintext; use this builder for TLS.

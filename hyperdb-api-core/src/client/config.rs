@@ -264,7 +264,7 @@ impl std::str::FromStr for Config {
             if LIBPQ_TLS_KEYS.contains(&name) {
                 return Err(Error::config(format!(
                     "TLS options are not accepted in the connection string (found `{name}`); \
-                     use ConnectionBuilder::tls"
+                     use Config::with_tls (ConnectionBuilder::tls in hyperdb-api)"
                 )));
             }
             if let Some(idx) = param.find('=') {
@@ -308,10 +308,7 @@ mod tests {
                 .parse::<Config>()
                 .expect_err("TLS key must be rejected");
             assert!(matches!(err, Error::Config(_)), "{key}: got {err:?}");
-            assert!(
-                err.to_string().contains("ConnectionBuilder::tls"),
-                "got {err}"
-            );
+            assert!(err.to_string().contains("Config::with_tls"), "got {err}");
         }
         let err = "h:1/db?sslmode=require".parse::<Config>().unwrap_err();
         assert!(err.to_string().contains("sslmode"), "got {err}");
