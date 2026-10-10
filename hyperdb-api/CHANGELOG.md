@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Breaking:** `PreparedStatement::query` and `AsyncPreparedStatement::query`
+  now return a rowset borrowing the *statement* (`Rowset<'s>` /
+  `AsyncRowset<'s>`), not just the connection. Previously a rowset could
+  outlive its statement, and dropping the statement then deadlocked on the
+  connection lock the rowset still held. The compiler now rejects that code.
 - **BREAKING: `SqlType` is `#[non_exhaustive]`, and so are the struct variants
   of `SqlType` (`Numeric`, `Varchar`, `Char`) and of `Error` (`Connection`,
   `Server`, `Closed`, `Cancelled`, `Column`, `ColumnIndexOutOfBounds`,

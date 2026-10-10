@@ -94,6 +94,24 @@ impl<'conn> PreparedStatement<'conn> {
     /// the prepared-statement equivalent of
     /// [`Connection::execute_query`].
     ///
+    /// The returned rowset borrows the statement, not just the connection:
+    /// it holds the connection lock while streaming, and dropping the
+    /// statement closes it on that same connection, which would deadlock.
+    /// The borrow checker therefore rejects a rowset that outlives its
+    /// statement:
+    ///
+    /// ```compile_fail
+    /// # use hyperdb_api::{Connection, Result};
+    /// # fn demo(conn: &Connection) -> Result<()> {
+    /// let rows = {
+    ///     let stmt = conn.prepare("SELECT 1")?;
+    ///     stmt.query(&[])?
+    /// }; // error[E0597]: `stmt` does not live long enough
+    /// # drop(rows);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
     /// # Errors
     ///
     /// - Returns [`Error::FeatureNotSupported`] if the underlying [`Connection`] is on
@@ -101,7 +119,7 @@ impl<'conn> PreparedStatement<'conn> {
     /// - Returns [`Error::Server`] if the server rejects `Bind` or
     ///   `Execute` (type mismatch, runtime error while streaming).
     /// - Returns [`Error::Connection`] on transport-level I/O failures.
-    pub fn query(&self, params: &[&dyn ToSqlParam]) -> Result<Rowset<'conn>> {
+    pub fn query<'s>(&'s self, params: &[&dyn ToSqlParam]) -> Result<Rowset<'s>> {
         let (encoded, formats) = encode_params(params);
         let client = tcp_client(self.connection)?;
         let stream = client.execute_streaming_with_formats(
