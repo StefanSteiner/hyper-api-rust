@@ -119,7 +119,7 @@ impl<'conn> PreparedStatement<'conn> {
     /// - Returns [`Error::Server`] if the server rejects `Bind` or
     ///   `Execute` (type mismatch, runtime error while streaming).
     /// - Returns [`Error::Connection`] on transport-level I/O failures.
-    pub fn query<'s>(&'s self, params: &[&dyn ToSqlParam]) -> Result<Rowset<'s>> {
+    pub fn query<'stmt>(&'stmt self, params: &[&dyn ToSqlParam]) -> Result<Rowset<'stmt>> {
         let (encoded, formats) = encode_params(params);
         let client = tcp_client(self.connection)?;
         let stream = client.execute_streaming_with_formats(

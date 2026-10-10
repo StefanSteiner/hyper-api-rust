@@ -84,7 +84,10 @@ impl<'conn> AsyncPreparedStatement<'conn> {
     /// - Returns [`Error::Server`] if the server rejects `Bind` or
     ///   `Execute`.
     /// - Returns [`Error::Connection`] on transport-level I/O failures.
-    pub async fn query<'s>(&'s self, params: &[&dyn ToSqlParam]) -> Result<AsyncRowset<'s>> {
+    pub async fn query<'stmt>(
+        &'stmt self,
+        params: &[&dyn ToSqlParam],
+    ) -> Result<AsyncRowset<'stmt>> {
         let (encoded, formats) = encode_params(params);
         let client = async_tcp_client(self.connection)?;
         let stream = client
