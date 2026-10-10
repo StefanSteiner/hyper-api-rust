@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **BREAKING:** the `arrow` dependency moved from **59** to **60**. Arrow types
+  appear in this crate's public API, so consumers must move to `arrow` 60 in
+  lockstep. No source change was needed on our side. `parquet` (used by
+  `hyperdb-mcp`) moved to 60 with it.
+- `hyperdb-api` now re-exports `arrow`, `chrono` and `geo_types` from the crate
+  root, and the README states the policy: a major bump of a re-exported crate
+  is a `hyperdb-api` major.
 - **Breaking:** `PreparedStatement::query` and `AsyncPreparedStatement::query`
   now return a rowset borrowing the *statement* (`Rowset<'s>` /
   `AsyncRowset<'s>`), not just the connection. Previously a rowset could

@@ -21,6 +21,18 @@ Hyper database files (`.hyper`) without any C library dependencies.
 hyperdb-api = "1.0"
 ```
 
+### Semver and re-exported crates
+
+`arrow`, `chrono` and `geo_types` types appear in this crate's public API
+(`ArrowInserter`, `ArrowRowset`, `Timestamp` conversions, `Geography`), so
+`hyperdb-api` re-exports all three crates from its root. Use
+`hyperdb_api::arrow` (and friends), or depend on exactly the same major
+yourself: two majors in one binary give two incompatible `RecordBatch` types.
+
+A **major** version bump of any re-exported crate is a **major** version bump
+of `hyperdb-api`. This release builds against `arrow` 60, `chrono` 0.4 and
+`geo-types` 0.7.
+
 ## Runtime Requirements
 
 The `hyperd` executable (Hyper database server) must be available. Set its path via:

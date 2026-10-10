@@ -108,16 +108,18 @@ review; point to them when requesting changes.
   parameters, look for a helper type.
 - **M-DONT-LEAK-TYPES.** Prefer `std` types in public APIs. Third-party types
   (`bytes::Bytes`, `arrow::RecordBatch`, …) are only exposed when they
-  materially improve the API over an equivalent in `std`. Note upstream also
-  sanctions leaking "behind a relevant feature flag" — the option this crate
-  cannot currently take, since `hyperdb-api` has no features. Revisit the
-  unconditional `arrow` / `chrono` / `geo-types` leaks when feature flags
-  land post-1.0.0.
+  materially improve the API over an equivalent in `std`. The 1.0 policy keeps
+  the `arrow` / `chrono` / `geo-types` leaks, re-exports those crates from the
+  `hyperdb-api` root so callers use the exact version we build against, and
+  treats a major bump of any of them as a `hyperdb-api` major (README, "Semver
+  and re-exported crates"). A default-off feature cannot decouple the cadence
+  and moving existing capability behind one would itself be breaking, so none
+  is planned.
 - **M-FEATURES-ADDITIVE.** Any feature added must be purely additive: it must
   not disable or modify a public item, must not require another feature to be
   manually enabled, and every combination must compile. Prefer a `std`
   feature over a `no-std` one. Currently near-vacuous here (`hyperdb-api` has
-  no features), but load-bearing for the planned post-1.0.0 feature work —
+  no features), but load-bearing for any feature added later —
   and note that moving *existing* always-on capability behind a default-off
   feature is a breaking change, while default-on is not.
 

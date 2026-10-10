@@ -201,6 +201,13 @@ mod grpc_connection;
 #[cfg(kani)]
 mod proofs;
 
+// Third-party crates whose types appear in this crate's public API. Re-exported
+// so callers use exactly the version we are built against; a major bump of any
+// of them is a `hyperdb-api` major (see README, "Semver and re-exported crates").
+pub use arrow;
+pub use chrono;
+pub use geo_types;
+
 pub use arrow_inserter::ArrowInserter;
 pub use arrow_reader::ArrowReader;
 pub use arrow_result::{
