@@ -82,6 +82,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Reserved-word table and column names** (`order`, `user`, `table`, ...) no
+  longer break generated SQL. `TableDefinition::qualified_name`, `table_name`,
+  `schema_name`, `database_name`, `to_drop_sql` and the `MappedInserter`
+  staging statements now always double-quote identifiers, so every inserter's
+  `COPY` works on such tables. The generated SQL text changes (`users` becomes
+  `"users"`); the identifiers resolved are the same.
+
 - **`query_as!` / `query_scalar!` silently dropped their `$N` bind
   arguments.** The arguments were stringified and never sent, so any query
   with a placeholder failed at the server with "expected to have 0

@@ -55,21 +55,21 @@ fn table_derive_creates_correct_sql() {
         "CREATE_SQL must contain table name"
     );
     assert!(
-        CtUser::CREATE_SQL.contains("id BIGINT"),
+        CtUser::CREATE_SQL.contains("\"id\" BIGINT"),
         "i64 maps to BIGINT"
     );
     assert!(
-        CtUser::CREATE_SQL.contains("name TEXT"),
+        CtUser::CREATE_SQL.contains("\"name\" TEXT"),
         "String maps to TEXT"
     );
     // score is Option<f64> → nullable DOUBLE PRECISION
     assert!(
-        CtUser::CREATE_SQL.contains("score DOUBLE PRECISION"),
+        CtUser::CREATE_SQL.contains("\"score\" DOUBLE PRECISION"),
         "f64 maps to DOUBLE PRECISION"
     );
     // Option<T> → no NOT NULL constraint
     assert!(
-        !CtUser::CREATE_SQL.contains("score DOUBLE PRECISION NOT NULL"),
+        !CtUser::CREATE_SQL.contains("\"score\" DOUBLE PRECISION NOT NULL"),
         "Option<f64> must not have NOT NULL"
     );
     assert_eq!(CtUser::NAME, "ct_users");

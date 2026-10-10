@@ -187,11 +187,10 @@ This catches broken intra-doc links and missing docs (the crate enables
   functions), `ParseError` is in `types.rs` (used by type conversions). A
   future cleanup could unify them, but they are stable and the separation
   matches the module boundary.
-- **`is_valid_unquoted_identifier` does not check reserved words.** The current
-  implementation checks syntax only (letter/underscore start, alphanumeric
-  body). SQL reserved words like `select` are not detected, so they will be
-  emitted unquoted. In practice this is harmless for Hyper's parser, but could
-  be tightened.
+- **`is_valid_unquoted_identifier` does not check reserved words.** It checks
+  syntax only, so `select` or `order` pass. This is why `SqlIdentifier` quotes
+  unconditionally rather than consulting it: a bare reserved word is a syntax
+  error in Hyper, and `"users"` and `users` are the same identifier.
 
 ---
 

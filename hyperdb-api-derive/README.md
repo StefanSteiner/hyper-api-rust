@@ -89,7 +89,7 @@ struct User {
 // Use the derived CREATE_SQL to create the table at runtime:
 conn.execute_command(User::CREATE_SQL)?;
 println!("{}", User::NAME);       // "users"
-println!("{}", User::CREATE_SQL); // "CREATE TABLE IF NOT EXISTS users (id BIGINT NOT NULL, ...)"
+println!("{}", User::CREATE_SQL); // "CREATE TABLE IF NOT EXISTS \"users\" (\"id\" BIGINT NOT NULL, ...)"
 ```
 
 ### Struct-level attributes

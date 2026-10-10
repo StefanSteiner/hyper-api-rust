@@ -25,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- `protocol::escape::SqlIdentifier`, `format_table_name` and `escape_identifier`
+  now always quote identifiers. They previously left lowercase names bare, so
+  reserved words such as `order` produced invalid SQL. Output changes from
+  `users` to `"users"`.
+
 - **A cancelled COPY write could wedge the async connection.** Dropping a COPY
   write future mid-frame left a partial `CopyData` frame on the wire, so the
   queued `CopyFail` was read as part of that frame and

@@ -739,7 +739,7 @@ impl TableDefinition {
     /// use hyperdb_api::TableDefinition;
     ///
     /// let table = TableDefinition::new("Extract").with_schema("Extract");
-    /// // "Extract" is quoted because it contains uppercase letters (to preserve case)
+    /// // Names are always quoted, preserving case and allowing reserved words
     /// assert_eq!(table.table_name(), "\"Extract\"");
     /// ```
     #[must_use]
@@ -763,36 +763,10 @@ impl TableDefinition {
             .map(|s| format!("{}", SqlIdentifier(s)))
     }
 
-    /// Returns the qualified table name with every part quoted.
-    ///
-    /// [`qualified_name`](Self::qualified_name) leaves a name bare when it is
-    /// already a legal unquoted identifier, which is not safe for generated
-    /// DDL: the underlying check does not know the reserved word list, so a
-    /// table reflected out of the catalog as `order` would be emitted bare and
-    /// rejected. Statements this type generates use this instead.
-    fn quoted_qualified_name(&self) -> String {
-        match (&self.database, &self.schema) {
-            (Some(db), Some(schema)) => format!(
-                "{}.{}.{}",
-                QuotedIdentifier(db),
-                QuotedIdentifier(schema),
-                QuotedIdentifier(&self.name)
-            ),
-            (None, Some(schema)) => format!(
-                "{}.{}",
-                QuotedIdentifier(schema),
-                QuotedIdentifier(&self.name)
-            ),
-            (Some(db), None) => {
-                format!("{}.{}", QuotedIdentifier(db), QuotedIdentifier(&self.name))
-            }
-            (None, None) => format!("{}", QuotedIdentifier(&self.name)),
-        }
-    }
-
     /// Returns the qualified table name (escaped).
     ///
-    /// Format: `database.schema.table` (if all parts are set, unquoted if valid identifiers)
+    /// Format: `database.schema.table`, with every part double-quoted so that
+    /// reserved words such as `order` and mixed-case names are valid SQL.
     #[must_use]
     pub fn qualified_name(&self) -> String {
         match (&self.database, &self.schema) {
@@ -907,7 +881,7 @@ impl TableDefinition {
         };
 
         sql.push_str(create_keyword);
-        sql.push_str(&self.quoted_qualified_name());
+        sql.push_str(&self.qualified_name());
         sql.push_str(" (");
 
         for (i, col) in self.columns.iter().enumerate() {
@@ -1048,21 +1022,21 @@ mod tests {
         let table = TableDefinition::new("users")
             .with_schema("public")
             .with_database("mydb");
-        assert_eq!(table.qualified_name(), r"mydb.public.users");
+        assert_eq!(table.qualified_name(), r#""mydb"."public"."users""#);
     }
 
     #[test]
     fn test_table_name() {
         let table = TableDefinition::new("Extract").with_schema("Extract");
-        // "Extract" is quoted because it contains uppercase letters (to preserve case)
+        // Names are always quoted, preserving case and allowing reserved words
         assert_eq!(table.table_name(), r#""Extract""#);
     }
 
     #[test]
     fn test_drop_sql() {
         let table = TableDefinition::new("users");
-        assert_eq!(table.to_drop_sql(true), r"DROP TABLE users");
-        assert_eq!(table.to_drop_sql(false), r"DROP TABLE IF EXISTS users");
+        assert_eq!(table.to_drop_sql(true), r#"DROP TABLE "users""#);
+        assert_eq!(table.to_drop_sql(false), r#"DROP TABLE IF EXISTS "users""#);
     }
 
     #[test]

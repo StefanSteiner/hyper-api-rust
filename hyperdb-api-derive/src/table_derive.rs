@@ -58,7 +58,7 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
 
     let create_sql = format!(
         "CREATE TABLE IF NOT EXISTS {} ({})",
-        table_name,
+        quote_ident(&table_name),
         col_defs.join(", ")
     );
 
@@ -245,7 +245,18 @@ fn column_def(field: &Field, _table_name: &str) -> syn::Result<String> {
         " NOT NULL"
     };
 
-    Ok(format!("{col_name} {sql_type}{nullability}"))
+    Ok(format!(
+        "{} {sql_type}{nullability}",
+        quote_ident(&col_name)
+    ))
+}
+
+/// Double-quote an identifier for the generated `CREATE TABLE`.
+///
+/// Always quoting keeps reserved words (`order`, `user`, ...) legal; for a
+/// plain lowercase name the quoted and bare forms are the same identifier.
+fn quote_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 /// Map a Rust type to a SQL type string.
