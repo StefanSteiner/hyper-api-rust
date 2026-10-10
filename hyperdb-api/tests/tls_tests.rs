@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use hyperdb_api::pool::{PoolConfig, SyncPoolConfig, create_pool};
 use hyperdb_api::{
     AsyncConnectionBuilder, AsyncInserter, Connection, ConnectionBuilder, CreateMode, Error,
     HyperProcess, Inserter, SqlType, TableDefinition, TlsConfig, TlsMode, TransportMode,
@@ -440,6 +441,66 @@ async fn cancel_under_tls_async() {
         "took {:?}",
         start.elapsed()
     );
+}
+
+/// Every connection the pool opens is verified TLS, including the first
+/// one, which creates the database.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn async_pool_connects_over_tls() {
+    let fixture = Fixture::new();
+    let hyper = tls_hyper("tls_async_pool", &fixture, true);
+    let db = common::test_result_path("tls_async_pool", "hyper").unwrap();
+
+    let config = PoolConfig::new(endpoint(&hyper), db.to_string_lossy())
+        .create_mode(CreateMode::CreateAndReplace)
+        .tls(verify_full(&fixture))
+        .max_size(2);
+    let pool = create_pool(config).expect("pool");
+
+    let (first, second) = tokio::join!(pool.get(), pool.get());
+    for conn in [first.expect("first"), second.expect("second")] {
+        assert!(conn.is_tls());
+        let one: i64 = conn.fetch_scalar("SELECT 1").await.expect("query");
+        assert_eq!(one, 1);
+    }
+    assert_eq!(pool.status().size, 2);
+}
+
+#[test]
+fn sync_pool_connects_over_tls() {
+    let fixture = Fixture::new();
+    let hyper = tls_hyper("tls_sync_pool", &fixture, true);
+    let db = common::test_result_path("tls_sync_pool", "hyper").unwrap();
+
+    let pool = SyncPoolConfig::new(endpoint(&hyper), db.to_string_lossy())
+        .create_mode(CreateMode::CreateAndReplace)
+        .tls(verify_full(&fixture))
+        .max_size(2)
+        .build();
+
+    let first = pool.get().expect("first");
+    let second = pool.get().expect("second");
+    for conn in [&first, &second] {
+        assert!(conn.is_tls());
+        let one: i64 = conn.fetch_scalar("SELECT 1").expect("query");
+        assert_eq!(one, 1);
+    }
+    assert_eq!(pool.status().size, 2);
+}
+
+/// Pools open connections lazily, so a TLS failure surfaces from `get`.
+#[tokio::test]
+async fn pools_report_tls_failures_from_get() {
+    let hyper = plain_hyper("tls_pool_plain_server");
+
+    let pool = create_pool(PoolConfig::new(endpoint(&hyper), "unused").tls(TlsMode::Require))
+        .expect("pool");
+    assert_tls_error(pool.get().await.map(|_| ()));
+
+    let pool = SyncPoolConfig::new(endpoint(&hyper), "unused")
+        .tls(TlsMode::Require)
+        .build();
+    assert_tls_error(pool.get().map(|_| ()));
 }
 
 /// gRPC TLS is chosen by the `https://` scheme; `tls()` is rejected before

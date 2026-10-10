@@ -107,6 +107,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     `tls()` the same way.
   - The `Connection::connect*` shortcuts and `Connection::new` stay
     plaintext.
+  - **BREAKING:** `PoolConfig` and `SyncPoolConfig` gain a public `tls` field
+    and a `tls()` builder, applied to every connection the pool opens, so a
+    struct-literal `PoolConfig { .. }` no longer compiles. The async pool now
+    opens connections through `AsyncConnectionBuilder`: a malformed port in
+    its endpoint is an `Error::Config` instead of silently becoming 7483, and
+    an authenticated pool on a Unix-socket or named-pipe endpoint connects
+    there instead of misreading the path as a TCP host. On a gRPC endpoint a
+    `create_mode` other than `DoNotCreate` now fails `Pool::get` with
+    `Error::FeatureNotSupported` instead of being ignored, as it already did
+    for the sync pool.
   - TLS session resumption is disabled: `hyperd` requests client certificates
     without an OpenSSL session ID context, so it aborts every resumed
     handshake (and a cancel would resume).

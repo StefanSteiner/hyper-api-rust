@@ -83,6 +83,9 @@
 //!   long an acquire may block. The async pool enforces all three on the Tokio
 //!   runtime; the sync pool enforces `wait_timeout` natively (see
 //!   [`SyncPoolConfig`] for the create/recycle caveat).
+//! - **TLS** ([`PoolConfig::tls`] / [`SyncPoolConfig::tls`]) applies to every
+//!   connection the pool opens, with the semantics of
+//!   [`ConnectionBuilder::tls`].
 //!
 //! # Lifecycle hooks (async pool only)
 //!
@@ -121,10 +124,10 @@ use deadpool::Runtime;
 use deadpool::managed::{self, Manager, Metrics, RecycleError, RecycleResult, Timeouts};
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::CreateMode;
 use crate::async_connection::AsyncConnection;
 use crate::connection::Connection;
 use crate::error::{Error, Result};
+use crate::{AsyncConnectionBuilder, ConnectionBuilder, CreateMode, TlsConfig};
 
 /// Future returned by pool lifecycle hooks.
 ///
@@ -240,6 +243,8 @@ pub struct PoolConfig {
     pub user: Option<String>,
     /// Optional password for authentication
     pub password: Option<String>,
+    /// TLS for every connection the pool opens (see [`tls`](Self::tls)).
+    pub tls: TlsConfig,
     /// Maximum number of connections in the pool
     pub max_size: usize,
     /// If `false`, skip the per-checkout health probe. Retained for backwards
@@ -282,6 +287,7 @@ impl std::fmt::Debug for PoolConfig {
             .field("create_mode", &self.create_mode)
             .field("user", &self.user)
             .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("tls", &self.tls)
             .field("max_size", &self.max_size)
             .field("health_check", &self.health_check)
             .field("recycle", &self.recycle)
@@ -316,6 +322,7 @@ impl PoolConfig {
             create_mode: CreateMode::DoNotCreate,
             user: None,
             password: None,
+            tls: TlsConfig::default(),
             max_size: 16,
             health_check: true,
             recycle: RecycleStrategy::SelectOne,
@@ -342,6 +349,18 @@ impl PoolConfig {
     pub fn auth(mut self, user: impl Into<String>, password: impl Into<String>) -> Self {
         self.user = Some(user.into());
         self.password = Some(password.into());
+        self
+    }
+
+    /// Sets the TLS configuration for every connection the pool opens.
+    ///
+    /// Same semantics as [`AsyncConnectionBuilder::tls`]; the default is
+    /// [`TlsMode::Disable`](crate::TlsMode::Disable). A mode the endpoint
+    /// cannot honor surfaces from [`Pool::get`], since connections open
+    /// lazily.
+    #[must_use]
+    pub fn tls(mut self, tls: impl Into<TlsConfig>) -> Self {
+        self.tls = tls.into();
         self
     }
 
@@ -490,18 +509,14 @@ impl ConnectionManager {
     }
 
     async fn open(&self, mode: CreateMode) -> Result<AsyncConnection> {
+        let mut builder = AsyncConnectionBuilder::new(&self.config.endpoint)
+            .database(&self.config.database)
+            .create_mode(mode)
+            .tls(self.config.tls.clone());
         if let (Some(user), Some(password)) = (&self.config.user, &self.config.password) {
-            AsyncConnection::connect_with_auth(
-                &self.config.endpoint,
-                &self.config.database,
-                mode,
-                user,
-                password,
-            )
-            .await
-        } else {
-            AsyncConnection::connect(&self.config.endpoint, &self.config.database, mode).await
+            builder = builder.user(user).password(password);
         }
+        builder.build().await
     }
 }
 
@@ -791,6 +806,8 @@ pub struct SyncPoolConfig {
     pub user: Option<String>,
     /// Optional password for authentication.
     pub password: Option<String>,
+    /// TLS for every connection the pool opens (see [`tls`](Self::tls)).
+    pub tls: TlsConfig,
     /// Maximum number of connections in the pool.
     pub max_size: usize,
     /// Per-checkout recycle strategy. Defaults to [`SyncRecycleStrategy::SelectOne`].
@@ -815,6 +832,7 @@ impl std::fmt::Debug for SyncPoolConfig {
             .field("create_mode", &self.create_mode)
             .field("user", &self.user)
             .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("tls", &self.tls)
             .field("max_size", &self.max_size)
             .field("recycle", &self.recycle)
             .field("wait_timeout", &self.wait_timeout)
@@ -834,6 +852,7 @@ impl SyncPoolConfig {
             create_mode: CreateMode::DoNotCreate,
             user: None,
             password: None,
+            tls: TlsConfig::default(),
             max_size: 16,
             recycle: SyncRecycleStrategy::SelectOne,
             wait_timeout: None,
@@ -855,6 +874,18 @@ impl SyncPoolConfig {
     pub fn auth(mut self, user: impl Into<String>, password: impl Into<String>) -> Self {
         self.user = Some(user.into());
         self.password = Some(password.into());
+        self
+    }
+
+    /// Sets the TLS configuration for every connection the pool opens.
+    ///
+    /// Same semantics as [`ConnectionBuilder::tls`]; the default is
+    /// [`TlsMode::Disable`](crate::TlsMode::Disable). A mode the endpoint
+    /// cannot honor surfaces from [`ConnectionPool::get`], since connections
+    /// open lazily.
+    #[must_use]
+    pub fn tls(mut self, tls: impl Into<TlsConfig>) -> Self {
+        self.tls = tls.into();
         self
     }
 
@@ -956,17 +987,14 @@ impl SyncPoolInner {
         } else {
             CreateMode::DoNotCreate
         };
+        let mut builder = ConnectionBuilder::new(&self.config.endpoint)
+            .database(&self.config.database)
+            .create_mode(mode)
+            .tls(self.config.tls.clone());
         if let (Some(user), Some(password)) = (&self.config.user, &self.config.password) {
-            Connection::connect_with_auth(
-                &self.config.endpoint,
-                &self.config.database,
-                mode,
-                user,
-                password,
-            )
-        } else {
-            Connection::connect(&self.config.endpoint, &self.config.database, mode)
+            builder = builder.user(user).password(password);
         }
+        builder.build()
     }
 
     /// Returns `true` if an idle connection should be retired before reuse.
@@ -1304,6 +1332,7 @@ mod tests {
         let config = PoolConfig::new("localhost:7483", "test.hyper")
             .create_mode(CreateMode::CreateIfNotExists)
             .auth("user", "pass")
+            .tls(crate::TlsMode::Require)
             .max_size(32);
 
         assert_eq!(config.endpoint, "localhost:7483");
@@ -1312,6 +1341,7 @@ mod tests {
         assert_eq!(config.user, Some("user".to_string()));
         assert_eq!(config.password, Some("pass".to_string()));
         assert_eq!(config.max_size, 32);
+        assert_eq!(config.tls.mode(), crate::TlsMode::Require);
     }
 
     #[test]
@@ -1327,6 +1357,7 @@ mod tests {
         assert_eq!(config.max_lifetime, None);
         assert_eq!(config.idle_timeout, None);
         assert_eq!(config.min_idle, None);
+        assert_eq!(config.tls, TlsConfig::default());
         assert!(!config.has_timeout());
     }
 
@@ -1375,6 +1406,7 @@ mod tests {
         assert_eq!(config.max_lifetime, None);
         assert_eq!(config.idle_timeout, None);
         assert_eq!(config.min_idle, None);
+        assert_eq!(config.tls, TlsConfig::default());
 
         let password: String = {
             use rand::RngExt;
@@ -1385,12 +1417,14 @@ mod tests {
             .create_mode(CreateMode::CreateIfNotExists)
             .auth("u", password)
             .max_size(4)
+            .tls(crate::TlsMode::VerifyFull)
             .recycle(SyncRecycleStrategy::Ping)
             .wait_timeout(Some(Duration::from_millis(500)))
             .max_lifetime(Some(Duration::from_secs(10)))
             .idle_timeout(Some(Duration::from_secs(5)))
             .min_idle(Some(1));
         assert_eq!(tuned.max_size, 4);
+        assert_eq!(tuned.tls.mode(), crate::TlsMode::VerifyFull);
         assert!(matches!(tuned.recycle, SyncRecycleStrategy::Ping));
         assert_eq!(tuned.user, Some("u".to_string()));
         assert_eq!(tuned.wait_timeout, Some(Duration::from_millis(500)));
