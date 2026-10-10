@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`query_as!` and `query_scalar!` now bind their `$N` arguments.** They were
+  accepted and silently discarded. Each argument must implement
+  `hyperdb_api::ToSqlParam`; the macros now generate code that requires it.
+
 ## [1.0.0-rc.3] - 2026-09-07
 
 ### Changed

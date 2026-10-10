@@ -14,6 +14,7 @@ use std::time::Duration;
 use crate::async_connection::AsyncConnection;
 use crate::async_transport::AsyncTransport;
 use crate::connection::CreateMode;
+use crate::connection_builder::query_timeout_statement;
 use crate::error::{Error, Result};
 use crate::transport::{TransportType, detect_transport_type};
 use hyperdb_api_core::client::{AsyncClient, Config};
@@ -112,8 +113,19 @@ impl AsyncConnectionBuilder {
 
     /// Sets the query timeout.
     ///
-    /// The value is recorded on the builder but no transport applies it, so
-    /// queries run until completion regardless of this setting.
+    /// Applied to the session as `hyperd`'s `query_timeout` setting right after
+    /// connecting, so the server cancels any statement on this connection that
+    /// runs longer than `timeout` and reports an error. Sub-millisecond
+    /// precision is rounded up to a whole millisecond.
+    ///
+    /// Applies to TCP, Unix-socket and named-pipe connections. `hyperd`
+    /// clamps the value to its own `query_timeout_max` ceiling. A gRPC
+    /// connection has no equivalent, so [`build`](Self::build) fails with
+    /// [`Error::FeatureNotSupported`] rather than ignoring the setting.
+    ///
+    /// # Errors
+    ///
+    /// [`build`](Self::build) returns an error if `timeout` is zero.
     #[must_use]
     pub fn query_timeout(mut self, timeout: Duration) -> Self {
         self.query_timeout = Some(timeout);
@@ -222,6 +234,10 @@ impl AsyncConnectionBuilder {
 
         let client = AsyncClient::connect(&config).await?;
         let conn = AsyncConnection::from_async_client(client, db_path_str.clone());
+        if let Some(timeout) = self.query_timeout {
+            conn.execute_command(&query_timeout_statement(timeout)?)
+                .await?;
+        }
 
         if let Some(db_path) = db_path_str {
             conn.handle_creation_mode_public(&db_path, self.create_mode)
@@ -265,6 +281,10 @@ impl AsyncConnectionBuilder {
 
         let client = AsyncClient::connect_unix(&socket_path, &config).await?;
         let conn = AsyncConnection::from_async_client(client, db_path_str.clone());
+        if let Some(timeout) = self.query_timeout {
+            conn.execute_command(&query_timeout_statement(timeout)?)
+                .await?;
+        }
 
         if let Some(db_path) = db_path_str {
             conn.handle_creation_mode_public(&db_path, self.create_mode)
@@ -308,6 +328,10 @@ impl AsyncConnectionBuilder {
 
         let client = AsyncClient::connect_named_pipe(&pipe_path, &config).await?;
         let conn = AsyncConnection::from_async_client(client, db_path_str.clone());
+        if let Some(timeout) = self.query_timeout {
+            conn.execute_command(&query_timeout_statement(timeout)?)
+                .await?;
+        }
 
         if let Some(db_path) = db_path_str {
             conn.handle_creation_mode_public(&db_path, self.create_mode)
@@ -320,6 +344,11 @@ impl AsyncConnectionBuilder {
 
     /// Build a gRPC connection (async).
     async fn build_grpc(self) -> Result<AsyncConnection> {
+        if self.query_timeout.is_some() {
+            return Err(Error::feature_not_supported(
+                "query_timeout is not supported on gRPC connections",
+            ));
+        }
         if self.create_mode != CreateMode::DoNotCreate {
             return Err(Error::feature_not_supported(
                 "gRPC transport is read-only. Use CreateMode::DoNotCreate for gRPC connections.",

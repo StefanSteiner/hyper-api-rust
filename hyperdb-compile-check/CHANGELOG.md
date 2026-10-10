@@ -12,6 +12,13 @@ surface, and consumers should depend on `hyperdb-api-derive` instead.
 
 ## [Unreleased]
 
+### Fixed
+
+- **SQL containing `$N` placeholders is now validated.** The dry-run executed
+  the statement with nothing bound, so Hyper rejected every parameterized
+  query with "expected to have 0 parameter(s)". Such queries are now
+  prepared with one unspecified-type parameter per placeholder.
+
 ## [1.0.0-rc.3] - 2026-09-07
 
 ### Fixed

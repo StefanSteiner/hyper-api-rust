@@ -7,7 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **`QueryAs::new` and `QueryScalar::new` now take `&[&dyn ToSqlParam]`**
+  instead of `&[&dyn Debug]`. These constructors are emitted by the
+  `query_as!` / `query_scalar!` macros and are not meant to be called
+  directly, but code that did call them must now pass `ToSqlParam` values.
+
 ### Fixed
+
+- **`query_as!` / `query_scalar!` silently dropped their `$N` bind
+  arguments.** The arguments were stringified and never sent, so any query
+  with a placeholder failed at the server with "expected to have 0
+  parameter(s)". They are now encoded and bound through the same path as
+  `Connection::fetch_all_as_params`.
+- **`ConnectionBuilder::query_timeout` and
+  `AsyncConnectionBuilder::query_timeout` were recorded and never applied.**
+  The timeout is now set as the session's `query_timeout` right after
+  connecting, so `hyperd` cancels a statement that runs longer (SQLSTATE
+  57014, "canceled"). A zero timeout and a timeout on a gRPC connection are
+  rejected at `build()` instead of being ignored.
 
 - **`Date`, `Timestamp` and `OffsetTimestamp` query parameters were bound with
   the wrong epoch.** `ToSqlParam::encode_param` sent absolute Julian-based

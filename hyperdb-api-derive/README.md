@@ -230,6 +230,6 @@ After RA finishes indexing you'll see squigglies on bad SQL strings and errors i
 ## Known limitations
 
 - **Type checking not yet implemented** — only column *names* are validated. Runtime `Error::Column { kind: TypeMismatch }` still catches type drift.
-- **No parameter type checking** — bind parameters are opaque at compile time.
+- **No parameter type checking** — bind arguments are bound at run time (each must implement `ToSqlParam`), but their types are not checked against the `$N` placeholders at compile time.
 - **Validates struct vs. SQL, not SQL vs. production DB** — struct/prod schema drift is still a runtime error.
 - **`INSERT`/`UPDATE`/`DELETE` without `RETURNING`** are not supported by `query_as!`; use `Connection::execute_command` directly.

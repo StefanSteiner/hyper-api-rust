@@ -57,8 +57,7 @@ pub struct ConnectionBuilder {
     user: Option<String>,
     password: Option<String>,
     login_timeout: Option<Duration>,
-    /// Query timeout; recorded but not applied by any transport (see the
-    /// `query_timeout` setter).
+    /// Per-query timeout, sent to the server as the `query_timeout` setting.
     query_timeout: Option<Duration>,
     /// Application name sent to the server during connection startup.
     application_name: Option<String>,
@@ -70,6 +69,19 @@ impl Default for ConnectionBuilder {
     fn default() -> Self {
         Self::new("localhost:7483")
     }
+}
+
+/// Renders the `SET` statement that applies `timeout` as the session's
+/// `query_timeout` (whole milliseconds, rounded up).
+///
+/// `hyperd` ignores `query_timeout` as a startup parameter, so it has to be
+/// set on the established session.
+pub(crate) fn query_timeout_statement(timeout: Duration) -> Result<String> {
+    if timeout.is_zero() {
+        return Err(Error::config("query_timeout must be greater than zero"));
+    }
+    let millis = timeout.as_nanos().div_ceil(1_000_000);
+    Ok(format!("SET query_timeout = '{millis}ms'"))
 }
 
 impl ConnectionBuilder {
@@ -133,8 +145,19 @@ impl ConnectionBuilder {
 
     /// Sets the query timeout.
     ///
-    /// The value is recorded on the builder but no transport applies it, so
-    /// queries run until completion regardless of this setting.
+    /// Applied to the session as `hyperd`'s `query_timeout` setting right after
+    /// connecting, so the server cancels any statement on this connection that
+    /// runs longer than `timeout` and reports an error. Sub-millisecond
+    /// precision is rounded up to a whole millisecond.
+    ///
+    /// Applies to TCP, Unix-socket and named-pipe connections. `hyperd`
+    /// clamps the value to its own `query_timeout_max` ceiling. A gRPC
+    /// connection has no equivalent, so [`build`](Self::build) fails with
+    /// [`Error::FeatureNotSupported`] rather than ignoring the setting.
+    ///
+    /// # Errors
+    ///
+    /// [`build`](Self::build) returns an error if `timeout` is zero.
     #[must_use]
     pub fn query_timeout(mut self, timeout: Duration) -> Self {
         self.query_timeout = Some(timeout);
@@ -272,6 +295,9 @@ impl ConnectionBuilder {
         let client = hyperdb_api_core::client::Client::connect(&config)?;
 
         let conn = Connection::from_client(client, db_path_str.clone());
+        if let Some(timeout) = self.query_timeout {
+            conn.execute_command(&query_timeout_statement(timeout)?)?;
+        }
 
         // Handle database creation (TCP only - gRPC is read-only)
         if let Some(db_path) = db_path_str {
@@ -322,6 +348,9 @@ impl ConnectionBuilder {
         let client = hyperdb_api_core::client::Client::connect_unix(&socket_path, &config)?;
 
         let conn = Connection::from_client(client, db_path_str.clone());
+        if let Some(timeout) = self.query_timeout {
+            conn.execute_command(&query_timeout_statement(timeout)?)?;
+        }
 
         // Handle database creation
         if let Some(db_path) = db_path_str {
@@ -372,6 +401,9 @@ impl ConnectionBuilder {
         let client = hyperdb_api_core::client::Client::connect_named_pipe(&pipe_path, &config)?;
 
         let conn = Connection::from_client(client, db_path_str.clone());
+        if let Some(timeout) = self.query_timeout {
+            conn.execute_command(&query_timeout_statement(timeout)?)?;
+        }
 
         // Handle database creation
         if let Some(db_path) = db_path_str {
@@ -384,6 +416,12 @@ impl ConnectionBuilder {
 
     /// Build a gRPC connection.
     fn build_grpc(self) -> Result<Connection> {
+        if self.query_timeout.is_some() {
+            return Err(Error::feature_not_supported(
+                "query_timeout is not supported on gRPC connections",
+            ));
+        }
+
         // Validate create_mode - gRPC is read-only
         if self.create_mode != CreateMode::DoNotCreate {
             return Err(Error::feature_not_supported(
