@@ -45,7 +45,7 @@
 
 use std::fmt;
 use std::io::{self, Read, Write};
-use std::net::{Shutdown, TcpStream};
+use std::net::{Ipv6Addr, Shutdown, TcpStream};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -325,9 +325,17 @@ impl TlsConnector {
 
         let name = tls.server_name.as_deref().unwrap_or_else(|| {
             // An IPv6 host arrives as `[::1]`; the brackets are URL syntax.
-            host.strip_prefix('[')
+            let host = host
+                .strip_prefix('[')
                 .and_then(|inner| inner.strip_suffix(']'))
-                .unwrap_or(host)
+                .unwrap_or(host);
+            // A link-local literal can carry a zone (`fe80::1%1`). The zone
+            // picks the local interface, not the server, and an IP SAN cannot
+            // hold one, so the name is the bare address.
+            match host.split_once('%') {
+                Some((address, _zone)) if address.parse::<Ipv6Addr>().is_ok() => address,
+                _ => host,
+            }
         });
         let server_name = ServerName::try_from(name)
             .map_err(|e| Error::config(format!("invalid TLS server name `{name}`: {e}")))?
@@ -1204,6 +1212,33 @@ mod tests {
         assert!(matches!(built.server_name, ServerName::DnsName(_)));
         let err = TlsConnector::build(&tls, "not a host").unwrap_err();
         assert!(matches!(err, Error::Config(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn ipv6_zone_is_not_part_of_the_server_name() {
+        let tls = TlsConfig::from(TlsMode::Require);
+        for host in ["[fe80::1%1]", "[fe80::1%en0]", "fe80::1%1"] {
+            let built = connector(&tls, host);
+            let expected = ServerName::from("fe80::1".parse::<std::net::IpAddr>().unwrap());
+            assert_eq!(built.server_name, expected, "{host}");
+        }
+        // Only an IPv6 address loses its `%` suffix.
+        let err = TlsConnector::build(&tls, "host%1").unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn verify_full_checks_zoned_ipv6_host_against_ip_san() {
+        let ca = generate_ca("Test CA");
+        let server = generate_leaf(&ca, &["fe80::1"]);
+        let ca_file = pem_file(&ca.cert_pem);
+        let tls = TlsConfig::new(TlsMode::VerifyFull).root_cert(ca_file.path());
+        let (outcome, seen) = handshake(&server, &tls, "[fe80::1%1]");
+        assert!(outcome.unwrap());
+        assert_payload_received(&seen);
+
+        let (outcome, _) = handshake(&server, &tls, "[fe80::2%1]");
+        assert!(matches!(outcome, Err(Error::Tls(_))), "got {outcome:?}");
     }
 
     #[test]
