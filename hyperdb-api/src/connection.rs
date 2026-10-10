@@ -1210,6 +1210,45 @@ impl Connection {
     /// }
     /// ```
     ///
+    /// # Known limitation: `OR` / `IN` lists over parameters
+    ///
+    /// A `hyperd` defect rejects a filter on a **single column** that
+    /// combines a bound parameter with other values through `OR`, `IN`,
+    /// `NOT IN`, `= ANY(ARRAY[...])` or `CASE`, when the filter applies to a
+    /// table scan. Examples are `WHERE id = $1 OR id = $2`,
+    /// `WHERE id IN ($1, $2)` and `WHERE id = $1 OR id = 3`. The statement
+    /// fails when it is prepared, before any value is bound, with SQLSTATE
+    /// `XX000`: "A parameter was accessed in an execution target with too few
+    /// registered parameters." The same filter in an `UPDATE` or `DELETE` fails
+    /// the same way.
+    ///
+    /// The defect affects every API that binds parameters: this method,
+    /// [`command_params`](Self::command_params), the `*_as_params` methods,
+    /// [`prepare_typed`](Self::prepare_typed),
+    /// `query_as!` / `query_scalar!` with arguments, and their async
+    /// counterparts. Filters that combine parameters with `AND` (including
+    /// ranges such as `id >= $1 AND id <= $2`) are not affected, nor is an
+    /// `OR` across two different columns.
+    ///
+    /// Rewrite the list as a subquery over an array built from the
+    /// parameters. Values stay bound, so the query remains injection-safe:
+    ///
+    /// ```no_run
+    /// # use hyperdb_api::{Connection, Result};
+    /// # fn example(conn: &Connection) -> Result<()> {
+    /// // Fails: "WHERE id IN ($1, $2)"
+    /// let result = conn.query_params(
+    ///     "SELECT * FROM users WHERE id IN (SELECT unnest(ARRAY[$1, $2]))",
+    ///     &[&1i64, &2i64],
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Joining against `VALUES ($1), ($2)` also works. Inlining the values as
+    /// SQL literals works too, but only do that for values that are not user
+    /// input.
+    ///
     /// # Errors
     ///
     /// - Returns [`Error::FeatureNotSupported`] if the connection is using gRPC transport
@@ -1259,7 +1298,8 @@ impl Connection {
     /// Returns the number of affected rows.
     ///
     /// See [`query_params`](Self::query_params) for details on parameter
-    /// handling and SQL injection prevention.
+    /// handling and SQL injection prevention, and for its known limitation
+    /// with `OR` / `IN` lists over parameters, which applies here too.
     ///
     /// # Example
     ///
@@ -1767,6 +1807,10 @@ impl Connection {
     /// varies across calls — it re-parses per statement and picks the OID
     /// from the value. [`Geography`](crate::Geography) is unaffected and
     /// works normally here.
+    ///
+    /// The known limitation with `OR` / `IN` lists over parameters described
+    /// on [`query_params`](Self::query_params) applies here too: such a
+    /// statement fails at `Parse` time.
     ///
     /// # Errors
     ///

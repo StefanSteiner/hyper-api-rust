@@ -216,6 +216,30 @@ let users: Vec<User> = conn.fetch_all_as_params(
 )?;
 ```
 
+#### Known limitation: `OR` / `IN` lists over parameters
+
+A `hyperd` defect rejects a filter on a single column that combines a bound
+parameter with other values through `OR`, `IN`, `NOT IN` or `= ANY(ARRAY[...])`,
+for example `WHERE id = $1 OR id = $2` or `WHERE id IN ($1, $2)`. The statement
+fails when it is prepared, with SQLSTATE `XX000` ("A parameter was accessed in an
+execution target with too few registered parameters"). This affects every API
+that binds parameters, including `command_params` for `UPDATE` and `DELETE`.
+Filters that combine parameters with `AND`, and `OR` across two different
+columns, are not affected.
+
+Rewrite the list as a subquery over an array built from the parameters. The
+values stay bound, so the query is still injection-safe:
+
+```rust
+// Fails: "SELECT * FROM users WHERE id IN ($1, $2)"
+let mut result = conn.query_params(
+    "SELECT * FROM users WHERE id IN (SELECT unnest(ARRAY[$1, $2]))",
+    &[&1i64, &2i64],
+)?;
+```
+
+See the `Connection::query_params` API docs for details.
+
 #### Compile-time SQL validation (opt-in)
 
 With the `hyperdb-api-derive` crate's `compile-time` feature, the `query_as!`

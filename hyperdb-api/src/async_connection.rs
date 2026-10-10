@@ -709,9 +709,11 @@ impl AsyncConnection {
     /// Executes a parameterized query with binary-encoded parameters (async).
     ///
     /// Mirrors the sync [`Connection::query_params`](crate::Connection::query_params);
-    /// see that method for the design rationale. Parameters travel through the
-    /// extended query protocol (Parse/Bind/Execute) in HyperBinary format — no
-    /// SQL escaping, full SQL-injection safety regardless of parameter content.
+    /// see that method for the design rationale and for its known limitation
+    /// with `OR` / `IN` lists over parameters, which applies here too.
+    /// Parameters travel through the extended query protocol
+    /// (Parse/Bind/Execute) in HyperBinary format — no SQL escaping, full
+    /// SQL-injection safety regardless of parameter content.
     ///
     /// # Errors
     ///
@@ -752,6 +754,9 @@ impl AsyncConnection {
 
     /// Executes a parameterized command (INSERT / UPDATE / DELETE) with
     /// binary-encoded parameters via Parse/Bind/Execute (async).
+    ///
+    /// Subject to the known limitation with `OR` / `IN` lists over parameters
+    /// described on [`Connection::query_params`](crate::Connection::query_params).
     ///
     /// # Errors
     ///

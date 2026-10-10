@@ -123,6 +123,14 @@ pub fn table_derive(input: TokenStream) -> TokenStream {
 /// cache — a `query_as!` can be re-expanded in a process where no derive has
 /// run. Validation therefore skips when the registry is entirely empty, so the
 /// editor does not report errors on code that compiles.
+///
+/// # Known limitation: `OR` / `IN` lists over arguments
+///
+/// Arguments are bound through the `*_as_params` methods, which use
+/// `Connection::query_params`, so the `hyperd` defect documented there applies to `query_as!` and `query_scalar!`: a
+/// single-column filter such as `WHERE id IN ($1, $2)` or
+/// `WHERE id = $1 OR id = $2` fails with SQLSTATE `XX000`. Write
+/// `WHERE id IN (SELECT unnest(ARRAY[$1, $2]))` instead.
 #[proc_macro]
 pub fn query_as(input: TokenStream) -> TokenStream {
     match expand_query_as(&input.into()) {
