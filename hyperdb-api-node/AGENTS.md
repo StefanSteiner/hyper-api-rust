@@ -111,7 +111,7 @@ When modifying connection behavior, check both `src/connection.rs` (Rust) and `i
 ## Testing
 
 - **Smoke tests:** `__test__/smoke.mjs` — covers all major features (connection, queries, inserts, streams, pool, tagged templates, BigInt, dates, JSON)
-- **TLS tests:** `__test__/tls.mjs` — `ConnectionBuilder.tls()`, `ConnectionPool`'s `tls` option and `HyperProcess` options against an `ssl_force` server; certificates come from the `openssl` CLI, and the test skips without it. Its certificates and database live in a temporary directory it removes
+- **TLS tests:** `__test__/tls.mjs` — `ConnectionBuilder.tls()`, `ConnectionPool`'s `tls` option and `HyperProcess` options against an `ssl_force` server, plus TLS modes over an IPC socket; certificates come from the `openssl` CLI, and the test skips without it. Its certificates and database live in a temporary directory it removes
 - **Benchmarks:** `__test__/benchmark.mjs` — insert and query performance with configurable row counts
 - Tests need `hyperd`: run `make download-hyperd` (found via `.hyperd/current`), or set an absolute `HYPERD_PATH`
 - Test artifacts go into `test_results/` (gitignored)

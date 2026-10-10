@@ -24,9 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 * **`ConnectionPool` takes a `tls` option** and opens every connection through
   `ConnectionBuilder` with it. TLS failures surface from `acquire()`.
 * **`new HyperProcess(hyperPath, options)`** takes an optional
-  `{ transport: 'ipc' | 'tcp', parameters }`; `parameters` are passed to
-  `hyperd` unchanged, for example `ssl_key` and `ssl_certificate` to serve
-  TLS. An unknown transport throws.
+  `{ transport: 'tcp' | 'ipc', parameters }` (TCP stays the default);
+  `parameters` are passed to `hyperd` unchanged, for example `ssl_key` and
+  `ssl_certificate` to serve TLS. An unknown transport throws. With `'ipc'`,
+  `hyper.endpoint` is the Unix socket path or named pipe, which every
+  `Connection` factory and `ConnectionBuilder` accept.
 
 ## [1.0.0-rc.3] - 2026-09-07
 

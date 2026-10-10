@@ -112,8 +112,8 @@ export interface TlsOptions {
 /** Options for starting a `HyperProcess`. */
 export interface HyperProcessOptions {
   /**
-   * `"ipc"` (the default: a Unix domain socket, or a named pipe on
-   * Windows) or `"tcp"`. TLS needs `"tcp"`.
+   * `"tcp"` (the default) or `"ipc"`: a Unix domain socket, or a named
+   * pipe on Windows. TLS needs `"tcp"`.
    */
   transport?: string
   /**
@@ -577,7 +577,8 @@ export declare class HyperProcess {
    */
   constructor(hyperPath?: string | undefined | null, options?: HyperProcessOptions | undefined | null)
   /**
-   * Returns the server endpoint (e.g., "localhost:7483").
+   * Returns the server endpoint: `host:port` (e.g., "127.0.0.1:7483"),
+   * or with `transport: 'ipc'` the Unix socket path or named pipe.
    *
    * Use this to connect to the server via `Connection.connect()`.
    */

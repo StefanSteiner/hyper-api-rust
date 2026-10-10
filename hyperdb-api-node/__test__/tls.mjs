@@ -150,6 +150,23 @@ async function main() {
 
     console.log('7. An unknown HyperProcess transport is rejected...');
     assert.throws(() => new HyperProcess(undefined, { transport: 'udp' }), /unknown transport `udp`/);
+
+    if (process.platform !== 'win32') {
+      console.log('8. IPC: the endpoint is a socket path; prefer is plaintext, require fails...');
+      const ipc = new HyperProcess(undefined, { transport: 'ipc' });
+      try {
+        assert.match(ipc.endpoint, /^\//);
+        const conn = await Connection.withoutDatabase(ipc.endpoint);
+        assert.equal(conn.isTls, false);
+        await conn.close();
+        const prefer = await connect(ipc.endpoint, { mode: 'prefer' });
+        assert.equal(prefer.isTls, false);
+        await prefer.close();
+        await assert.rejects(connect(ipc.endpoint, { mode: 'require' }));
+      } finally {
+        ipc.close();
+      }
+    }
   } finally {
     hyper?.close();
     rmSync(dir, { recursive: true, force: true });

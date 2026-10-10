@@ -135,8 +135,13 @@ Manages a local Hyper server process (`hyperd`).
 ```typescript
 const hyper = new HyperProcess();             // auto-detect hyperd location
 const hyper = new HyperProcess('/path/to/hyperd'); // or specify path
+// TCP, with hyperd settings passed through unchanged (here: serve TLS)
+const hyper = new HyperProcess(undefined, {
+  transport: 'tcp',
+  parameters: { ssl_key: 'server.key', ssl_certificate: 'server.pem' },
+});
 
-hyper.endpoint;  // e.g., "localhost:7483"
+hyper.endpoint;  // e.g., "127.0.0.1:7483", or a socket path with transport: 'ipc'
 hyper.isOpen;    // true
 
 // Convenience: connect directly
@@ -167,6 +172,7 @@ const schema = await conn.querySchema('SELECT * FROM users');
 
 conn.database;  // 'db.hyper' or null
 conn.isAlive;   // true
+conn.isTls;     // true if the session is encrypted with TLS
 await conn.close(); // MUST be called when done
 ```
 
@@ -181,6 +187,18 @@ const conn = await new ConnectionBuilder('localhost:7483')
   .createMode(CreateMode.CreateIfNotExists)
   .user('admin').password('secret')
   .loginTimeout(5000)
+  .build();
+```
+
+`tls()` turns on TLS for a TCP connection, with libpq `sslmode` names:
+`'disable'` (the default), `'prefer'`, `'require'`, `'verify-ca'` and
+`'verify-full'`. `Connection.connect` and the other static factories stay
+plaintext.
+
+```typescript
+const conn = await new ConnectionBuilder('hyper.example.com:7483')
+  .database('my.hyper')
+  .tls({ mode: 'verify-full', rootCert: 'ca.pem' }) // also clientCert, clientKey, serverName
   .build();
 ```
 
@@ -419,6 +437,7 @@ await pool.close();
 | `idleTimeoutMs` | 30000 | Close idle connections after this many ms |
 | `acquireTimeoutMs` | 30000 | Max ms to wait for a connection (0 = no limit) |
 | `createMode` | `CreateIfNotExists` | Database creation mode |
+| `tls` | none | TLS options for every connection, as for `ConnectionBuilder.tls()` |
 
 ### Lossless integers and keyed rows
 
