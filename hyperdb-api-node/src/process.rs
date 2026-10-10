@@ -4,6 +4,7 @@
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::connection::Connection;
@@ -33,6 +34,44 @@ pub struct HyperProcess {
     inner: Option<hyperdb_api::HyperProcess>,
 }
 
+/// Options for starting a [`HyperProcess`].
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct HyperProcessOptions {
+    /// `"ipc"` (the default: a Unix domain socket, or a named pipe on
+    /// Windows) or `"tcp"`. TLS needs `"tcp"`.
+    pub transport: Option<String>,
+    /// `hyperd` settings, passed through unchanged, for example `ssl_key`
+    /// and `ssl_certificate` to serve TLS.
+    pub parameters: Option<HashMap<String, String>>,
+}
+
+impl TryFrom<&HyperProcessOptions> for hyperdb_api::Parameters {
+    type Error = Error;
+
+    fn try_from(options: &HyperProcessOptions) -> Result<Self> {
+        let mut params = hyperdb_api::Parameters::new();
+        match options.transport.as_deref() {
+            None | Some("ipc") => {}
+            Some("tcp") => {
+                params.set_transport_mode(hyperdb_api::TransportMode::Tcp);
+            }
+            Some(other) => {
+                return Err(Error::from_reason(format!(
+                    "unknown transport `{other}`; expected \"ipc\" or \"tcp\""
+                )));
+            }
+        }
+        // Sorted, so the `hyperd` command line does not depend on hash order.
+        let mut settings: Vec<_> = options.parameters.iter().flatten().collect();
+        settings.sort();
+        for (key, value) in settings {
+            params.set(key, value);
+        }
+        Ok(params)
+    }
+}
+
 #[napi]
 impl HyperProcess {
     #[allow(
@@ -45,10 +84,15 @@ impl HyperProcess {
     /// path if it's not in the standard location.
     ///
     /// @param hyperPath - Optional path to the `hyperd` binary.
+    /// @param options - Optional transport and `hyperd` settings.
     #[napi(constructor)]
-    pub fn new(hyper_path: Option<String>) -> Result<Self> {
+    pub fn new(hyper_path: Option<String>, options: Option<HyperProcessOptions>) -> Result<Self> {
         let path = hyper_path.as_ref().map(|p| Path::new(p.as_str()));
-        let process = hyperdb_api::HyperProcess::new(path, None)
+        let params = options
+            .as_ref()
+            .map(hyperdb_api::Parameters::try_from)
+            .transpose()?;
+        let process = hyperdb_api::HyperProcess::new(path, params.as_ref())
             .map_err(|e| Error::from_reason(e.to_string()))?;
         Ok(HyperProcess {
             inner: Some(process),

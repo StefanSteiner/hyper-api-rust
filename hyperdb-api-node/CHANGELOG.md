@@ -13,6 +13,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+* **TLS for TCP connections:** `ConnectionBuilder.tls({ mode, rootCert,
+  clientCert, clientKey, serverName })`, with libpq `sslmode` semantics
+  (`"disable"`, `"prefer"`, `"require"`, `"verify-ca"`, `"verify-full"`), and
+  a `Connection.isTls` getter. An invalid mode, or `clientCert` without
+  `clientKey`, fails `build()`. `Connection.connect` and the other static
+  factories stay plaintext.
+* **`ConnectionPool` takes a `tls` option** and opens every connection through
+  `ConnectionBuilder` with it. TLS failures surface from `acquire()`.
+* **`new HyperProcess(hyperPath, options)`** takes an optional
+  `{ transport: 'ipc' | 'tcp', parameters }`; `parameters` are passed to
+  `hyperd` unchanged, for example `ssl_key` and `ssl_certificate` to serve
+  TLS. An unknown transport throws.
+
 ## [1.0.0-rc.3] - 2026-09-07
 
 ### Changed

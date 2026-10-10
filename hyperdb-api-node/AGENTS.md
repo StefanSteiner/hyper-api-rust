@@ -64,7 +64,7 @@ npm run build:debug
 # Build native addon (release — slow compile, fast runtime)
 npm run build
 
-# Run smoke tests
+# Run the smoke and TLS tests
 npm test
 
 # Run benchmarks (build release first!)
@@ -111,6 +111,7 @@ When modifying connection behavior, check both `src/connection.rs` (Rust) and `i
 ## Testing
 
 - **Smoke tests:** `__test__/smoke.mjs` — covers all major features (connection, queries, inserts, streams, pool, tagged templates, BigInt, dates, JSON)
+- **TLS tests:** `__test__/tls.mjs` — `ConnectionBuilder.tls()`, `ConnectionPool`'s `tls` option and `HyperProcess` options against an `ssl_force` server; certificates come from the `openssl` CLI, and the test skips without it. Its certificates and database live in a temporary directory it removes
 - **Benchmarks:** `__test__/benchmark.mjs` — insert and query performance with configurable row counts
 - Tests need `hyperd`: run `make download-hyperd` (found via `.hyperd/current`), or set an absolute `HYPERD_PATH`
 - Test artifacts go into `test_results/` (gitignored)
@@ -127,7 +128,7 @@ Uses napi-rs platform packages for cross-platform prebuilt binaries:
 
 Only these three platforms are published; macOS x64 (Intel), Linux x64 (musl) and Linux ARM64 have no prebuilt package.
 
-On every PR and push, `ci.yml` builds the Linux debug addon and runs the smoke test (the `hyperdb-api-node (build + smoke)` job). The per-platform release builds run in `npm-build-publish.yml`, which the hand-created GitHub Release triggers; release-please only prepares the version bump and changelog in the release PR.
+On every PR and push, `ci.yml` builds the Linux debug addon and runs `npm test`, the smoke and TLS tests (the `hyperdb-api-node (build + smoke)` job). The per-platform release builds run in `npm-build-publish.yml`, which the hand-created GitHub Release triggers; release-please only prepares the version bump and changelog in the release PR.
 
 ## Common Development Scenarios
 
