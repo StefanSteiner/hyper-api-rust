@@ -135,22 +135,6 @@ impl Transport {
         Ok(Transport::Tcp(Box::new(TcpTransport { client })))
     }
 
-    /// Connect using TCP transport with authentication.
-    pub(crate) fn connect_tcp_with_auth(
-        endpoint: &str,
-        user: &str,
-        password: &str,
-    ) -> Result<Self> {
-        let (host, port) = parse_endpoint(endpoint);
-        let config = hyperdb_api_core::client::Config::new()
-            .with_host(host)
-            .with_port(port)
-            .with_user(user)
-            .with_password(password);
-        let client = hyperdb_api_core::client::Client::connect(&config)?;
-        Ok(Transport::Tcp(Box::new(TcpTransport { client })))
-    }
-
     /// Connect using gRPC transport.
     pub(crate) fn connect_grpc(config: hyperdb_api_core::client::grpc::GrpcConfig) -> Result<Self> {
         let client = hyperdb_api_core::client::grpc::GrpcClientSync::connect(config.clone())?;

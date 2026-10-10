@@ -628,3 +628,33 @@ async fn copy_in_hyperbinary_on_grpc_is_feature_not_supported() {
         "expected FeatureNotSupported, got {err:?}"
     );
 }
+
+/// The string-endpoint constructors reach a Unix domain socket like
+/// `connect` and the builder do, rather than parsing the path as `host:port`.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn string_constructors_connect_over_a_unix_socket() {
+    use hyperdb_api::TransportMode;
+
+    let mut params = test_hyper_params("async_string_constructors_ipc").unwrap();
+    params.set_transport_mode(TransportMode::Ipc);
+    let hyper = HyperProcess::new(None, Some(&params)).unwrap();
+    let endpoint = hyper.connection_endpoint_string().expect("IPC endpoint");
+    assert!(endpoint.starts_with('/'), "not a socket path: {endpoint}");
+
+    let conn = AsyncConnection::without_database(&endpoint).await.unwrap();
+    let one: i64 = conn.fetch_scalar("SELECT 1").await.unwrap();
+    assert_eq!(one, 1);
+
+    let db = test_result_path("async_string_constructors_ipc", "hyper").unwrap();
+    let conn = AsyncConnection::connect_with_auth(
+        &endpoint,
+        db.to_str().expect("path"),
+        CreateMode::CreateAndReplace,
+        "tableau_internal_user",
+        "unused",
+    )
+    .await
+    .unwrap();
+    assert_eq!(conn.database(), db.to_str());
+}

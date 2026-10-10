@@ -97,6 +97,12 @@ impl AsyncConnection {
 
     /// Connects with authentication (async).
     ///
+    /// Equivalent to [`AsyncConnectionBuilder`](crate::AsyncConnectionBuilder)
+    /// with `database`, `create_mode`, `user` and `password` set, so the
+    /// endpoint may be TCP, a Unix domain socket or a named pipe. A gRPC
+    /// endpoint is accepted only with [`CreateMode::DoNotCreate`], and
+    /// ignores `user` and `password`.
+    ///
     /// # Errors
     ///
     /// - Returns [`Error::Authentication`] if authentication is rejected.
@@ -109,37 +115,28 @@ impl AsyncConnection {
         user: &str,
         password: &str,
     ) -> Result<Self> {
-        let transport = AsyncTransport::connect_tcp_with_auth(endpoint, user, password).await?;
-        let conn = AsyncConnection {
-            transport,
-            database: Some(database.to_string()),
-            stats_provider: Mutex::new(None),
-            pending_stats: Mutex::new(None),
-        };
-
-        conn.handle_creation_mode(database, mode).await?;
-        conn.attach_and_set_path(database).await?;
-
-        Ok(conn)
+        crate::AsyncConnectionBuilder::new(endpoint)
+            .database(database)
+            .create_mode(mode)
+            .user(user)
+            .password(password)
+            .build()
+            .await
     }
 
     /// Connects to a server without attaching any database (async).
     ///
     /// Useful for running `CREATE DATABASE` / `DROP DATABASE` without an
-    /// active attachment.
+    /// active attachment. Equivalent to
+    /// [`AsyncConnectionBuilder::new(endpoint).build()`](crate::AsyncConnectionBuilder),
+    /// so the endpoint may be TCP, gRPC, a Unix domain socket or a named pipe.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Connection`] if the TCP handshake
-    /// with `endpoint` fails.
+    /// Returns [`Error::Connection`] if the handshake with `endpoint` fails
+    /// or the endpoint cannot be reached.
     pub async fn without_database(endpoint: &str) -> Result<Self> {
-        let transport = AsyncTransport::connect_tcp(endpoint).await?;
-        Ok(AsyncConnection {
-            transport,
-            database: None,
-            stats_provider: Mutex::new(None),
-            pending_stats: Mutex::new(None),
-        })
+        crate::AsyncConnectionBuilder::new(endpoint).build().await
     }
 
     /// Builds an `AsyncConnection` from a pre-existing `AsyncClient` (TCP only).

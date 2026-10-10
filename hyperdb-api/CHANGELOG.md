@@ -141,6 +141,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   connecting, so `hyperd` cancels a statement that runs longer (SQLSTATE
   57014, "canceled"). A zero timeout and a timeout on a gRPC connection are
   rejected at `build()` instead of being ignored.
+- **`AsyncConnection::without_database` and `AsyncConnection::connect_with_auth`
+  could not reach a Unix domain socket or named pipe.** They parsed every
+  endpoint as `host:port`, so a socket path failed with "failed to lookup
+  address information". Like their sync counterparts, they now go through
+  `AsyncConnectionBuilder`, which also makes a malformed port an
+  `Error::Config` instead of a silent fallback to port 7483, and lets
+  `without_database` connect to a gRPC endpoint.
 
 - **`Date`, `Timestamp` and `OffsetTimestamp` query parameters were bound with
   the wrong epoch.** `ToSqlParam::encode_param` sent absolute Julian-based
