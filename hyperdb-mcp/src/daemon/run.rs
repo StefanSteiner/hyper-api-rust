@@ -102,12 +102,11 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), Box<dyn std::error::
     // Publish the *connection* endpoint, not the raw callback descriptor. For a
     // Unix domain socket the raw `endpoint()` string reconstructs the path as
     // `<dir>/domain/hyper` (a `tab.domain://` scheme artifact), whereas hyperd
-    // actually binds `<dir>/hyper`; `connection_endpoint()` carries the path a
+    // actually binds `<dir>/hyper`; `connection_endpoint_string()` carries the path a
     // client can connect to. For TCP and Windows named pipes the two agree.
     let endpoint = hyper
-        .connection_endpoint()
-        .ok_or("hyperd did not report a connection endpoint")?
-        .to_string();
+        .connection_endpoint_string()
+        .ok_or("hyperd did not report a connection endpoint")?;
     info!(endpoint = %endpoint, "hyperd started");
 
     // Step 3: Build DaemonInfo and write discovery file
@@ -388,15 +387,12 @@ fn try_restart_hyperd(
     let params = build_params(&state_dir).map_err(|e| RestartError::SpawnFailed(e.to_string()))?;
     let new_hyper = HyperProcess::new(None, Some(&params))
         .map_err(|e| RestartError::SpawnFailed(e.to_string()))?;
-    // See `run_daemon`: publish the connectable `connection_endpoint()`, not
+    // See `run_daemon`: publish the connectable `connection_endpoint_string()`, not
     // the raw callback descriptor, so a Unix socket path is the one hyperd
     // actually bound.
-    let new_endpoint = new_hyper
-        .connection_endpoint()
-        .ok_or_else(|| {
-            RestartError::SpawnFailed("hyperd did not report a connection endpoint".into())
-        })?
-        .to_string();
+    let new_endpoint = new_hyper.connection_endpoint_string().ok_or_else(|| {
+        RestartError::SpawnFailed("hyperd did not report a connection endpoint".into())
+    })?;
 
     // Publish the new endpoint, discovery file first and STATUS second.
     //

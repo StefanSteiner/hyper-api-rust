@@ -5,8 +5,8 @@
 //!
 //! This module provides two pools that share a common configuration surface:
 //!
-//! - [`Pool`] — an async pool built on [`deadpool`], for `async`/`await`
-//!   applications. Created via [`create_pool`].
+//! - [`Pool`] — an async pool for `async`/`await` applications. Created via
+//!   [`create_pool`].
 //! - [`ConnectionPool`] — a synchronous, r2d2-style pool with **no Tokio
 //!   dependency** on its hot path, for blocking applications. Created via
 //!   [`SyncPoolConfig::build`].
@@ -33,7 +33,7 @@
 //!     let pool = create_pool(config)?;
 //!
 //!     // Get a connection from the pool
-//!     let conn = pool.get().await.map_err(|e| hyperdb_api::Error::internal(e.to_string()))?;
+//!     let conn = pool.get().await?;
 //!
 //!     // Use the connection
 //!     conn.execute_command("SELECT 1").await?;
@@ -80,8 +80,8 @@
 //! - **`idle_timeout`** retires connections that have sat idle too long (down to
 //!   `min_idle`, which is kept warm).
 //! - **Timeouts** (`wait_timeout`, `create_timeout`, `recycle_timeout`) bound how
-//!   long an acquire may block. The async pool enforces all three via deadpool's
-//!   Tokio runtime; the sync pool enforces `wait_timeout` natively (see
+//!   long an acquire may block. The async pool enforces all three on the Tokio
+//!   runtime; the sync pool enforces `wait_timeout` natively (see
 //!   [`SyncPoolConfig`] for the create/recycle caveat).
 //!
 //! # Lifecycle hooks (async pool only)
@@ -461,6 +461,9 @@ impl PoolConfig {
 
 /// Connection pool manager for `AsyncConnection`.
 ///
+/// Crate-private: the pool's public face is [`Pool`] and [`PooledConnection`],
+/// so the `deadpool` types behind them are not part of this crate's API.
+///
 /// The first call to [`Manager::create`] holds an async mutex while attempting
 /// to open a connection with the configured [`CreateMode`]. Concurrent callers
 /// wait for that attempt to finish, then use `CreateMode::DoNotCreate`. If the
@@ -468,7 +471,7 @@ impl PoolConfig {
 /// (for idempotent modes only — `Create` is not retried because a sibling
 /// connection may have already created the database).
 #[derive(Debug)]
-pub struct ConnectionManager {
+pub(crate) struct ConnectionManager {
     config: Arc<PoolConfig>,
     /// Synchronizes the first-connection attempt across concurrent callers.
     /// `Some(())` after the first successful attempt; held while a first
@@ -479,8 +482,7 @@ pub struct ConnectionManager {
 
 impl ConnectionManager {
     /// Creates a new connection manager.
-    #[must_use]
-    pub fn new(config: PoolConfig) -> Self {
+    fn new(config: PoolConfig) -> Self {
         Self {
             config: Arc::new(config),
             init_lock: Arc::new(AsyncMutex::new(false)),
@@ -597,21 +599,104 @@ impl Manager for ConnectionManager {
 
 /// A pool of async connections to a Hyper database.
 ///
-/// This pool manages a set of reusable connections, automatically creating
-/// new connections when needed and recycling them after use.
-pub type Pool = managed::Pool<ConnectionManager>;
+/// Created by [`create_pool`]. Connections are opened lazily, reused across
+/// checkouts and recycled according to the configured [`RecycleStrategy`].
+/// `Pool` is a cheap handle: clone it to share one pool between tasks.
+#[derive(Clone, Debug)]
+pub struct Pool {
+    inner: managed::Pool<ConnectionManager>,
+}
 
-/// A pooled connection wrapper.
-pub type PooledConnection = managed::Object<ConnectionManager>;
+impl Pool {
+    /// Checks a connection out of the pool, opening one if none is idle and
+    /// the pool is below its maximum size.
+    ///
+    /// The connection returns to the pool when the guard is dropped.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`Error::Timeout`] if `wait_timeout`, `create_timeout` or
+    ///   `recycle_timeout` elapses.
+    /// - Returns [`Error::Connection`] if the pool has been [closed](Self::close).
+    /// - Returns the underlying error if opening a connection fails or an
+    ///   `after_connect` hook rejects it.
+    pub async fn get(&self) -> Result<PooledConnection> {
+        match self.inner.get().await {
+            Ok(inner) => Ok(PooledConnection { inner }),
+            Err(managed::PoolError::Backend(e)) => Err(e),
+            Err(e @ managed::PoolError::Timeout(_)) => Err(Error::timeout(e.to_string())),
+            Err(managed::PoolError::Closed) => {
+                Err(Error::connection("the connection pool is closed"))
+            }
+            Err(e) => Err(Error::internal(e.to_string())),
+        }
+    }
+
+    /// Returns a snapshot of the pool's occupancy.
+    #[must_use]
+    pub fn status(&self) -> PoolStatus {
+        let status = self.inner.status();
+        PoolStatus {
+            idle: status.available,
+            size: status.size,
+            max_size: status.max_size,
+        }
+    }
+
+    /// Closes the pool: idle connections are dropped and further
+    /// [`get`](Self::get) calls fail. Connections already checked out are
+    /// dropped, not returned, when their guards go out of scope.
+    pub fn close(&self) {
+        self.inner.close();
+    }
+
+    /// Returns `true` once [`close`](Self::close) has been called.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.inner.is_closed()
+    }
+}
+
+/// A connection checked out of an async [`Pool`].
+///
+/// Derefs to [`AsyncConnection`]. Returns to the pool when dropped; the pool
+/// recycles it before the next checkout.
+#[derive(Debug)]
+pub struct PooledConnection {
+    inner: managed::Object<ConnectionManager>,
+}
+
+impl PooledConnection {
+    /// Removes the connection from the pool's management, taking ownership.
+    ///
+    /// The pool slot is freed; the returned connection will not be recycled.
+    #[must_use]
+    pub fn take(self) -> AsyncConnection {
+        managed::Object::take(self.inner)
+    }
+}
+
+impl std::ops::Deref for PooledConnection {
+    type Target = AsyncConnection;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl std::ops::DerefMut for PooledConnection {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
 
 /// Creates a new connection pool from configuration.
 ///
 /// # Errors
 ///
-/// Returns [`Error::Config`] wrapping the `deadpool` builder failure if
-/// the pool cannot be constructed (e.g. invalid `max_size`). Connections
-/// themselves are opened lazily on first use, so endpoint/auth errors
-/// surface from [`Pool::get`](managed::Pool::get), not here.
+/// Returns [`Error::Config`] if the pool cannot be constructed (e.g. invalid
+/// `max_size`). Connections themselves are opened lazily on first use, so
+/// endpoint/auth errors surface from [`Pool::get`], not here.
 pub fn create_pool(config: PoolConfig) -> Result<Pool> {
     let max_size = config.max_size;
     let timeouts = Timeouts {
@@ -623,12 +708,15 @@ pub fn create_pool(config: PoolConfig) -> Result<Pool> {
     // a timeout is actually configured so the zero-config path stays untouched.
     let needs_runtime = config.has_timeout();
     let manager = ConnectionManager::new(config);
-    let mut builder = Pool::builder(manager).max_size(max_size).timeouts(timeouts);
+    let mut builder = managed::Pool::builder(manager)
+        .max_size(max_size)
+        .timeouts(timeouts);
     if needs_runtime {
         builder = builder.runtime(Runtime::Tokio1);
     }
     builder
         .build()
+        .map(|inner| Pool { inner })
         .map_err(|e| Error::config(format!("Failed to create pool: {e}")))
 }
 

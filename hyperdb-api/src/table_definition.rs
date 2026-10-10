@@ -6,7 +6,7 @@
 use std::borrow::Cow;
 
 use crate::error::{Error, Result};
-use hyperdb_api_core::types::{ColumnDefinition as TypesColumnDefinition, Nullability, SqlType};
+use hyperdb_api_core::types::{Nullability, SqlType};
 
 /// Possible persistence levels for database objects.
 ///
@@ -288,25 +288,6 @@ impl ColumnDefinition {
     /// This replaces the internal type representation with the provided `SqlType`.
     pub fn set_sql_type(&mut self, sql_type: SqlType) {
         self.sql_type_or_name = SqlTypeOrName::SqlType(sql_type);
-    }
-
-    /// Converts to the hyper-types `ColumnDefinition` (if `SqlType` is set).
-    #[must_use]
-    pub fn to_types_column_definition(&self) -> Option<TypesColumnDefinition> {
-        self.sql_type()
-            .map(|sql_type| TypesColumnDefinition::new(&self.name, sql_type, self.nullability()))
-    }
-}
-
-impl From<TypesColumnDefinition> for ColumnDefinition {
-    fn from(col: TypesColumnDefinition) -> Self {
-        ColumnDefinition {
-            name: col.name.clone(),
-            sql_type_or_name: SqlTypeOrName::SqlType(col.sql_type),
-            nullable: col.nullability.is_nullable(),
-            collation: None,
-            default_expr: None,
-        }
     }
 }
 

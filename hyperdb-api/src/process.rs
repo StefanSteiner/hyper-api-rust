@@ -987,11 +987,22 @@ impl HyperProcess {
 
     /// Returns the connection endpoint for this process.
     ///
-    /// This returns a [`ConnectionEndpoint`] that can be used to connect
-    /// to this Hyper instance via TCP, Unix Domain Socket, or Named Pipe.
-    #[must_use]
-    pub fn connection_endpoint(&self) -> Option<&ConnectionEndpoint> {
+    /// This is the endpoint [`Connection::new`](crate::Connection::new) connects
+    /// to: TCP, Unix Domain Socket, or Named Pipe.
+    pub(crate) fn connection_endpoint(&self) -> Option<&ConnectionEndpoint> {
         self.connection_endpoint.as_ref()
+    }
+
+    /// Returns the endpoint to connect to this process, rendered as a string.
+    ///
+    /// Unlike [`endpoint`](Self::endpoint), which is always the TCP
+    /// `host:port`, this is the endpoint [`Connection::new`](crate::Connection::new)
+    /// actually uses: a Unix socket path or named pipe when the process was
+    /// started with an IPC listen mode. Returns `None` if the process has no
+    /// connectable endpoint yet.
+    #[must_use]
+    pub fn connection_endpoint_string(&self) -> Option<String> {
+        self.connection_endpoint.as_ref().map(ToString::to_string)
     }
 
     /// Returns the log directory where hyperd writes its log files.

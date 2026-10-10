@@ -232,43 +232,9 @@ impl RowInserter {
             return Ok(0);
         }
 
-        // Start a COPY IN session and stream the pre-encoded buffer.
-        let client = conn.async_tcp_client().ok_or_else(|| {
-            Error::from_reason(
-                "Inserter requires a TCP connection. \
-                 gRPC connections do not support COPY operations.",
-            )
-        })?;
-
-        let columns: Vec<String> = table_def.columns().iter().map(|c| c.name.clone()).collect();
-        let column_refs: Vec<&str> = columns.iter().map(std::string::String::as_str).collect();
-        let table_name = table_def.qualified_name();
-
-        let mut writer = client
-            .copy_in_arc_with_format(&table_name, &column_refs, "HYPERBINARY")
-            .await
-            .map_err(|e| Error::from_reason(e.to_string()))?;
-
-        // hyperd caps COPY packets at ~150 MB; slice the pre-encoded
-        // buffer so large inserts don't trigger `packet with length
-        // > 157286400` on the server side.
-        const MAX_COPY_CHUNK: usize = 64 * 1024 * 1024;
-        let mut cursor = 0;
-        while cursor < encoded.len() {
-            let end = (cursor + MAX_COPY_CHUNK).min(encoded.len());
-            writer
-                .send_direct(&encoded[cursor..end])
-                .await
-                .map_err(|e| Error::from_reason(e.to_string()))?;
-            writer
-                .flush_stream()
-                .await
-                .map_err(|e| Error::from_reason(e.to_string()))?;
-            cursor = end;
-        }
-
-        let count = writer
-            .finish()
+        // Stream the pre-encoded buffer as one COPY IN session.
+        let count = conn
+            .copy_in_hyperbinary(&table_def, &encoded)
             .await
             .map_err(|e| Error::from_reason(e.to_string()))?;
         i64::try_from(count).map_err(|_| Error::from_reason("row count exceeds i64::MAX"))

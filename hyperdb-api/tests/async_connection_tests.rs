@@ -505,3 +505,36 @@ async fn stream_as_params_async() {
 
     conn.close().await.unwrap();
 }
+
+/// `copy_in_hyperbinary` streams a pre-encoded `HyperBinary` buffer into a
+/// table and reports the inserted row count; an empty buffer is a no-op.
+#[tokio::test(flavor = "current_thread")]
+async fn copy_in_hyperbinary_inserts_encoded_rows() {
+    use hyperdb_api::{InsertChunk, SqlType, TableDefinition};
+
+    let (_hyper, conn) = fresh_async_conn("async_copy_in_hyperbinary").await.unwrap();
+    let table_def = TableDefinition::from("copied")
+        .add_required_column("id", SqlType::int())
+        .add_required_column("name", SqlType::text());
+    conn.execute_command("CREATE TABLE copied (id INT NOT NULL, name TEXT NOT NULL)")
+        .await
+        .unwrap();
+
+    let mut chunk = InsertChunk::from_table_definition(&table_def);
+    for (id, name) in [(1, "a"), (2, "b"), (3, "c")] {
+        chunk.add_i32(id).unwrap();
+        chunk.add_str(name).unwrap();
+        chunk.end_row().unwrap();
+    }
+    let buffer = chunk.take().expect("rows were buffered");
+
+    assert_eq!(conn.copy_in_hyperbinary(&table_def, &[]).await.unwrap(), 0);
+    let inserted = conn.copy_in_hyperbinary(&table_def, &buffer).await.unwrap();
+    assert_eq!(inserted, 3);
+
+    let count: i64 = conn
+        .fetch_scalar("SELECT COUNT(*) FROM copied")
+        .await
+        .unwrap();
+    assert_eq!(count, 3);
+}

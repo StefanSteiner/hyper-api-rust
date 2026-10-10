@@ -13,6 +13,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   instead of `&[&dyn Debug]`. These constructors are emitted by the
   `query_as!` / `query_scalar!` macros and are not meant to be called
   directly, but code that did call them must now pass `ToSqlParam` values.
+- **BREAKING: `hyperdb_api::grpc` no longer re-exports `GrpcClient`,
+  `GrpcClientSync` or `GrpcError`.** They are the raw `hyperdb-api-core`
+  clients and carry `tonic` / `prost` types, which the core crate declares
+  unstable. Use `GrpcConnection` / `GrpcConnectionAsync` (or the unified
+  `Connection`); failures surface as `hyperdb_api::Error`. The module now also
+  exports `GrpcColumnInfo`, which `GrpcQueryResult::columns` returns.
+- **BREAKING: escape hatches that returned `hyperdb-api-core` types are no
+  longer public.** `Connection::tcp_client`, `AsyncConnection::async_tcp_client`,
+  `AsyncConnection::from_async_client`, `HyperProcess::connection_endpoint`,
+  `ColumnDefinition::to_types_column_definition` and
+  `impl From<hyperdb_api_core::types::ColumnDefinition> for ColumnDefinition`
+  are removed from the public API. Replacements:
+  `HyperProcess::connection_endpoint_string()` (the endpoint
+  `Connection::new` connects to, as a `String`) and
+  `AsyncConnection::copy_in_hyperbinary` (below), which replaces hand-written
+  COPY loops over `async_tcp_client`.
+- **BREAKING: the async pool no longer exposes `deadpool` types.**
+  `pool::Pool` and `pool::PooledConnection` were aliases of
+  `deadpool::managed::Pool` / `Object`; they are now `hyperdb-api` types, and
+  `pool::ConnectionManager` is crate-private. `Pool::get` returns
+  `hyperdb_api::Result<PooledConnection>` — a wait/create/recycle timeout is
+  `Error::Timeout`, a closed pool is `Error::Connection`, and a failed connect
+  is the underlying error — so the `.map_err(|e| Error::internal(e.to_string()))`
+  adapter is no longer needed. `Pool::status` returns `PoolStatus` (as
+  `ConnectionPool` does), and `PooledConnection::take` frees the slot. The
+  `deadpool` version is no longer part of this crate's semver surface.
+
+### Added
+
+- **`AsyncConnection::copy_in_hyperbinary`** streams a pre-encoded
+  `HyperBinary` buffer (for example from `InsertChunk`) into a table with
+  `COPY ... FROM STDIN`, slicing it under `hyperd`'s COPY packet cap, and
+  returns the inserted row count.
+- **`HyperProcess::connection_endpoint_string`**, and `Pool::close` /
+  `Pool::is_closed` on the async pool.
 
 ### Fixed
 

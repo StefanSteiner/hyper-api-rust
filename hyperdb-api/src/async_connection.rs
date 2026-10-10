@@ -16,6 +16,7 @@ use crate::error::{Error, Result};
 use crate::names::escape_sql_path;
 use crate::query_stats::{QueryStats, QueryStatsProvider};
 use crate::result::{Row, RowValue};
+use crate::table_definition::TableDefinition;
 
 /// An async connection to a Hyper database.
 ///
@@ -143,7 +144,7 @@ impl AsyncConnection {
 
     /// Builds an `AsyncConnection` from a pre-existing `AsyncClient` (TCP only).
     #[must_use]
-    pub fn from_async_client(
+    pub(crate) fn from_async_client(
         client: hyperdb_api_core::client::AsyncClient,
         database: Option<String>,
     ) -> Self {
@@ -1116,12 +1117,52 @@ impl AsyncConnection {
         Ok(())
     }
 
-    /// Returns a reference to the underlying async TCP client (`None` for gRPC).
+    /// Streams a pre-encoded `HyperBinary` buffer into `table` with `COPY ... FROM STDIN`.
     ///
-    /// Prefer the high-level `AsyncConnection` methods; this escape hatch
-    /// remains for code that needs direct protocol access (e.g. custom
-    /// COPY loops).
-    pub fn async_tcp_client(&self) -> Option<&hyperdb_api_core::client::AsyncClient> {
+    /// `data` must hold rows in the `HyperBinary` format for the table's columns,
+    /// in definition order — for example the output of
+    /// [`InsertChunk`](crate::InsertChunk). The buffer is sent in 64 MiB slices
+    /// because `hyperd` rejects COPY packets above ~150 MB. Returns the number of
+    /// rows the server reports as inserted; an empty buffer inserts nothing and
+    /// returns `0`.
+    ///
+    /// Most callers want [`AsyncInserter`](crate::AsyncInserter), which encodes
+    /// rows for you. Use this when the bytes are already encoded.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`Error::feature_not_supported`] on a gRPC connection, which
+    ///   cannot run COPY.
+    /// - Returns an error if the server rejects the COPY or the connection
+    ///   fails while sending.
+    pub async fn copy_in_hyperbinary(&self, table: &TableDefinition, data: &[u8]) -> Result<u64> {
+        // hyperd caps COPY packets at ~150 MB; slice well under that.
+        const MAX_COPY_CHUNK: usize = 64 * 1024 * 1024;
+
+        if data.is_empty() {
+            return Ok(0);
+        }
+        let client = self.async_tcp_client().ok_or_else(|| {
+            Error::feature_not_supported(
+                "copy_in_hyperbinary requires a TCP connection. \
+                 gRPC connections do not support COPY operations.",
+            )
+        })?;
+        let columns: Vec<&str> = table.columns.iter().map(|c| c.name.as_str()).collect();
+        let table_name = table.qualified_name();
+
+        let mut writer = client
+            .copy_in_arc_with_format(&table_name, &columns, "HYPERBINARY")
+            .await?;
+        for slice in data.chunks(MAX_COPY_CHUNK) {
+            writer.send_direct(slice).await?;
+            writer.flush_stream().await?;
+        }
+        Ok(writer.finish().await?)
+    }
+
+    /// Returns a reference to the underlying async TCP client (`None` for gRPC).
+    pub(crate) fn async_tcp_client(&self) -> Option<&hyperdb_api_core::client::AsyncClient> {
         self.transport.async_tcp_client()
     }
 

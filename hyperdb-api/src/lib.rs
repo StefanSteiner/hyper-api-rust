@@ -278,10 +278,12 @@ pub mod grpc {
     // Re-export connection types from grpc_connection module
     pub use crate::grpc_connection::{GrpcConnection, GrpcConnectionAsync};
 
-    // Re-export types from hyperdb_api_core::client::grpc
+    // Configuration and result types. The raw core clients (`GrpcClient`,
+    // `GrpcClientSync`) and `GrpcError` are deliberately not re-exported: they
+    // would put tonic and prost types into this crate's public API. Errors
+    // surface as `hyperdb_api::Error`.
     pub use hyperdb_api_core::client::grpc::{
-        GrpcClient, GrpcClientSync, GrpcConfig, GrpcError, GrpcQueryResult, GrpcResultChunk,
-        TransferMode,
+        GrpcColumnInfo, GrpcConfig, GrpcQueryResult, GrpcResultChunk, TransferMode,
     };
 }
 

@@ -100,12 +100,82 @@ async fn async_pool_wait_timeout_fires() {
     let result = pool.get().await;
     let elapsed = start.elapsed();
 
-    assert!(result.is_err(), "second acquire should time out");
+    assert!(
+        matches!(result, Err(hyperdb_api::Error::Timeout(_))),
+        "second acquire should time out with Error::Timeout, got {:?}",
+        result.as_ref().err()
+    );
     assert!(
         elapsed < Duration::from_secs(5),
         "should fail fast via wait_timeout, took {elapsed:?}"
     );
     drop(held);
+}
+
+/// `Pool::status` reports occupancy through `PoolStatus`, mirroring the sync
+/// pool, and `PooledConnection::take` frees the slot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn async_pool_status_and_take() {
+    let (_hyper, endpoint) = fresh_server("pool_async_status").unwrap();
+    let config = PoolConfig::new(&endpoint, db_path("pool_async_status"))
+        .create_mode(CreateMode::CreateAndReplace)
+        .max_size(3);
+    let pool = create_pool(config).unwrap();
+
+    let status = pool.status();
+    assert_eq!((status.size, status.idle, status.max_size), (0, 0, 3));
+
+    let conn = pool.get().await.expect("get");
+    let status = pool.status();
+    assert_eq!((status.size, status.idle), (1, 0), "one checked out");
+
+    drop(conn);
+    let status = pool.status();
+    assert_eq!((status.size, status.idle), (1, 1), "returned to the pool");
+
+    let owned = pool.get().await.expect("get again").take();
+    owned.execute_command("SELECT 1").await.unwrap();
+    assert_eq!(pool.status().size, 0, "take() should free the pool slot");
+}
+
+/// A closed pool refuses checkouts with a `hyperdb_api::Error`, not a
+/// deadpool error type.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn async_pool_get_after_close_is_connection_error() {
+    let (_hyper, endpoint) = fresh_server("pool_async_closed").unwrap();
+    let config = PoolConfig::new(&endpoint, db_path("pool_async_closed"))
+        .create_mode(CreateMode::CreateAndReplace)
+        .max_size(2);
+    let pool = create_pool(config).unwrap();
+    assert!(!pool.is_closed());
+
+    pool.close();
+    assert!(pool.is_closed());
+    let err = pool
+        .get()
+        .await
+        .expect_err("closed pool must refuse checkout");
+    assert!(
+        matches!(err, hyperdb_api::Error::Connection { .. }),
+        "expected Error::Connection, got {err:?}"
+    );
+}
+
+/// A failure to open a connection surfaces as the underlying
+/// `hyperdb_api::Error`, not a wrapped pool error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn async_pool_get_surfaces_connect_error() {
+    // Nothing listens on port 1; the first checkout has to open a connection.
+    let config = PoolConfig::new("127.0.0.1:1", db_path("pool_async_connect_err"))
+        .create_mode(CreateMode::CreateAndReplace)
+        .max_size(1);
+    let pool = create_pool(config).unwrap();
+
+    let err = pool.get().await.expect_err("nothing is listening");
+    assert!(
+        matches!(err, hyperdb_api::Error::Connection { .. }),
+        "expected Error::Connection, got {err:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

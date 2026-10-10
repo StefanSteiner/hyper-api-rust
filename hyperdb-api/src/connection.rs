@@ -1739,7 +1739,7 @@ impl Connection {
     /// Returns the underlying wire-protocol client, or `None` for gRPC connections.
     ///
     /// TCP, Unix-socket and named-pipe connections all return `Some`.
-    pub fn tcp_client(&self) -> Option<&Client> {
+    pub(crate) fn tcp_client(&self) -> Option<&Client> {
         match &self.transport {
             Transport::Tcp(tcp) => Some(&tcp.client),
             Transport::Grpc(_) => None,
