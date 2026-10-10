@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **BREAKING: `SqlType` is `#[non_exhaustive]`, and so are the struct variants
+  of `SqlType` (`Numeric`, `Varchar`, `Char`) and of `Error` (`Connection`,
+  `Server`, `Closed`, `Cancelled`, `Column`, `ColumnIndexOutOfBounds`,
+  `Internal`) and `ColumnErrorKind::TypeMismatch`.** Match `SqlType` with a
+  wildcard arm, end any pattern that names variant fields with `..`, and build
+  these values with the constructors (`SqlType::numeric`, `Error::server`, ...)
+  instead of struct expressions. This lets a minor release add a type or a
+  field without a major bump.
+- **Arrow `Decimal128` / `Decimal256` columns whose precision is outside
+  `1..=38` (or whose scale exceeds the precision) now map to `SqlType::Text`**
+  rather than an invalid `NUMERIC`, like other unmapped Arrow types.
 - **`QueryAs::new` and `QueryScalar::new` now take `&[&dyn ToSqlParam]`**
   instead of `&[&dyn Debug]`. These constructors are emitted by the
   `query_as!` / `query_scalar!` macros and are not meant to be called

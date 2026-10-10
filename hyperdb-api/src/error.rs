@@ -20,20 +20,19 @@ use thiserror::Error as ThisError;
 /// This enum is `#[non_exhaustive]`: new variants may be added in minor
 /// releases, so match arms must include a wildcard `_ =>` pattern.
 ///
-/// Struct variants (`Connection`, `Server`, `Column`,
-/// `ColumnIndexOutOfBounds`, `Internal`) cannot use Rust's
-/// `#[non_exhaustive]` (E0639), so forward-compatibility for new fields
-/// relies on construction via the provided constructors:
+/// Every struct variant (`Connection`, `Server`, `Closed`, `Cancelled`,
+/// `Column`, `ColumnIndexOutOfBounds`, `Internal`) is `#[non_exhaustive]`
+/// too, so a field can be added in a minor release. Outside this crate you
+/// cannot build them with struct-expression syntax (E0639) and a pattern
+/// that names fields must end in `..`. Use the constructors:
 ///
 /// - [`Self::internal`] for [`Self::Internal`]
 /// - [`Self::connection`] / [`Self::connection_with_io`] for [`Self::Connection`]
 /// - [`Self::server`] for [`Self::Server`]
 /// - [`Self::column`] for [`Self::Column`]
 /// - [`Self::column_index_out_of_bounds`] for [`Self::ColumnIndexOutOfBounds`]
-///
-/// Downstream code that uses struct-expression syntax for these
-/// variants will fail to compile if a new field is added in a minor
-/// release; using the constructors keeps callers source-compatible.
+/// - [`Self::closed`] / [`Self::closed_with_sqlstate`] for [`Self::Closed`]
+/// - [`Self::cancelled`] / [`Self::cancelled_with_sqlstate`] for [`Self::Cancelled`]
 #[derive(Debug, ThisError)]
 #[non_exhaustive]
 pub enum Error {
@@ -51,6 +50,7 @@ pub enum Error {
         "connection error{}: {message}",
         sqlstate.as_ref().map(|s| format!(" ({s})")).unwrap_or_default(),
     )]
+    #[non_exhaustive]
     Connection {
         /// Human-readable description.
         message: String,
@@ -82,6 +82,7 @@ pub enum Error {
         detail.as_ref().map(|d| format!("\nDETAIL: {d}")).unwrap_or_default(),
         hint.as_ref().map(|h| format!("\nHINT: {h}")).unwrap_or_default(),
     )]
+    #[non_exhaustive]
     Server {
         /// The 5-character `PostgreSQL` SQLSTATE code, if reported.
         sqlstate: Option<String>,
@@ -113,6 +114,7 @@ pub enum Error {
         "connection closed{}: {message}",
         sqlstate.as_ref().map(|s| format!(" ({s})")).unwrap_or_default(),
     )]
+    #[non_exhaustive]
     Closed {
         /// Human-readable description.
         message: String,
@@ -131,6 +133,7 @@ pub enum Error {
         "operation cancelled{}: {message}",
         sqlstate.as_ref().map(|s| format!(" ({s})")).unwrap_or_default(),
     )]
+    #[non_exhaustive]
     Cancelled {
         /// Human-readable description.
         message: String,
@@ -193,6 +196,7 @@ pub enum Error {
     /// by `FromRow` impls (through `RowAccessor`) and `Row::get_by_name` to
     /// signal which column failed and why.
     #[error("column {name}: {kind}")]
+    #[non_exhaustive]
     Column {
         /// The column name.
         name: String,
@@ -205,6 +209,7 @@ pub enum Error {
     /// access; named access uses [`Self::Column`] with
     /// [`ColumnErrorKind::Missing`].
     #[error("column index {idx} out of bounds (row has {column_count} columns)")]
+    #[non_exhaustive]
     ColumnIndexOutOfBounds {
         /// The requested 0-based column index.
         idx: usize,
@@ -225,6 +230,7 @@ pub enum Error {
     ///
     /// Construct via [`Self::internal`].
     #[error("internal error: {message}")]
+    #[non_exhaustive]
     Internal {
         /// Human-readable description of what invariant was violated.
         message: String,
@@ -245,6 +251,7 @@ pub enum ColumnErrorKind {
 
     /// Column value could not be decoded as the target type.
     #[error("type mismatch: expected {expected}, got {actual}")]
+    #[non_exhaustive]
     TypeMismatch {
         /// Rust type name the caller asked for.
         expected: String,

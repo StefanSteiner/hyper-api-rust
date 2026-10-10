@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **`SqlType` and its struct variants (`Numeric`, `Varchar`, `Char`) are
+  `#[non_exhaustive]`.** `SqlType::try_numeric` is the non-panicking
+  counterpart of `SqlType::numeric` for untrusted precision and scale.
 - **`client::grpc::TransferMode` is now a crate-owned enum** (`Sync`, `Async`,
   `Adaptive`) with `From` conversions to the generated protobuf type, replacing
   the re-export of the prost type. `GrpcColumnInfo`'s `name` and `sql_type`

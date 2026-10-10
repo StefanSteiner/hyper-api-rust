@@ -459,7 +459,7 @@ fn test_derive_from_row_missing_column_errors() {
         .expect_err("expected missing-column error");
 
     match err {
-        Error::Column { name, kind } => {
+        Error::Column { name, kind, .. } => {
             assert_eq!(name, "not_in_query");
             assert!(
                 matches!(kind, ColumnErrorKind::Missing),

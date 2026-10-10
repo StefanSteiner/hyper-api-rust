@@ -819,14 +819,11 @@ pub(crate) fn arrow_type_to_sql_type(dt: &DataType) -> SqlType {
         DataType::Time32(_) | DataType::Time64(_) => SqlType::Time,
         DataType::Timestamp(_, None) => SqlType::Timestamp,
         DataType::Timestamp(_, Some(_)) => SqlType::TimestampTz,
-        DataType::Decimal128(p, s) => SqlType::Numeric {
-            precision: u32::from(*p),
-            scale: decimal_scale_to_u32(*s),
-        },
-        DataType::Decimal256(p, s) => SqlType::Numeric {
-            precision: u32::from(*p),
-            scale: decimal_scale_to_u32(*s),
-        },
+        // Hyper NUMERIC holds at most 38 digits; a wider (or malformed)
+        // decimal falls back to text like any other unmapped type.
+        DataType::Decimal128(p, s) | DataType::Decimal256(p, s) => {
+            SqlType::try_numeric(u32::from(*p), decimal_scale_to_u32(*s)).unwrap_or(SqlType::Text)
+        }
         DataType::Interval(_) => SqlType::Interval,
         _ => SqlType::Text, // Fallback to text for unknown types
     }
