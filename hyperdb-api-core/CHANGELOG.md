@@ -24,6 +24,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **`AuthenticatedGrpcClient::get_table_labels` / `get_column_labels` escape
   their `schema` and `table` arguments** instead of interpolating them into
   the catalog query unescaped.
+- **gRPC `QueryParameters::json_positional` and `json_named` produced JSON
+  that `hyperd` rejects** (`22023 invalid JSON query parameters`). They sent
+  bare values (`[42,"hi"]`) and an object (`{"id":42}`). `hyperd` requires an
+  array of typed entries (`[{"type":"bigint","value":"42"}]`, plus `"name"` for
+  named parameters), which both now emit. The Hyper type is inferred from the
+  JSON value (`bool`, `bigint`, `numeric` above `i64::MAX`, `float8`,
+  `varchar`; `null` as a nullable `varchar`); array and object values return
+  an error. The docs for `from_json_string` / `from_json_value`, which pass
+  JSON through unchanged, now describe the typed format instead of showing
+  examples `hyperd` would reject.
 
 ## [1.0.0-rc.3] - 2026-09-07
 

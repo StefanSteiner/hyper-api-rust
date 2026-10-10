@@ -220,8 +220,11 @@ impl GrpcClient {
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let config = GrpcConfig::new("http://localhost:7484");
     /// # let mut client = GrpcClient::connect(config).await?;
-    /// // Dollar-numbered parameters (mixed types use from_json_value)
-    /// let params = QueryParameters::from_json_value(&serde_json::json!([42, "Alice"]))?;
+    /// // Dollar-numbered parameters (mixed types use serde_json::json!)
+    /// let params = QueryParameters::json_positional(&[
+    ///     &serde_json::json!(42),
+    ///     &serde_json::json!("Alice"),
+    /// ])?;
     /// let result = client.execute_query_with_params(
     ///     "SELECT * FROM users WHERE id = $1 AND name = $2",
     ///     params,
