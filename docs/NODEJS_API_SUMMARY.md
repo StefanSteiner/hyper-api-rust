@@ -63,12 +63,14 @@ graph TB
 ## Core API
 
 - **`HyperProcess`** — manages local `hyperd` server; properties: `endpoint`, `isOpen`, `logPath`; `connectToDatabase()` convenience method
-- **`Connection`** — async database connection; static factories: `connect()`, `connectWithAuth()`, `withoutDatabase()`
-- **`ConnectionBuilder`** — fluent builder: `database()`, `createMode()`, `user()`, `password()`, `loginTimeout()`, `build()`
+- **`Connection`** — async database connection; static factories: `connect()`, `connectWithAuth()`, `withoutDatabase()`; `isAlive`, `isTls`, `database`, `close()`
+- **`ConnectionBuilder`** — fluent builder: `database()`, `createMode()`, `user()`, `password()`, `loginTimeout()`, `tls()`, `build()`
 - **`Catalog`** — DDL operations: `createSchema/Table`, `dropSchema/Table`, `getTableNames`, `getSchemaNames`, `hasTable`, `hasSchema`, `createTableIfNotExists`, `dropTableIfExists`
 - **`TableDefinition`** — schema definition: `addColumn(name, type, nullable)`, `withSchema()`, `toCreateSql()`, `getColumns()`
 - **`SqlType`** — 18 factory methods: `bool`, `smallInt`, `int`, `bigInt`, `float`, `double`, `numeric(p,s)`, `text`, `varchar`, `char`, `bytes`, `date`, `time`, `timestamp`, `timestampTz`, `interval`, `json`, `geography`
-- **`Inserter`** — bulk loader via COPY protocol: `addRow()`, `addRows()`, `addColumnar()`, `execute()`
+- **`RowInserter`** — bulk loader via COPY protocol: `new RowInserter(conn, tableDef)`, `addRow()`, `addRows()`, `addColumnar()`, `bufferedRowCount`, `execute()`
+- **`ArrowInserter`** — Arrow IPC bulk loader: `ArrowInserter.create(conn, tableDef)`, `insertRaw(buf)`, `execute()`, `cancel()`, `hasData()`, `totalBytes()`, `chunkCount()`
+- **`PreparedStatement`** — from `conn.prepare(sql)` / `conn.prepareTyped(sql, oids)`: `query()`, `execute()`, `fetchOne()`, `fetchOptional()`, `getSchema()`, `close()`; properties `paramCount`, `sql`
 - **`CreateMode`** — `DoNotCreate`, `Create`, `CreateIfNotExists`, `CreateAndReplace`
 
 ## Query APIs (by performance tier)
@@ -82,16 +84,15 @@ graph TB
 
 **Result types:**
 
-- **`RowData`** — typed accessors: `getInt32`, `getInt64`, `getBigInt`, `getFloat64`, `getString`, `getBool`, `getBytes`, `getDateMs`, `getTimestampMs`, `getJson`, `isNull`; `toJSON()` with `setColumnNames()` for schema-aware serialization
+- **`RowData`** — typed accessors: `getInt32`, `getInt64`, `getBigInt`, `getFloat64`, `getString`, `getBool`, `getBytes`, `getDateMs`, `getTimestampMs`, `getJson`, `isNull`; `columnCount`
 - **`QueryStream`** — `nextChunk()` + `for await...of` async iteration
-- **`ColumnarStream`** / **`ColumnarChunk`** — typed arrays per column: `getInt32Column`, `getFloat64Column`, `getStringColumn`, `getNulls`
+- **`ColumnarStream`** / **`ColumnarChunk`** — typed arrays per column: `getInt32Column`, `getFloat64Column`, `getStringColumn`, `getInt64Column`, `getNulls`; `rowCount`, `columnCount`
 
 ## Key Features
 
 - **Tagged template literals** — `` conn.sql`SELECT * FROM t WHERE id = ${id}` `` / `` conn.command`...` `` — SQL-injection-safe, no `$1` boilerplate
-- **Parameterized queries** — `executeQueryParams(sql, params)` / `executeCommandParams(sql, params)` with `$1`/`$2` syntax
-- **`ConnectionPool`** (from `pool.mjs`) — `min`/`max` connections, idle timeout, acquire timeout; shortcuts: `pool.query()`, `pool.queryParams()`, `pool.use(fn)`; stats: `size`, `idle`, `active`, `pending`
-- **Query event hooks** — `conn.on('query', ({sql, durationMs, rowCount, type}) => ...)` for logging/metrics
+- **Parameterized queries** — `conn.prepare(sql)` returns a server-side `PreparedStatement` with `$1`/`$2` placeholders (`query(params)` / `execute(params)`); `conn.prepareTyped(sql, paramOids)` pins parameter types
+- **`ConnectionPool`** (from `pool.mjs`) — `min`/`max` connections, idle timeout, acquire timeout; shortcuts: `pool.query()`, `pool.queryParams()`, `pool.command()`, `pool.use(fn)`; manual `acquire()` / `release()`; stats: `size`, `idle`, `active`, `pending`
 - **Query statistics** — `conn.enableQueryStats(logPath)` / `conn.lastQueryStats()` for Hyper engine metrics (parse, compile, execute times, memory, storage I/O)
 - **Resource management** — `Symbol.asyncDispose` / `Symbol.dispose` for `await using` (Node 22+)
 - **Tableau compatible** — `createExtractTable(conn, name, columns)` helper for the Extract schema convention

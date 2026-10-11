@@ -49,6 +49,7 @@ export class ConnectionPool {
   #idle = [];          // { conn, lastUsed }
   #active = new Set();
   #waiting = [];       // { resolve, reject, timer } waiting for a connection
+  #connecting = 0;     // in-flight #connect() calls holding a reserved slot
   #closed = false;
   #idleTimer = null;
   #acquireTimeoutMs;
@@ -144,10 +145,16 @@ export class ConnectionPool {
     }
 
     // Create a new connection if below max
-    if (this.size < this.#max) {
-      const conn = await this.#connect();
-      this.#active.add(conn);
-      return conn;
+    // Reserve the slot before awaiting so concurrent acquires cannot overshoot max.
+    if (this.size + this.#connecting < this.#max) {
+      this.#connecting++;
+      try {
+        const conn = await this.#connect();
+        this.#active.add(conn);
+        return conn;
+      } finally {
+        this.#connecting--;
+      }
     }
 
     // At max capacity — wait for a release (with timeout)

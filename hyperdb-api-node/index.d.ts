@@ -175,7 +175,7 @@ export declare class ArrowInserter {
   execute(): Promise<number>
   /** Cancels the COPY stream without committing any rows. */
   cancel(): Promise<void>
-  /** True until any data has been sent; useful for conditional flushes. */
+  /** True once any data (the schema or a record batch) has been sent; useful for conditional flushes. */
   hasData(): Promise<boolean>
   /** Total bytes sent to the server so far. */
   totalBytes(): Promise<number>

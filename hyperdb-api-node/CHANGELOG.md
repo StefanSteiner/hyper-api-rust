@@ -64,6 +64,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+* `ConnectionPool.acquire()` no longer exceeds `max` under concurrent calls:
+  in-flight connection attempts now reserve a slot (released on failure), where
+  before only established connections were counted.
+* Corrected the `ArrowInserter.hasData()` doc comment, which said "true until
+  any data has been sent"; it returns true once data has been sent. The README
+  write-type table now matches `RowInserter` behavior (only `Buffer` is sent as
+  bytes; `Date` and plain objects are string-coerced, not ISO/JSON-converted).
 * `NUMERIC` columns are now decoded correctly. Previously the bindings read
   numerics with `getF64`, which reinterpreted the raw unscaled-integer bytes as
   an IEEE-754 double and returned garbage values or `NaN`. Numerics are now

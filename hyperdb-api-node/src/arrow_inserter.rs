@@ -101,7 +101,7 @@ impl ArrowInserter {
         Ok(())
     }
 
-    /// True until any data has been sent; useful for conditional flushes.
+    /// True once any data (the schema or a record batch) has been sent; useful for conditional flushes.
     #[napi]
     pub async fn has_data(&self) -> bool {
         let guard = self.inner.lock().await;

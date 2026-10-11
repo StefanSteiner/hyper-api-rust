@@ -356,17 +356,20 @@ for await (const row of conn.executeQueryStream('SELECT * FROM big_table')) {
 | JSON | `getJson(i)` -> `JSON.parse()` | `string` |
 | Any type | `getString(i)` | `string` (fallback) |
 
-**Writing (JS -> Hyper) — via RowInserter or tagged templates:**
+**Writing (JS -> Hyper) via `RowInserter`:**
 
-| JS Type | SQL Type |
+`RowInserter.addRow()` accepts `number`, `string`, `boolean`, `null`/`undefined`, and `Buffer`. Values are encoded as follows (see `js_value_to_insert_value` in `src/inserter.rs`):
+
+| JS Type | Encoded as |
 |---|---|
-| `number` | INT / BIGINT / DOUBLE (auto-detected) |
+| `number` | Integer-valued and within `i32` range: INT; integer-valued within `i64` range: BIGINT; otherwise DOUBLE. Converted to the destination column's numeric type (SMALLINT / INT / BIGINT / FLOAT / DOUBLE); an integer that does not fit the column is rejected |
 | `string` | TEXT |
 | `boolean` | BOOLEAN |
 | `null` / `undefined` | NULL |
-| `Buffer` | BYTEA (`RowInserter` only) |
-| `Date` | TIMESTAMP (via `toISOString()`) |
-| `{}` (plain object) | JSON (via `JSON.stringify()`) |
+| `Buffer` | BYTEA (the only value sent as raw bytes) |
+| Anything else (`Date`, plain objects, arrays, ...) | Coerced with JS `String(value)` and sent as TEXT. A `Date` is **not** converted with `toISOString()` and a plain object is **not** serialized as JSON, so `String(date)` / `"[object Object]"` is sent. Convert explicitly first, e.g. `date.toISOString()` or `JSON.stringify(obj)`, and use a TEXT column (or cast after loading) |
+
+**Writing via tagged templates / prepared statements:** `` conn.sql`...` `` and `` conn.command`...` `` accept `number`, `bigint`, `string`, `boolean`, `null`, and `Date`. A `Date` is sent as its UTC `toISOString()` value with `T` replaced by a space, so it works for both TIMESTAMP and TIMESTAMPTZ. `Buffer` parameters are rejected (stage BYTEA data via `RowInserter`/COPY).
 
 ### Tagged Template Literals
 

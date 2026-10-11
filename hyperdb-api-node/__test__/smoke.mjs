@@ -230,6 +230,31 @@ async function main() {
   console.log(`   Concurrent queries: ${concurrent.length} completed`);
   console.log(`   Pool stats: size=${pool.size}, idle=${pool.idle}, active=${pool.active}`);
 
+  // Burst of concurrent acquires on a cold pool must never exceed max
+  // (in-flight connects have to count against the limit).
+  const burstPool = new ConnectionPool(hyper.endpoint, join(TEST_DIR, 'smoke_test.hyper'), {
+    min: 0,
+    max: 3,
+    idleTimeoutMs: 0,
+    createMode: CreateMode.DoNotCreate,
+  });
+  let peakActive = 0;
+  let peakSize = 0;
+  await Promise.all(
+    Array.from({ length: 12 }, () =>
+      burstPool.use(async (c) => {
+        peakActive = Math.max(peakActive, burstPool.active);
+        peakSize = Math.max(peakSize, burstPool.size);
+        await c.executeQuery('SELECT 1');
+      })
+    )
+  );
+  assert(peakActive <= 3, `pool active ${peakActive} exceeded max 3`);
+  assert(peakSize <= 3, `pool size ${peakSize} exceeded max 3`);
+  assert(burstPool.size <= 3, `pool size ${burstPool.size} exceeded max 3 after burst`);
+  await burstPool.close();
+  console.log(`   Concurrent acquire burst respects max (peak active=${peakActive}) ✓`);
+
   await pool.close();
   console.log('   Pool closed ✓');
 
