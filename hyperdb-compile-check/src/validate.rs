@@ -44,10 +44,10 @@ use crate::registry::{self, Registry};
 pub fn validate_query_as(struct_name: &str, sql: &str) -> Result<(), ValidationError> {
     // Step 1: look up by struct ident (not SQL table name — they differ).
     let Some((_table_name, entry)) = registry::get_by_struct(struct_name) else {
-        // An empty registry means no `derive(Table)` ran in this process, so we
-        // have no basis to claim the struct is unregistered. See
-        // `registry::is_empty`.
-        if registry::is_empty() {
+        // An empty registry, or a rust-analyzer proc-macro server with a partial
+        // one, gives us no basis to claim the struct is unregistered. See
+        // `registry::registration_unknowable`.
+        if registry::registration_unknowable() {
             return Ok(());
         }
         return Err(ValidationError::StructNotRegistered {
@@ -116,8 +116,8 @@ pub fn validate_scalar_sql(sql: &str) -> Result<(), ValidationError> {
 ///
 /// Stops early on syntax errors, missing-column errors, or unregistered tables.
 ///
-/// Returns `Ok(None)` when validation cannot be performed because nothing is
-/// registered in this process — see [`registry::is_empty`]. Callers skip
+/// Returns `Ok(None)` when validation cannot be performed because registration
+/// cannot be known in this process — see [`registry::registration_unknowable`]. Callers skip
 /// validation in that case instead of reporting a false diagnostic.
 fn run_dry_run_with_seed(
     sql: &str,
@@ -134,7 +134,7 @@ fn run_dry_run_with_seed(
                 ErrorClass::MissingTable(t) => match Registry::seed_if_known(&t, db) {
                     Ok(true) => {} // seeded successfully; loop iterates to retry the dry-run
                     Ok(false) => {
-                        if registry::is_empty() {
+                        if registry::registration_unknowable() {
                             return Ok(None);
                         }
                         return Err(ValidationError::TablesNotRegistered { tables: vec![t] });

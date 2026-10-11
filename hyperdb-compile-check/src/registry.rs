@@ -111,6 +111,30 @@ pub fn is_empty() -> bool {
     registry().lock().is_empty()
 }
 
+/// Returns true when "not in the registry" is not evidence of a missing
+/// `derive(Table)`, so callers must skip validation instead of erroring.
+///
+/// That holds when the registry is empty (see [`is_empty`]) and also whenever
+/// the macro is expanding inside rust-analyzer's `proc-macro-srv`. That
+/// process is shared across the whole workspace and expands lazily and out of
+/// order, so its registry is routinely *non-empty yet missing the struct under
+/// the cursor* (some other crate's derive registered a table, this crate's
+/// did not run in this process). `cargo`/rustc never has this problem, so real
+/// builds keep full validation.
+pub fn registration_unknowable() -> bool {
+    is_empty() || running_under_rust_analyzer()
+}
+
+fn running_under_rust_analyzer() -> bool {
+    static UNDER_RA: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *UNDER_RA.get_or_init(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+            .is_some_and(|stem| stem.starts_with("rust-analyzer"))
+    })
+}
+
 /// The public `Registry` type — a thin newtype that provides the seeding
 /// interface against a live `CompileTimeDb`. Created from a lock guard by
 /// `validate_query_as`.

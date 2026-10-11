@@ -18,6 +18,11 @@ surface, and consumers should depend on `hyperdb-api-derive` instead.
   the statement with nothing bound, so Hyper rejected every parameterized
   query with "expected to have 0 parameter(s)". Such queries are now
   prepared with one unspecified-type parameter per placeholder.
+- **No more false "not registered" errors in rust-analyzer.** Its shared
+  proc-macro server can hold a non-empty registry that lacks the struct under
+  the cursor, so the empty-registry skip was not enough. Validation now also
+  skips unregistered-struct/table diagnostics when expanding inside
+  `rust-analyzer-proc-macro-srv`; `cargo` builds are unchanged.
 
 ## [1.0.0-rc.3] - 2026-09-07
 
