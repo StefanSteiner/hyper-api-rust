@@ -1065,6 +1065,16 @@ mod tests {
             Negotiated::Tls(mut stream) => {
                 stream.write_all(PAYLOAD).map_err(Error::from_io)?;
                 stream.flush().map_err(Error::from_io)?;
+                // Close gracefully and drain until the server hangs up. A TLS
+                // 1.3 server sends session tickets the client never reads;
+                // dropping the socket with that data unread makes Windows send
+                // a reset (os error 10053), which discards the payload the
+                // server has not read yet.
+                stream.conn.send_close_notify();
+                stream.flush().ok();
+                stream.sock.shutdown(std::net::Shutdown::Write).ok();
+                stream.sock.set_read_timeout(Some(IO_TIMEOUT)).ok();
+                std::io::copy(&mut stream.sock, &mut std::io::sink()).ok();
                 Ok(true)
             }
         }
@@ -1537,6 +1547,14 @@ mod tests {
             Negotiated::Tls(mut stream) => {
                 stream.write_all(PAYLOAD).await.map_err(Error::from_io)?;
                 stream.flush().await.map_err(Error::from_io)?;
+                // Graceful close plus drain; see `negotiate_and_send`.
+                stream.shutdown().await.ok();
+                tokio::time::timeout(
+                    IO_TIMEOUT,
+                    tokio::io::copy(&mut stream, &mut tokio::io::sink()),
+                )
+                .await
+                .ok();
                 Ok(true)
             }
         }
