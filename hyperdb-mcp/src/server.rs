@@ -23,7 +23,7 @@ use crate::engine::{
 use crate::error::{ErrorCode, McpError};
 use crate::export::{ExportOptions, export_to_file};
 use crate::ingest::{
-    InferredFileFormat, IngestOptions, detect_file_format, ingest_csv, ingest_csv_file,
+    InferredFileFormat, IngestMode, IngestOptions, detect_file_format, ingest_csv, ingest_csv_file,
     ingest_csv_file_async, ingest_json, ingest_json_file, ingest_json_file_async,
 };
 use crate::ingest_arrow::{
@@ -309,6 +309,15 @@ impl<'de> Deserialize<'de> for MergeKey {
 }
 
 impl MergeKey {
+    /// The column names as given (possibly empty); validated by
+    /// [`IngestMode::parse`].
+    pub fn into_names(self) -> Vec<String> {
+        match self {
+            Self::Single(s) => vec![s],
+            Self::Multi(v) => v,
+        }
+    }
+
     /// Materialize as a non-empty `Vec<String>`, or return `None` for the
     /// empty case so callers can convert it into an `InvalidArgument`
     /// error with a context-appropriate message.
@@ -366,38 +375,6 @@ pub struct LoadFilesParams {
     /// Shorthand for `database: "persistent"`. If both `database` and
     /// `persist` are set, `database` wins.
     pub persist: Option<bool>,
-}
-
-/// Validate the (`mode`, `merge_key`) combination at the tool boundary.
-/// Returns the normalized `Vec<String>` for merge mode (or `None` for
-/// replace/append). Rejects:
-///
-/// - `mode = "merge"` without `merge_key` → `InvalidArgument`.
-/// - `mode = "merge"` with empty / blank-element `merge_key` →
-///   `InvalidArgument`.
-/// - `mode != "merge"` with `merge_key` set → `InvalidArgument`
-///   (catches "I added merge_key but forgot mode" mistakes loudly).
-fn validate_merge_args(
-    mode: &str,
-    merge_key: Option<MergeKey>,
-) -> Result<Option<Vec<String>>, McpError> {
-    match (mode, merge_key) {
-        ("merge", None) => Err(McpError::new(
-            ErrorCode::InvalidArgument,
-            "mode=merge requires merge_key (a column name or list of column names)",
-        )),
-        ("merge", Some(mk)) => mk.into_vec().map(Some).ok_or_else(|| {
-            McpError::new(
-                ErrorCode::InvalidArgument,
-                "merge_key must be a non-empty list of non-empty column names",
-            )
-        }),
-        (_, Some(_)) => Err(McpError::new(
-            ErrorCode::InvalidArgument,
-            "merge_key is only valid with mode=merge",
-        )),
-        (_, None) => Ok(None),
-    }
 }
 
 /// Parameters for the local-only `load_iceberg` tool.
@@ -810,7 +787,9 @@ pub struct CopyQueryParams {
     ///   the query's result schema via `CREATE TABLE AS`.
     /// * `"append"` — error if the target does not exist; rows are
     ///   appended via `INSERT INTO ... SELECT`.
-    /// * `"replace"` — drop (if any) and recreate, atomically.
+    /// * `"replace"` — build the result in a hidden staging table, then swap it in; a
+    ///   failing SELECT leaves the existing target untouched. (Hyper cannot roll
+    ///   back renames, so the swap itself is two back-to-back RENAMEs, not one atomic step.)
     pub mode: String,
     /// Alias of the destination database. `None` and `"local"` both
     /// mean the server's local database. Any other value must refer
@@ -1658,8 +1637,36 @@ impl HyperMcpServer {
             // runs *inside* `with_engine` (not `ensure_engine`) so the
             // catalog SQL can see errors classified via the normal error
             // path. No-op in read-only mode.
-            self.ensure_catalog_ready(engine);
-            let result = f(engine);
+            //
+            // A panic inside a tool body (or the catalog bootstrap) must not
+            // unwind through the engine mutex (poisoning it and wedging every
+            // later call). Catch it, turn it into an `InternalError` reply
+            // and discard the engine: the connection may be mid-protocol, so
+            // the next call reconnects rather than trusting it.
+            let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.ensure_catalog_ready(engine);
+                f(engine)
+            })) {
+                Ok(result) => result,
+                Err(payload) => {
+                    let detail = payload
+                        .downcast_ref::<&str>()
+                        .map(|s| (*s).to_string())
+                        .or_else(|| payload.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "non-string panic payload".to_string());
+                    tracing::error!(panic = %detail, "tool call panicked; discarding engine");
+                    *guard = None;
+                    if let Ok(mut ready) = self.catalog_ready.lock() {
+                        *ready = false;
+                    }
+                    Err(McpError::new(
+                        ErrorCode::InternalError,
+                        format!(
+                            "internal error: tool call panicked ({detail}); the connection was reset, retry"
+                        ),
+                    ))
+                }
+            };
             let connection_lost = result
                 .as_ref()
                 .is_err_and(|e| e.code == ErrorCode::ConnectionLost);
@@ -1943,9 +1950,8 @@ impl HyperMcpServer {
             let schema_override = crate::schema::normalize_schema_param(params.schema.as_ref())?;
             let opts = IngestOptions {
                 table: temp_table.clone(),
-                mode: "replace".into(),
+                mode: IngestMode::Replace,
                 schema_override,
-                merge_key: None,
                 target_db: None,
             };
 
@@ -1994,9 +2000,8 @@ impl HyperMcpServer {
             let schema_override = crate::schema::normalize_schema_param(params.schema.as_ref())?;
             let opts = IngestOptions {
                 table: temp_table.clone(),
-                mode: "replace".into(),
+                mode: IngestMode::Replace,
                 schema_override,
-                merge_key: None,
                 target_db: None,
             };
 
@@ -2061,7 +2066,16 @@ impl HyperMcpServer {
         // existing one), which is a resource-list-changing event; append
         // mode only changes row content. Captured before the move-into
         // closure so we can pick the right notifications after success.
-        let mode = params.mode.clone().unwrap_or_else(|| "replace".into());
+        let mode = match IngestMode::parse(
+            params.mode.as_deref(),
+            None,
+            &["replace", "append"],
+            "load_data",
+        ) {
+            Ok(m) => m,
+            Err(e) => return Self::err_content(e),
+        };
+        let mode_name = mode.as_str();
         let result = self.with_engine(|engine| {
             let target_db =
                 self.resolve_db(engine, params.database.as_deref(), params.persist, true)?;
@@ -2069,9 +2083,8 @@ impl HyperMcpServer {
             let schema_override = crate::schema::normalize_schema_param(params.schema.as_ref())?;
             let opts = IngestOptions {
                 table: params.table.clone(),
-                mode: mode.clone(),
+                mode,
                 schema_override,
-                merge_key: None,
                 target_db: target_db.clone(),
             };
 
@@ -2099,7 +2112,7 @@ impl HyperMcpServer {
             // get their own.
             {
                 let load_params = serde_json::to_string(&json!({
-                    "mode": mode,
+                    "mode": mode_name,
                     "format": fmt,
                     "database": target_db.as_deref().unwrap_or("local"),
                 }))
@@ -2127,7 +2140,7 @@ impl HyperMcpServer {
         match result {
             Ok(val) => {
                 self.notify_table_changed(&table_name);
-                if mode == "replace" {
+                if mode_name == "replace" {
                     // Replace either created a new table or recreated an
                     // existing one — either way the resource catalog
                     // moved.
@@ -2151,14 +2164,21 @@ impl HyperMcpServer {
             return Self::err_content(e);
         }
         let table_name = params.table.clone();
-        let mode = params.mode.clone().unwrap_or_else(|| "replace".into());
-        // Validate (mode, merge_key) combination at the tool boundary so the
-        // ingest layer can stay focused on the load mechanics. `merge_key`
-        // is required for merge and rejected for replace/append.
-        let merge_key_vec = match validate_merge_args(&mode, params.merge_key) {
-            Ok(v) => v,
+        // Parse (mode, merge_key) once at the tool boundary: only exact
+        // lowercase names are accepted, `merge_key` is required for merge
+        // and rejected otherwise, and nothing unrecognised can fall
+        // through to a destructive replace.
+        let mode = match IngestMode::parse(
+            params.mode.as_deref(),
+            params.merge_key.map(MergeKey::into_names),
+            &["replace", "append", "merge"],
+            "load_file",
+        ) {
+            Ok(m) => m,
             Err(e) => return Self::err_content(e),
         };
+        let mode_name = mode.as_str();
+        let merge_key_vec = mode.merge_keys().map(<[String]>::to_vec);
         // The closure returns `(payload, schema_changed)` so the
         // notify branch below can fire correctly for merges that ran
         // an `ALTER TABLE ADD COLUMN`. `replace` always changes shape;
@@ -2172,7 +2192,6 @@ impl HyperMcpServer {
                 table: params.table.clone(),
                 mode: mode.clone(),
                 schema_override,
-                merge_key: merge_key_vec.clone(),
                 target_db: target_db.clone(),
             };
 
@@ -2218,7 +2237,7 @@ impl HyperMcpServer {
             {
                 let load_params = serde_json::to_string(&json!({
                     "source_path": params.path,
-                    "mode": mode,
+                    "mode": mode_name,
                     "schema": params.schema,
                     "json_extract_path": params.json_extract_path,
                     "merge_key": merge_key_vec,
@@ -2257,7 +2276,7 @@ impl HyperMcpServer {
                 // circuit). A merge that only updated existing rows
                 // leaves the schema untouched, so we skip the
                 // broadcast — same precedent as `append`.
-                if mode == "replace" || schema_changed {
+                if mode_name == "replace" || schema_changed {
                     self.notify_resource_list_changed();
                 }
                 Self::ok_content(val)
@@ -2295,13 +2314,13 @@ impl HyperMcpServer {
         // carry the merge-via-temp-table branch, and rejecting per-entry
         // would produce a confusing N-rejection result for a uniform
         // merge call. One top-level error is the clearer contract.
+        let mut entry_modes: Vec<IngestMode> = Vec::with_capacity(params.files.len());
         for (idx, entry) in params.files.iter().enumerate() {
             if let Err(mut e) = crate::attach::validate_input_path(&entry.path, "data file") {
                 e.message = format!("entry {idx} (table '{}'): {}", entry.table, e.message);
                 return Self::err_content(e);
             }
-            let mode = entry.mode.as_deref().unwrap_or("replace");
-            if mode == "merge" || entry.merge_key.is_some() {
+            if entry.merge_key.is_some() {
                 return Self::err_content(McpError::new(
                     ErrorCode::InvalidArgument,
                     format!(
@@ -2310,6 +2329,18 @@ impl HyperMcpServer {
                         entry.table
                     ),
                 ));
+            }
+            match IngestMode::parse(
+                entry.mode.as_deref(),
+                None,
+                &["replace", "append"],
+                "load_files",
+            ) {
+                Ok(m) => entry_modes.push(m),
+                Err(mut e) => {
+                    e.message = format!("entry {idx} (table '{}'): {}", entry.table, e.message);
+                    return Self::err_content(e);
+                }
             }
         }
 
@@ -2396,12 +2427,11 @@ impl HyperMcpServer {
         let outcomes: Vec<EntryOutcome> = tokio::task::block_in_place(|| {
             rt.block_on(async {
                 let mut set = tokio::task::JoinSet::new();
-                for (idx, entry) in params.files.into_iter().enumerate() {
+                for ((idx, entry), mode) in params.files.into_iter().enumerate().zip(entry_modes) {
                     let pool = Arc::clone(&pool);
                     let entry_target_db = target_db.clone();
                     set.spawn(async move {
-                        let mode = entry.mode.clone().unwrap_or_else(|| "replace".into());
-                        let replace_mode = mode == "replace";
+                        let replace_mode = mode == IngestMode::Replace;
                         let mut out = EntryOutcome {
                             table: entry.table.clone(),
                             replace_mode,
@@ -2431,9 +2461,8 @@ impl HyperMcpServer {
                         let _ = &entry_target_db;
                         let opts = IngestOptions {
                             table: entry.table.clone(),
-                            mode: mode.clone(),
+                            mode,
                             schema_override,
-                            merge_key: None,
                             target_db: None,
                         };
 
@@ -2646,10 +2675,13 @@ impl HyperMcpServer {
             return Self::err_content(e);
         }
         let table_name = params.table.clone();
-        let mode = params.mode.clone().unwrap_or_else(|| "replace".into());
+        let mode = match crate::lakehouse::IcebergMode::parse(params.mode.as_deref()) {
+            Ok(m) => m,
+            Err(e) => return Self::err_content(e),
+        };
         let opts = crate::lakehouse::IcebergIngestOptions {
             table: params.table.clone(),
-            mode: mode.clone(),
+            mode,
             metadata_filename: params.metadata_filename.clone(),
             version_as_of: params.version_as_of,
         };
@@ -2674,7 +2706,7 @@ impl HyperMcpServer {
 
             let load_params = serde_json::to_string(&json!({
                 "source_path": params.path,
-                "mode": mode,
+                "mode": mode.as_str(),
                 "format": "iceberg",
                 "metadata_filename": params.metadata_filename,
                 "version_as_of": params.version_as_of,
@@ -2699,7 +2731,7 @@ impl HyperMcpServer {
         match result {
             Ok(val) => {
                 self.notify_table_changed(&table_name);
-                if mode == "replace" {
+                if mode == crate::lakehouse::IcebergMode::Replace {
                     self.notify_resource_list_changed();
                 }
                 Self::ok_content(val)
@@ -4137,16 +4169,9 @@ impl HyperMcpServer {
         if let Err(e) = self.check_writable("copy_query") {
             return Self::err_content(e);
         }
-        let mode = match params.mode.as_str() {
-            "create" | "append" | "replace" => params.mode.clone(),
-            other => {
-                return Self::err_content(McpError::new(
-                    ErrorCode::InvalidArgument,
-                    format!(
-                        "copy_query mode '{other}' is not supported. Use 'create', 'append', or 'replace'."
-                    ),
-                ));
-            }
+        let mode = match CopyMode::parse(&params.mode) {
+            Ok(m) => m,
+            Err(e) => return Self::err_content(e),
         };
         if !is_read_only_sql(&params.sql) {
             return Self::err_content(McpError::new(
@@ -4205,7 +4230,7 @@ impl HyperMcpServer {
         let target_table = params.target_table.clone();
         let sql_body = params.sql.clone();
         let load_params = serde_json::to_string(&json!({
-            "mode": mode,
+            "mode": mode.as_str(),
             "target_database": params.target_database,
             "target_table": target_table,
             "sql": Self::fmt_sql(&sql_body),
@@ -4231,7 +4256,7 @@ impl HyperMcpServer {
 
             // Phase 2: run the actual copy inside a helper so the
             // cleanup path is unified.
-            let copy_outcome = perform_copy(engine, &mode, target_db, &target_table, &sql_body);
+            let copy_outcome = perform_copy(engine, mode, target_db, &target_table, &sql_body);
 
             // Phase 3: always detach the temp attachments, even on
             // error — they were installed only for the duration of
@@ -4281,7 +4306,7 @@ impl HyperMcpServer {
                     self.notify_table_changed(&target_table);
                 }
                 self.notify_workspace_changed();
-                if mode != "append" {
+                if mode != CopyMode::Append {
                     // `create` / `replace` add or recreate the table,
                     // which is a resource-list-changing event.
                     self.notify_resource_list_changed();
@@ -5599,13 +5624,146 @@ fn prepare_temp_attachments(
     Ok(out)
 }
 
+/// The `copy_query` landing mode. Parsed once at the tool boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CopyMode {
+    /// Target must not exist.
+    Create,
+    /// Target must exist; rows are inserted.
+    Append,
+    /// Target is replaced by the query result.
+    Replace,
+}
+
+impl CopyMode {
+    /// Parse the (required) `mode` parameter; exact lowercase names only.
+    fn parse(value: &str) -> Result<Self, McpError> {
+        match crate::ingest::parse_mode_name(
+            Some(value),
+            None,
+            &["create", "append", "replace"],
+            "copy_query",
+        )? {
+            "create" => Ok(Self::Create),
+            "append" => Ok(Self::Append),
+            "replace" => Ok(Self::Replace),
+            other => unreachable!("parse_mode_name returned a mode outside the known set: {other}"),
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Append => "append",
+            Self::Replace => "replace",
+        }
+    }
+}
+
+/// `CREATE TABLE <qualified> AS <sql_body>` for a target known to be absent.
+///
+/// Hyper can fail a CTAS at run time (e.g. division by zero, 22012) *after*
+/// it created the table, leaving an empty relation behind. The target did not
+/// exist before this call, so on failure it is dropped again (best effort)
+/// and the original error is returned.
+fn create_table_as(engine: &Engine, qualified: &str, sql_body: &str) -> Result<(), McpError> {
+    if let Err(e) = engine.execute_command(&format!("CREATE TABLE {qualified} AS {sql_body}")) {
+        // 42P07 = duplicate_table: the target already existed (e.g. created
+        // concurrently), so it is not ours to drop.
+        if e.message.starts_with("server error (42P07)") {
+            return Err(e);
+        }
+        if let Err(cleanup) = engine.execute_command(&format!("DROP TABLE IF EXISTS {qualified}")) {
+            tracing::warn!(
+                table = %qualified,
+                error = %cleanup,
+                "failed to drop partially created copy_query target"
+            );
+        }
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Replace an existing target with the result of `sql_body` without ever
+/// dropping the old data until the new result is fully built.
+///
+/// Hyper renames are auto-committed and cannot be rolled back, so a truly
+/// atomic swap is impossible; the sequence below keeps the window in which
+/// the target name is absent to two back-to-back RENAMEs, and a failure of the
+/// SELECT (the realistic failure) leaves the target untouched:
+///
+/// 1. build the result into a hidden staging table (`__hyperdb_copy_*`);
+/// 2. rename the old target aside to a hidden backup;
+/// 3. rename staging to the target name (on failure, rename the backup back);
+/// 4. drop the backup.
+fn replace_via_staging(
+    engine: &mut Engine,
+    target_db: Option<&str>,
+    target_table: &str,
+    sql_body: &str,
+) -> Result<(), McpError> {
+    use crate::scratch::{COPY_PREFIX, ScratchTableGuard, scratch_name};
+
+    let qualified = qualified_name(engine, target_db, target_table);
+    let staging_name = scratch_name(COPY_PREFIX, target_table);
+    let backup_name = scratch_name(&format!("{COPY_PREFIX}bak_"), target_table);
+    let staging_q = qualified_name(engine, target_db, &staging_name);
+    let backup_q = qualified_name(engine, target_db, &backup_name);
+    let quote = |n: &str| format!("\"{}\"", n.replace('"', "\"\""));
+
+    // Step 1: the guard drops staging on every exit until it is renamed away.
+    let mut guard = ScratchTableGuard::new(engine, staging_q.clone(), staging_name.clone());
+    guard
+        .engine()
+        .execute_command(&format!("CREATE TABLE {staging_q} AS {sql_body}"))?;
+
+    // Step 2: move the old target aside.
+    guard.engine().execute_command(&format!(
+        "ALTER TABLE {qualified} RENAME TO {}",
+        quote(&backup_name)
+    ))?;
+
+    // Step 3: move staging into place; restore the backup if that fails.
+    if let Err(swap_err) = guard.engine().execute_command(&format!(
+        "ALTER TABLE {staging_q} RENAME TO {}",
+        quote(target_table)
+    )) {
+        return match guard.engine().execute_command(&format!(
+            "ALTER TABLE {backup_q} RENAME TO {}",
+            quote(target_table)
+        )) {
+            Ok(_) => Err(swap_err),
+            // Keep the original error code (e.g. ConnectionLost) so the
+            // caller's reconnect logic still fires; add the backup hint.
+            Err(restore_err) => Err(McpError::new(
+                swap_err.code,
+                format!(
+                    "copy_query replace failed ({swap_err}) and the original table could not be restored ({restore_err}); \
+                     your data is preserved in hidden table '{backup_name}'"
+                ),
+            )),
+        };
+    }
+    guard.disarm();
+
+    // Step 4: the old data is no longer needed.
+    if let Err(e) = guard
+        .engine()
+        .execute_command(&format!("DROP TABLE IF EXISTS {backup_q}"))
+    {
+        tracing::warn!(backup = %backup_name, error = %e, "failed to drop copy_query backup table");
+    }
+    Ok(())
+}
+
 /// Execute the chosen copy mode against the fully-qualified target
 /// and return a JSON summary. Extracted from the `copy_query` handler
 /// so the caller can run it inside the temp-attach cleanup wrapper
 /// without re-duplicating the match arms.
 fn perform_copy(
-    engine: &Engine,
-    mode: &str,
+    engine: &mut Engine,
+    mode: CopyMode,
     target_db: Option<&str>,
     target_table: &str,
     sql_body: &str,
@@ -5615,45 +5773,34 @@ fn perform_copy(
     let timer = crate::stats::StatsTimer::start();
 
     match mode {
-        "create" => {
+        CopyMode::Create => {
             if exists {
                 return Err(McpError::new(
                     ErrorCode::InvalidArgument,
                     format!(
-                        "Target '{target_table}' already exists. Use mode='append' to add rows or mode='replace' to drop and recreate."
+                        "Target '{target_table}' already exists. Use mode='append' to add rows or mode='replace' to replace it."
                     ),
                 ));
             }
-            engine.execute_command(&format!("CREATE TABLE {qualified} AS {sql_body}"))?;
+            create_table_as(engine, &qualified, sql_body)?;
         }
-        "append" => {
+        CopyMode::Append => {
             if !exists {
                 return Err(McpError::new(
                     ErrorCode::InvalidArgument,
                     format!(
-                        "Target '{target_table}' does not exist. Use mode='create' to create it from the query or mode='replace' to drop and recreate."
+                        "Target '{target_table}' does not exist. Use mode='create' to create it from the query or mode='replace' to replace it."
                     ),
                 ));
             }
             engine.execute_command(&format!("INSERT INTO {qualified} {sql_body}"))?;
         }
-        "replace" => {
-            // Hyper auto-commits DDL even inside transactions, so
-            // DROP+CREATE isn't atomic across the statement boundary
-            // (same caveat documented on `execute_in_transaction`).
-            // We still issue them in order — the `IF EXISTS` guard
-            // prevents an error when the target is absent, and the
-            // follow-up `CREATE TABLE AS` either succeeds or leaves
-            // the workspace with a dropped target, which is the
-            // expected replace semantics.
-            engine.execute_command(&format!("DROP TABLE IF EXISTS {qualified}"))?;
-            engine.execute_command(&format!("CREATE TABLE {qualified} AS {sql_body}"))?;
-        }
-        other => {
-            return Err(McpError::new(
-                ErrorCode::InvalidArgument,
-                format!("copy_query mode '{other}' is not supported"),
-            ));
+        CopyMode::Replace => {
+            if exists {
+                replace_via_staging(engine, target_db, target_table, sql_body)?;
+            } else {
+                create_table_as(engine, &qualified, sql_body)?;
+            }
         }
     }
 
@@ -5662,7 +5809,7 @@ fn perform_copy(
     Ok(json!({
         "target_table": target_table,
         "target_database": target_db.unwrap_or(LOCAL_ALIAS),
-        "mode": mode,
+        "mode": mode.as_str(),
         "row_count": row_count,
         "stats": { "operation": "copy_query", "elapsed_ms": elapsed_ms },
     }))
@@ -6139,27 +6286,26 @@ mod engine_mutex_poison_tests {
 
         // First call: warm the engine, then panic inside the `with_engine`
         // closure to simulate a bug in a tool handler (e.g. an `unwrap()` on
-        // `None`). `catch_unwind` at the `std::panic` boundary lets the test
-        // observe the aftermath without aborting the whole test binary — the
-        // real MCP server survives this the same way, because each tool call
-        // already runs on its own task.
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            server.with_engine(|engine| -> Result<(), McpError> {
-                engine.execute_command("CREATE TABLE poison_probe (v INT)")?;
-                panic!("simulated tool handler bug");
-            })
-        }));
+        // `None`). `with_engine` catches the unwind itself: the caller gets an
+        // `InternalError` reply, the engine is discarded (its connection may be
+        // mid-protocol) and the mutex is never poisoned.
+        let outcome = server.with_engine(|engine| -> Result<(), McpError> {
+            engine.execute_command("CREATE TABLE poison_probe (v INT)")?;
+            panic!("simulated tool handler bug");
+        });
+        let err = outcome.expect_err("a panicking tool body must become an error reply");
+        assert_eq!(err.code, ErrorCode::InternalError);
         assert!(
-            outcome.is_err(),
-            "panic should propagate out of with_engine"
+            err.message.contains("simulated tool handler bug"),
+            "{}",
+            err.message
+        );
+        assert!(
+            !server.engine.is_poisoned(),
+            "with_engine must contain the panic before it poisons the engine mutex"
         );
 
-        // Second call: without the fix, the panic above dropped the
-        // `MutexGuard` mid-unwind and poisoned `self.engine`, so
-        // `ensure_engine`'s `.lock()` returns `Err` forever after — every
-        // subsequent tool call fails with "Lock poisoned" and the server is
-        // bricked until the process restarts. With the fix, the poisoned
-        // engine is discarded and rebuilt transparently.
+        // Second call: the server keeps answering on a rebuilt engine.
         let rows = server
             .with_engine(|engine| engine.execute_query_to_json("SELECT 1 AS one"))
             .expect("server must recover from a panicking tool call, not stay poisoned forever");
@@ -6254,16 +6400,14 @@ mod engine_mutex_poison_tests {
     fn status_recovers_a_poisoned_engine_rather_than_reporting_it_busy() {
         let server = test_server();
 
+        // `with_engine` now contains tool-body panics, so poison the engine
+        // mutex the way any other panic while it is held would: unwind with
+        // its guard alive.
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            server.with_engine(|engine| -> Result<(), McpError> {
-                engine.execute_command("CREATE TABLE poison_probe (v INT)")?;
-                panic!("simulated tool handler bug");
-            })
+            let _engine = server.engine.lock().expect("engine mutex is fresh");
+            panic!("simulated panic while holding the engine mutex");
         }));
-        assert!(
-            outcome.is_err(),
-            "panic should propagate out of with_engine"
-        );
+        assert!(outcome.is_err(), "panic should propagate");
         assert!(
             server.engine.is_poisoned(),
             "the panic must have poisoned the engine mutex"

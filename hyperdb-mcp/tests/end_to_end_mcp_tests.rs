@@ -4266,3 +4266,513 @@ async fn export_and_chart_refuse_an_existing_file_by_default() -> TestResult {
     );
     Ok(())
 }
+
+/// Row count of `table` via the `query` tool.
+async fn count_rows_via_tool(
+    h: &TestHarness,
+    table: &str,
+) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
+    let q = call_tool(
+        &h.client,
+        "query",
+        serde_json::json!({ "sql": format!("SELECT COUNT(*) AS n FROM \"{table}\"") }),
+    )
+    .await?;
+    let body = all_text(&q);
+    let start = body
+        .find("\"n\":")
+        .ok_or_else(|| format!("no count in {body}"))?
+        + 4;
+    let digits: String = body[start..]
+        .trim_start()
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    Ok(digits.parse()?)
+}
+
+/// Regression (D3): `mode: "Append"` used to fall through to replace and
+/// silently wipe the table. It must be rejected and leave the data alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_load_data_rejects_miscased_mode_without_data_loss() -> TestResult {
+    let h = TestHarness::start(false, true).await?;
+    let r = call_tool(
+        &h.client,
+        "load_data",
+        serde_json::json!({ "table": "m", "data": r#"[{"id":1},{"id":2}]"#, "format": "json" }),
+    )
+    .await?;
+    assert!(!is_error(&r), "seed failed: {:?}", first_text(&r));
+
+    for bad in ["Append", "appendd", "", "merge"] {
+        let r = call_tool(
+            &h.client,
+            "load_data",
+            serde_json::json!({ "table": "m", "data": r#"[{"id":3}]"#, "format": "json", "mode": bad }),
+        )
+        .await?;
+        assert!(
+            is_error(&r),
+            "mode {bad:?} must be rejected: {:?}",
+            first_text(&r)
+        );
+        assert!(
+            all_text(&r).contains("INVALID_ARGUMENT"),
+            "{}",
+            all_text(&r)
+        );
+        assert_eq!(
+            count_rows_via_tool(&h, "m").await?,
+            2,
+            "mode {bad:?} lost data"
+        );
+    }
+    h.shutdown().await
+}
+
+/// Regression (D3): `load_file` rejects a mis-cased mode before touching the table.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_load_file_rejects_miscased_mode_without_data_loss() -> TestResult {
+    let h = TestHarness::start(false, true).await?;
+    let temp = TempDir::new()?;
+    let csv = temp.path().join("a.csv");
+    std::fs::write(&csv, b"id\n1\n2\n")?;
+    let r = call_tool(
+        &h.client,
+        "load_file",
+        serde_json::json!({ "path": csv.to_string_lossy(), "table": "f" }),
+    )
+    .await?;
+    assert!(!is_error(&r), "seed failed: {:?}", first_text(&r));
+    let r = call_tool(
+        &h.client,
+        "load_file",
+        serde_json::json!({ "path": csv.to_string_lossy(), "table": "f", "mode": "APPEND" }),
+    )
+    .await?;
+    assert!(
+        is_error(&r),
+        "APPEND must be rejected: {:?}",
+        first_text(&r)
+    );
+    assert_eq!(count_rows_via_tool(&h, "f").await?, 2);
+    h.shutdown().await
+}
+
+/// Regression (D3): a `load_files` entry with a bad mode fails the whole call
+/// up front (top-level error) and nothing is ingested.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_load_files_rejects_bad_entry_mode() -> TestResult {
+    let h = TestHarness::start(false, true).await?;
+    let temp = TempDir::new()?;
+    let csv = temp.path().join("a.csv");
+    std::fs::write(&csv, b"id\n1\n2\n")?;
+    let r = call_tool(
+        &h.client,
+        "load_files",
+        serde_json::json!({ "files": [
+            { "path": csv.to_string_lossy(), "table": "ok_t" },
+            { "path": csv.to_string_lossy(), "table": "bad_t", "mode": "appendd" },
+        ]}),
+    )
+    .await?;
+    assert!(
+        is_error(&r),
+        "bad entry mode must be a top-level error: {:?}",
+        first_text(&r)
+    );
+    assert!(all_text(&r).contains("appendd"), "{}", all_text(&r));
+    h.shutdown().await
+}
+
+/// Regression (D3): `load_iceberg` with `merge` is rejected and no table is dropped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_load_iceberg_rejects_merge_mode_without_dropping() -> TestResult {
+    let h = TestHarness::start(false, true).await?;
+    let temp = TempDir::new()?;
+    let r = call_tool(
+        &h.client,
+        "load_data",
+        serde_json::json!({ "table": "ice", "data": r#"[{"id":1},{"id":2}]"#, "format": "json" }),
+    )
+    .await?;
+    assert!(!is_error(&r), "seed failed: {:?}", first_text(&r));
+    let r = call_tool(
+        &h.client,
+        "load_iceberg",
+        serde_json::json!({ "table": "ice", "path": temp.path().to_string_lossy(), "mode": "merge" }),
+    )
+    .await?;
+    assert!(is_error(&r), "merge must be rejected: {:?}", first_text(&r));
+    assert!(
+        all_text(&r).contains("INVALID_ARGUMENT"),
+        "{}",
+        all_text(&r)
+    );
+    assert_eq!(count_rows_via_tool(&h, "ice").await?, 2);
+    h.shutdown().await
+}
+
+/// Pin: `copy_query` stays strict about mode casing (target untouched).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_copy_query_rejects_miscased_mode() -> TestResult {
+    let h = TestHarness::start(false, true).await?;
+    let r = call_tool(
+        &h.client,
+        "load_data",
+        serde_json::json!({ "table": "cq", "data": r#"[{"id":1},{"id":2}]"#, "format": "json" }),
+    )
+    .await?;
+    assert!(!is_error(&r), "seed failed: {:?}", first_text(&r));
+    let r = call_tool(
+        &h.client,
+        "copy_query",
+        serde_json::json!({ "mode": "Replace", "target_table": "cq", "sql": "SELECT 9 AS id" }),
+    )
+    .await?;
+    assert!(
+        is_error(&r),
+        "Replace must be rejected: {:?}",
+        first_text(&r)
+    );
+    assert!(
+        all_text(&r).contains("INVALID_ARGUMENT"),
+        "{}",
+        all_text(&r)
+    );
+    assert_eq!(count_rows_via_tool(&h, "cq").await?, 2);
+    h.shutdown().await
+}
+
+/// Regression (D1): a `load_file` merge whose INSERT fails (NULL into a
+/// NOT NULL column) must report the error and leave the target's rows and
+/// columns exactly as they were.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_load_file_failed_merge_leaves_target_untouched() -> TestResult {
+    let h = TestHarness::start(false, true).await?;
+    let temp = TempDir::new()?;
+    let r = call_tool(
+        &h.client,
+        "load_data",
+        serde_json::json!({ "table": "mg", "format": "json",
+            "data": r#"[{"id":1,"name":"a"},{"id":2,"name":"b"}]"# }),
+    )
+    .await?;
+    assert!(!is_error(&r), "seed failed: {:?}", first_text(&r));
+
+    let upd = temp.path().join("upd.json");
+    std::fs::write(
+        &upd,
+        br#"[{"id":1,"name":null,"extra":5},{"id":3,"name":"c"}]"#,
+    )?;
+    let r = call_tool(
+        &h.client,
+        "load_file",
+        serde_json::json!({ "path": upd.to_string_lossy(), "table": "mg",
+            "mode": "merge", "merge_key": "id" }),
+    )
+    .await?;
+    assert!(is_error(&r), "merge must fail: {:?}", first_text(&r));
+
+    let q = call_tool(
+        &h.client,
+        "query",
+        serde_json::json!({ "sql": "SELECT * FROM mg ORDER BY id" }),
+    )
+    .await?;
+    let body = all_text(&q);
+    assert!(
+        body.contains("\"name\":\"a\"") || body.contains("\"name\": \"a\""),
+        "{body}"
+    );
+    assert!(
+        body.contains("\"name\":\"b\"") || body.contains("\"name\": \"b\""),
+        "{body}"
+    );
+    assert!(
+        !body.contains("extra"),
+        "failed merge left a column behind: {body}"
+    );
+    assert_eq!(count_rows_via_tool(&h, "mg").await?, 2);
+    h.shutdown().await
+}
+
+// =====================================================================
+// copy_query mode=replace builds the result in staging first (D2): a
+// failing SELECT no longer destroys the target.
+// =====================================================================
+
+/// Run one DDL/DML statement through the `execute` tool.
+async fn exec_ok(h: &TestHarness, sql: &str) -> TestResult {
+    let r = call_tool(&h.client, "execute", serde_json::json!({ "sql": [sql] })).await?;
+    assert!(!is_error(&r), "{sql} failed: {:?}", first_text(&r));
+    Ok(())
+}
+
+/// Names of `__hyperdb_copy_*` tables in `db`'s public schema (`None` = primary).
+fn leaked_copy_tables(h: &TestHarness, db: Option<&str>) -> Vec<String> {
+    let guard = h.engine_handle.lock().unwrap();
+    let engine = guard.as_ref().expect("engine present");
+    let from = match db {
+        Some(d) => format!("\"{d}\".pg_catalog.pg_tables"),
+        None => "pg_catalog.pg_tables".to_string(),
+    };
+    engine
+        .execute_query_to_json(&format!(
+            "SELECT tablename FROM {from} WHERE schemaname = 'public'"
+        ))
+        .unwrap()
+        .iter()
+        .filter_map(|v| v["tablename"].as_str().map(str::to_string))
+        .filter(|n| n.starts_with("__hyperdb_copy_"))
+        .collect()
+}
+
+async fn seed_r(h: &TestHarness, prefix: &str) -> TestResult {
+    exec_ok(h, &format!("CREATE TABLE {prefix}r (id INT)")).await?;
+    exec_ok(h, &format!("INSERT INTO {prefix}r VALUES (1),(2),(3)")).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_copy_query_replace_failing_select_keeps_target() -> TestResult {
+    let h = TestHarness::start(false, true).await?;
+    seed_r(&h, "").await?;
+    let r = call_tool(
+        &h.client,
+        "copy_query",
+        serde_json::json!({ "mode": "replace", "target_table": "r",
+            "sql": "SELECT id / (id - id) AS q FROM r" }),
+    )
+    .await?;
+    assert!(
+        is_error(&r),
+        "division by zero must fail: {:?}",
+        first_text(&r)
+    );
+    assert_eq!(
+        count_rows_via_tool(&h, "r").await?,
+        3,
+        "target was destroyed"
+    );
+    let q = call_tool(
+        &h.client,
+        "query",
+        serde_json::json!({ "sql": "SELECT id FROM r" }),
+    )
+    .await?;
+    assert!(
+        !is_error(&q),
+        "column id must still exist: {:?}",
+        first_text(&q)
+    );
+    assert_eq!(leaked_copy_tables(&h, None), Vec::<String>::new());
+    h.shutdown().await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_copy_query_replace_may_read_the_target() -> TestResult {
+    let h = TestHarness::start(false, true).await?;
+    seed_r(&h, "").await?;
+    let r = call_tool(
+        &h.client,
+        "copy_query",
+        serde_json::json!({ "mode": "replace", "target_table": "r",
+            "sql": "SELECT id FROM r WHERE id > 1" }),
+    )
+    .await?;
+    assert!(
+        !is_error(&r),
+        "self-referencing replace failed: {:?}",
+        first_text(&r)
+    );
+    assert_eq!(count_rows_via_tool(&h, "r").await?, 2);
+    assert_eq!(leaked_copy_tables(&h, None), Vec::<String>::new());
+    h.shutdown().await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_copy_query_replace_on_missing_target_creates_it() -> TestResult {
+    let h = TestHarness::start(false, true).await?;
+    let r = call_tool(
+        &h.client,
+        "copy_query",
+        serde_json::json!({ "mode": "replace", "target_table": "fresh",
+            "sql": "SELECT 1 AS id UNION ALL SELECT 2" }),
+    )
+    .await?;
+    assert!(!is_error(&r), "replace-create failed: {:?}", first_text(&r));
+    assert_eq!(count_rows_via_tool(&h, "fresh").await?, 2);
+    assert_eq!(leaked_copy_tables(&h, None), Vec::<String>::new());
+    h.shutdown().await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_copy_query_create_failing_select_leaves_no_table() -> TestResult {
+    let h = TestHarness::start(false, true).await?;
+    seed_r(&h, "").await?;
+    let r = call_tool(
+        &h.client,
+        "copy_query",
+        serde_json::json!({ "mode": "create", "target_table": "nope",
+            "sql": "SELECT id / (id - id) AS q FROM r" }),
+    )
+    .await?;
+    assert!(is_error(&r), "{:?}", first_text(&r));
+    let exists = {
+        let guard = h.engine_handle.lock().unwrap();
+        guard.as_ref().unwrap().table_exists("nope")?
+    };
+    assert!(!exists, "failed create must not leave a table");
+    assert_eq!(leaked_copy_tables(&h, None), Vec::<String>::new());
+    h.shutdown().await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_copy_query_replace_in_attached_database() -> TestResult {
+    let h = TestHarness::start(false, false).await?;
+    let dir = TempDir::new()?;
+    let r = call_tool(
+        &h.client,
+        "attach_database",
+        serde_json::json!({ "alias": "dst", "kind": "local_file",
+            "path": dir.path().join("dst.hyper").to_string_lossy(),
+            "writable": true, "on_missing": "create" }),
+    )
+    .await?;
+    assert!(!is_error(&r), "attach failed: {:?}", first_text(&r));
+    let r = call_tool(
+        &h.client,
+        "copy_query",
+        serde_json::json!({ "mode": "create", "target_database": "dst", "target_table": "r",
+            "sql": "SELECT 1 AS id UNION ALL SELECT 2 UNION ALL SELECT 3" }),
+    )
+    .await?;
+    assert!(!is_error(&r), "seed failed: {:?}", first_text(&r));
+
+    // A failing SELECT keeps the target.
+    let r = call_tool(
+        &h.client,
+        "copy_query",
+        serde_json::json!({ "mode": "replace", "target_database": "dst", "target_table": "r",
+            "sql": "SELECT id / (id - id) AS q FROM \"dst\".\"public\".\"r\"" }),
+    )
+    .await?;
+    assert!(is_error(&r), "{:?}", first_text(&r));
+    let count = |h: &TestHarness| {
+        let guard = h.engine_handle.lock().unwrap();
+        let rows = guard
+            .as_ref()
+            .unwrap()
+            .execute_query_to_json("SELECT COUNT(*) AS n FROM \"dst\".\"public\".\"r\"")
+            .unwrap();
+        rows[0]["n"].as_i64().unwrap()
+    };
+    assert_eq!(count(&h), 3, "attached target was destroyed");
+
+    // A self-referencing replace succeeds.
+    let r = call_tool(
+        &h.client,
+        "copy_query",
+        serde_json::json!({ "mode": "replace", "target_database": "dst", "target_table": "r",
+            "sql": "SELECT id FROM \"dst\".\"public\".\"r\" WHERE id > 1" }),
+    )
+    .await?;
+    assert!(!is_error(&r), "{:?}", first_text(&r));
+    assert_eq!(count(&h), 2);
+    assert_eq!(leaked_copy_tables(&h, Some("dst")), Vec::<String>::new());
+    h.shutdown().await
+}
+
+// --- P1: out-of-range NUMERIC must not panic under the engine mutex ---------
+
+/// Regression (P1): a `NUMERIC(40,2)` schema override used to panic inside
+/// `SqlType::numeric` while the engine mutex was held, poisoning it and
+/// killing every later tool call. It must be a clean INVALID_ARGUMENT, the
+/// existing table must survive, and the server must keep answering.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_load_data_out_of_range_numeric_override_is_clean_error() -> TestResult {
+    let h = TestHarness::start(false, true).await?;
+    let r = call_tool(
+        &h.client,
+        "load_data",
+        serde_json::json!({ "table": "t1", "data": r#"[{"v":1}]"#, "format": "json" }),
+    )
+    .await?;
+    assert!(!is_error(&r), "seed failed: {:?}", first_text(&r));
+
+    let r = call_tool(
+        &h.client,
+        "load_data",
+        serde_json::json!({
+            "table": "t2", "data": r#"[{"v":1}]"#, "format": "json",
+            "schema": { "v": "NUMERIC(40,2)" }
+        }),
+    )
+    .await?;
+    assert!(is_error(&r), "must fail: {:?}", first_text(&r));
+    assert!(
+        all_text(&r).contains("INVALID_ARGUMENT"),
+        "{}",
+        all_text(&r)
+    );
+
+    // Same table name as the seed, replace mode: the old table must survive.
+    let r = call_tool(
+        &h.client,
+        "load_data",
+        serde_json::json!({
+            "table": "t1", "data": r#"[{"v":1}]"#, "format": "json",
+            "schema": { "v": "NUMERIC(40,2)" }
+        }),
+    )
+    .await?;
+    assert!(is_error(&r));
+    assert_eq!(count_rows_via_tool(&h, "t1").await?, 1);
+    h.shutdown().await
+}
+
+/// Regression (P1): an Arrow IPC file with a `Decimal256(50,2)` column (no
+/// override involved) must be rejected, not panic.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_load_file_arrow_decimal256_out_of_range_is_clean_error() -> TestResult {
+    use arrow::array::{Array, Decimal256Array};
+    use arrow::datatypes::{DataType, Field, Schema, i256};
+    use arrow::ipc::writer::FileWriter;
+    use arrow::record_batch::RecordBatch;
+
+    let h = TestHarness::start(false, true).await?;
+    let temp = TempDir::new()?;
+    let path = temp.path().join("wide.arrow");
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "amount",
+        DataType::Decimal256(50, 2),
+        false,
+    )]));
+    let col =
+        Decimal256Array::from(vec![i256::from_i128(12345)]).with_precision_and_scale(50, 2)?;
+    let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(col) as Arc<dyn Array>])?;
+    let mut writer = FileWriter::try_new(std::fs::File::create(&path)?, &schema)?;
+    writer.write(&batch)?;
+    writer.finish()?;
+
+    let r = call_tool(
+        &h.client,
+        "load_file",
+        serde_json::json!({ "path": path.to_string_lossy(), "table": "wide" }),
+    )
+    .await?;
+    assert!(is_error(&r), "must fail: {:?}", first_text(&r));
+    // The server survives and still answers a query.
+    let r = call_tool(
+        &h.client,
+        "query",
+        serde_json::json!({ "sql": "SELECT 1 AS one" }),
+    )
+    .await?;
+    assert!(
+        !is_error(&r),
+        "server dead after error: {:?}",
+        first_text(&r)
+    );
+    h.shutdown().await
+}

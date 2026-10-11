@@ -25,7 +25,7 @@ fn ingest_iceberg_missing_path_errors_cleanly() {
     let mut te = TestEngine::new_ephemeral();
     let opts = IcebergIngestOptions {
         table: "t".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::lakehouse::IcebergMode::Replace,
         metadata_filename: None,
         version_as_of: None,
     };
@@ -51,7 +51,7 @@ fn ingest_iceberg_file_instead_of_directory_errors_cleanly() {
 
     let opts = IcebergIngestOptions {
         table: "t".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::lakehouse::IcebergMode::Replace,
         metadata_filename: None,
         version_as_of: None,
     };
@@ -76,7 +76,7 @@ fn ingest_iceberg_empty_directory_surfaces_hyperd_error() {
 
     let opts = IcebergIngestOptions {
         table: "t".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::lakehouse::IcebergMode::Replace,
         metadata_filename: None,
         version_as_of: None,
     };
@@ -104,22 +104,19 @@ fn ingest_iceberg_empty_directory_surfaces_hyperd_error() {
     );
 }
 
-/// Mode validation: any string other than `"append"` is treated as a
-/// replace. Verify by giving a junk mode against a missing path — the
-/// error path exercises `is_replace = true` and should therefore have
-/// attempted a DROP before the CTAS. The DROP is silent for a
-/// non-existent table, so we just check the outer error is path-related.
+/// Mode validation: an unknown `mode` is rejected at the parse boundary
+/// instead of silently becoming a destructive replace.
 #[test]
-fn ingest_iceberg_unknown_mode_treated_as_replace() {
-    let mut te = TestEngine::new_ephemeral();
-    let opts = IcebergIngestOptions {
-        table: "t".into(),
-        mode: "blahblah".into(),
-        metadata_filename: None,
-        version_as_of: None,
-    };
-    let Err(err) = ingest_iceberg_table(&mut te.engine, "/nonexistent/x", &opts) else {
-        panic!("should fail on path")
-    };
-    assert!(err.to_string().to_lowercase().contains("not exist"));
+fn iceberg_mode_rejects_unknown_values() {
+    use hyperdb_mcp::lakehouse::IcebergMode;
+    for bad in ["blahblah", "merge", "Append", "", " append"] {
+        let err = IcebergMode::parse(Some(bad)).expect_err(bad);
+        assert_eq!(err.code, hyperdb_mcp::error::ErrorCode::InvalidArgument);
+        assert!(err.message.contains("load_iceberg"), "{}", err.message);
+    }
+    assert_eq!(IcebergMode::parse(None).unwrap(), IcebergMode::Replace);
+    assert_eq!(
+        IcebergMode::parse(Some("append")).unwrap(),
+        IcebergMode::Append
+    );
 }

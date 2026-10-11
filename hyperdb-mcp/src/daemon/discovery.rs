@@ -507,6 +507,77 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// Whether `endpoint` is a shape the daemon's own `hyperd` could have been
+/// published at: a local IPC channel, never TCP.
+///
+/// - Unix: the socket `<state_dir>/sockets/<name>` the daemon creates (the
+///   directory is made owner-only by `build_params`), written without `..`
+///   or extra path components.
+/// - Windows: a local named pipe, `\\.\pipe\<name>` (host `.` only).
+///
+/// A discovery record is a locator an attacker with write access to a
+/// misconfigured state directory could forge; refusing anything outside this
+/// shape stops a client from sending credentials and data to a fake `hyperd`.
+#[must_use]
+pub(crate) fn is_valid_hyperd_endpoint(endpoint: &str, state_dir: &Path) -> bool {
+    if cfg!(windows) {
+        is_local_pipe_endpoint(endpoint)
+    } else {
+        is_state_dir_socket_endpoint(endpoint, state_dir)
+    }
+}
+
+fn is_state_dir_socket_endpoint(endpoint: &str, state_dir: &Path) -> bool {
+    use std::path::Component;
+    let path = Path::new(endpoint);
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+    {
+        return false;
+    }
+    path.parent() == Some(state_dir.join("sockets").as_path()) && path.file_name().is_some()
+}
+
+fn is_local_pipe_endpoint(endpoint: &str) -> bool {
+    endpoint
+        .strip_prefix(r"\\.\pipe\")
+        .is_some_and(|name| !name.is_empty() && !name.contains(['\\', '/']))
+}
+
+/// The `hyperd` endpoint a client may connect to, or `None` to fall back to
+/// local mode.
+///
+/// `daemon.json` is only a locator, so its `hyperd_endpoint` is not trusted on
+/// its own. The daemon is asked for `STATUS` over its health endpoint (which
+/// [`discover_in`] already proved is the one this state directory implies);
+/// the endpoint it reports must equal the record's and must have the shape of
+/// a daemon-owned IPC channel ([`is_valid_hyperd_endpoint`]). A mismatch
+/// means a forged record, or a restart in progress, and local mode is the safe
+/// answer either way.
+#[must_use]
+pub(crate) fn trusted_hyperd_endpoint(
+    info: &DaemonInfo,
+    health: &HealthEndpoint,
+    state_dir: &Path,
+) -> Option<String> {
+    let reply = super::health::send_command(health, "STATUS").ok()?;
+    let status: serde_json::Value = serde_json::from_str(reply.trim()).ok()?;
+    let reported = status.get("hyperd_endpoint")?.as_str()?;
+    if reported != info.hyperd_endpoint {
+        tracing::warn!(
+            "daemon record and daemon STATUS disagree on the hyperd endpoint; not trusting it"
+        );
+        return None;
+    }
+    if !is_valid_hyperd_endpoint(reported, state_dir) {
+        tracing::warn!("daemon hyperd endpoint is not a daemon-owned IPC channel; not trusting it");
+        return None;
+    }
+    Some(reported.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::{OsStr, OsString};
@@ -1568,5 +1639,184 @@ mod tests {
         let judged = read_legacy_record(target_dir.path()).unwrap();
         remove_legacy_record(tmp.path(), judged);
         assert!(target.exists(), "the symlink target must be left alone");
+    }
+
+    // --- hyperd endpoint trust (R1) --------------------------------------
+
+    /// A TCP listener standing in for an attacker's fake `hyperd`; counts connections.
+    #[cfg(unix)]
+    struct AttackerListener {
+        addr: String,
+        accepted: Arc<std::sync::atomic::AtomicUsize>,
+        quit: Arc<std::sync::atomic::AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    #[cfg(unix)]
+    impl AttackerListener {
+        fn start() -> Self {
+            use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let addr = listener.local_addr().unwrap().to_string();
+            let accepted = Arc::new(AtomicUsize::new(0));
+            let quit = Arc::new(AtomicBool::new(false));
+            let (a, q) = (Arc::clone(&accepted), Arc::clone(&quit));
+            let thread = std::thread::spawn(move || {
+                while !q.load(Ordering::SeqCst) {
+                    if listener.accept().is_ok() {
+                        a.fetch_add(1, Ordering::SeqCst);
+                    } else {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
+            });
+            Self {
+                addr,
+                accepted,
+                quit,
+                thread: Some(thread),
+            }
+        }
+
+        fn connections(&self) -> usize {
+            self.accepted.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for AttackerListener {
+        fn drop(&mut self) {
+            self.quit.store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn legit_socket(dir: &Path) -> String {
+        dir.join("sockets")
+            .join("hyper")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hyperd_endpoint_shape_accepts_only_the_state_dir_socket() {
+        let dir = short_state_dir();
+        let d = dir.path();
+        assert!(is_valid_hyperd_endpoint(&legit_socket(d), d));
+        for bad in [
+            "127.0.0.1:54321".to_string(),
+            "localhost:7485".to_string(),
+            "/tmp/evil.sock".to_string(),
+            d.join("hyper").to_string_lossy().into_owned(),
+            d.join("sockets")
+                .join("..")
+                .join("hyper")
+                .to_string_lossy()
+                .into_owned(),
+            d.join("sockets")
+                .join("sub")
+                .join("hyper")
+                .to_string_lossy()
+                .into_owned(),
+            d.join("sockets").to_string_lossy().into_owned(),
+            "sockets/hyper".to_string(),
+            String::new(),
+        ] {
+            assert!(
+                !is_valid_hyperd_endpoint(&bad, d),
+                "{bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn hyperd_endpoint_shape_accepts_only_a_local_named_pipe() {
+        let d = Path::new(r"C:\state");
+        assert!(is_valid_hyperd_endpoint(r"\\.\pipe\hyper-1234", d));
+        for bad in [
+            "127.0.0.1:54321",
+            r"\\evilhost\pipe\hyper",
+            r"\\.\pipe\",
+            r"\\.\pipe\a\b",
+            "",
+        ] {
+            assert!(
+                !is_valid_hyperd_endpoint(bad, d),
+                "{bad:?} must be rejected"
+            );
+        }
+    }
+
+    /// The attack: `daemon.json` names an attacker's TCP listener as the
+    /// `hyperd` endpoint while a genuine daemon answers on the control
+    /// endpoint. The record's endpoint must be refused and never connected to.
+    #[cfg(unix)]
+    #[test]
+    fn a_record_naming_an_attacker_listener_is_rejected_and_never_dialed() {
+        let dir = short_state_dir();
+        let attacker = AttackerListener::start();
+        // The genuine daemon (authenticated: it owns the state dir's socket).
+        let genuine = DaemonInfo {
+            hyperd_endpoint: legit_socket(dir.path()),
+            ..info_for(dir.path(), 4242)
+        };
+        let _daemon = LiveDaemon::start(dir.path(), &genuine);
+        // The tampered record.
+        let tampered = DaemonInfo {
+            hyperd_endpoint: attacker.addr.clone(),
+            ..genuine.clone()
+        };
+        let health = HealthEndpoint::from_record(&tampered.health_endpoint, dir.path()).unwrap();
+
+        assert_eq!(
+            trusted_hyperd_endpoint(&tampered, &health, dir.path()),
+            None
+        );
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(
+            attacker.connections(),
+            0,
+            "the attacker listener was dialed"
+        );
+    }
+
+    /// Even an authenticated STATUS cannot smuggle in a non-IPC endpoint.
+    #[cfg(unix)]
+    #[test]
+    fn an_authenticated_status_naming_a_tcp_endpoint_is_rejected() {
+        let dir = short_state_dir();
+        let attacker = AttackerListener::start();
+        let lying = DaemonInfo {
+            hyperd_endpoint: attacker.addr.clone(),
+            ..info_for(dir.path(), 4242)
+        };
+        let _daemon = LiveDaemon::start(dir.path(), &lying);
+        let health = HealthEndpoint::from_record(&lying.health_endpoint, dir.path()).unwrap();
+
+        assert_eq!(trusted_hyperd_endpoint(&lying, &health, dir.path()), None);
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(attacker.connections(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_consistent_record_and_status_yield_the_endpoint() {
+        let dir = short_state_dir();
+        let info = DaemonInfo {
+            hyperd_endpoint: legit_socket(dir.path()),
+            ..info_for(dir.path(), 4242)
+        };
+        let _daemon = LiveDaemon::start(dir.path(), &info);
+        let health = HealthEndpoint::from_record(&info.health_endpoint, dir.path()).unwrap();
+        assert_eq!(
+            trusted_hyperd_endpoint(&info, &health, dir.path()),
+            Some(legit_socket(dir.path()))
+        );
     }
 }

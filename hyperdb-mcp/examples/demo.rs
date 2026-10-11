@@ -238,9 +238,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     section("Step 2 · Ingest — schema is inferred, not declared");
     let ingest_opts = IngestOptions {
         table: "coder_stats".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     let ingest_result = ingest_csv_file(&mut engine, csv_path.to_str().unwrap(), &ingest_opts)?;

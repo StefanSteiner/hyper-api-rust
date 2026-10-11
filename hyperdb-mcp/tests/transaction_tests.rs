@@ -219,9 +219,8 @@ fn failed_json_ingest_rolls_back_partial_inserts() {
 
     let opts = IngestOptions {
         table: "t".into(),
-        mode: "append".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Append,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
 
@@ -258,9 +257,8 @@ fn successful_replace_commits_atomically() {
     ]"#;
     let opts = IngestOptions {
         table: "t".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     let result = ingest_json(&mut te.engine, data, &opts).unwrap();
@@ -411,9 +409,8 @@ fn failed_replace_leaves_empty_table_not_partial() {
     override_map.insert("id".into(), serde_json::Value::String("INT".into()));
     let opts = IngestOptions {
         table: "t".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: Some(override_map),
-        merge_key: None,
         target_db: None,
     };
 
@@ -429,4 +426,211 @@ fn failed_replace_leaves_empty_table_not_partial() {
         count, 0,
         "expected partial INSERTs to be rolled back, leaving 0 rows"
     );
+}
+
+// ---------------------------------------------------------------------
+// load_file merge atomicity (D1): the DELETE of matched rows and the
+// INSERT of the incoming rows run in one transaction, and a failed merge
+// leaves the target's rows *and columns* untouched.
+// ---------------------------------------------------------------------
+
+mod merge_atomicity {
+    use super::{TestEngine, query_resilient};
+    use hyperdb_mcp::error::ErrorCode;
+    use hyperdb_mcp::ingest::{IngestMode, IngestOptions, ingest_csv, ingest_json};
+
+    fn opts(table: &str, mode: IngestMode, target_db: Option<&str>) -> IngestOptions {
+        IngestOptions {
+            table: table.into(),
+            mode,
+            schema_override: None,
+            target_db: target_db.map(str::to_string),
+        }
+    }
+
+    fn merge_on_id() -> IngestMode {
+        IngestMode::Merge {
+            keys: vec!["id".into()],
+        }
+    }
+
+    /// Seed `t` with (1,a),(2,b); `name` is NOT NULL by JSON inference.
+    fn seed(te: &mut TestEngine, target_db: Option<&str>) {
+        ingest_json(
+            &mut te.engine,
+            r#"[{"id":1,"name":"a"},{"id":2,"name":"b"}]"#,
+            &opts("t", IngestMode::Replace, target_db),
+        )
+        .unwrap();
+    }
+
+    fn qualified(target_db: Option<&str>) -> String {
+        match target_db {
+            Some(db) => format!("\"{db}\".\"public\".\"t\""),
+            None => "t".into(),
+        }
+    }
+
+    fn rows_of(te: &TestEngine, target_db: Option<&str>) -> Vec<(i64, String)> {
+        query_resilient(
+            &te.engine,
+            &format!("SELECT id, name FROM {} ORDER BY id", qualified(target_db)),
+        )
+        .iter()
+        .map(|r| {
+            (
+                r["id"].as_i64().unwrap(),
+                r["name"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+    }
+
+    fn original() -> Vec<(i64, String)> {
+        vec![(1, "a".into()), (2, "b".into())]
+    }
+
+    fn column_names(te: &TestEngine, target_db: Option<&str>) -> Vec<String> {
+        te.engine
+            .column_metadata_in(target_db, "t")
+            .unwrap()
+            .into_iter()
+            .map(|c| c.name)
+            .collect()
+    }
+
+    fn scratch_tables(te: &TestEngine) -> Vec<String> {
+        te.engine
+            .execute_query_to_json(
+                "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = 'public'",
+            )
+            .unwrap()
+            .iter()
+            .filter_map(|v| v["tablename"].as_str().map(str::to_string))
+            .filter(|n| n.starts_with("__hyperdb_"))
+            .collect()
+    }
+
+    #[test]
+    fn merge_null_into_not_null_keeps_matched_rows() {
+        let mut te = TestEngine::new_ephemeral();
+        seed(&mut te, None);
+        let res = ingest_json(
+            &mut te.engine,
+            r#"[{"id":1,"name":null},{"id":3,"name":"c"}]"#,
+            &opts("t", merge_on_id(), None),
+        );
+        assert!(res.is_err(), "NULL into NOT NULL must fail");
+        assert_eq!(rows_of(&te, None), original(), "matched row 1 was lost");
+    }
+
+    #[test]
+    fn merge_csv_null_into_not_null_keeps_matched_rows() {
+        let mut te = TestEngine::new_ephemeral();
+        seed(&mut te, None);
+        let res = ingest_csv(
+            &mut te.engine,
+            "id,name\n1,\n3,c\n",
+            &opts("t", merge_on_id(), None),
+        );
+        assert!(res.is_err(), "blank CSV name into NOT NULL must fail");
+        assert_eq!(rows_of(&te, None), original(), "matched row 1 was lost");
+    }
+
+    #[test]
+    fn failed_merge_rolls_back_added_column() {
+        let mut te = TestEngine::new_ephemeral();
+        seed(&mut te, None);
+        let res = ingest_json(
+            &mut te.engine,
+            r#"[{"id":1,"name":null,"extra":5}]"#,
+            &opts("t", merge_on_id(), None),
+        );
+        assert!(res.is_err());
+        assert_eq!(rows_of(&te, None), original());
+        assert_eq!(column_names(&te, None), vec!["id", "name"]);
+    }
+
+    #[test]
+    fn merge_missing_not_null_column_is_rejected_up_front() {
+        let mut te = TestEngine::new_ephemeral();
+        seed(&mut te, None);
+        let err = ingest_json(
+            &mut te.engine,
+            r#"[{"id":1,"extra":5}]"#,
+            &opts("t", merge_on_id(), None),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidArgument, "{}", err.message);
+        assert!(err.message.contains("name"), "{}", err.message);
+        assert_eq!(rows_of(&te, None), original());
+        assert_eq!(column_names(&te, None), vec!["id", "name"]);
+    }
+
+    #[test]
+    fn merge_failure_in_persistent_target_keeps_rows() {
+        let mut te = TestEngine::new_ephemeral();
+        seed(&mut te, Some("persistent"));
+        let res = ingest_json(
+            &mut te.engine,
+            r#"[{"id":1,"name":null,"extra":5},{"id":3,"name":"c"}]"#,
+            &opts("t", merge_on_id(), Some("persistent")),
+        );
+        assert!(res.is_err());
+        assert_eq!(rows_of(&te, Some("persistent")), original());
+        assert_eq!(column_names(&te, Some("persistent")), vec!["id", "name"]);
+    }
+
+    #[test]
+    fn failed_merge_leaves_no_staging_table() {
+        let mut te = TestEngine::new_ephemeral();
+        seed(&mut te, None);
+        let _ = ingest_json(
+            &mut te.engine,
+            r#"[{"id":1,"name":null}]"#,
+            &opts("t", merge_on_id(), None),
+        );
+        assert_eq!(scratch_tables(&te), Vec::<String>::new());
+    }
+
+    /// The staging load itself fails (a non-numeric value in an INT column):
+    /// Hyper has already committed the staging DDL, so the guard must be armed
+    /// before the load or the `__hyperdb_merge_*` table leaks.
+    #[test]
+    fn failed_staging_load_leaves_no_staging_table() {
+        let mut te = TestEngine::new_ephemeral();
+        seed(&mut te, None);
+        let mut schema = serde_json::Map::new();
+        schema.insert("id".into(), serde_json::json!("INT"));
+        let res = ingest_csv(
+            &mut te.engine,
+            "id,name\nbogus,x\n",
+            &IngestOptions {
+                table: "t".into(),
+                mode: merge_on_id(),
+                schema_override: Some(schema),
+                target_db: None,
+            },
+        );
+        assert!(res.is_err(), "non-numeric id in an INT column must fail");
+        assert_eq!(rows_of(&te, None), original());
+        assert_eq!(scratch_tables(&te), Vec::<String>::new());
+    }
+
+    #[test]
+    fn successful_merge_still_upserts() {
+        let mut te = TestEngine::new_ephemeral();
+        seed(&mut te, None);
+        let r = ingest_json(
+            &mut te.engine,
+            r#"[{"id":2,"name":"B"},{"id":3,"name":"c"}]"#,
+            &opts("t", merge_on_id(), None),
+        )
+        .unwrap();
+        assert_eq!(r.rows, 2);
+        assert_eq!(
+            rows_of(&te, None),
+            vec![(1, "a".into()), (2, "B".into()), (3, "c".into())]
+        );
+    }
 }

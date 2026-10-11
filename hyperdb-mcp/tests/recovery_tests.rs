@@ -349,15 +349,26 @@ fn start_reported_hyper_process(state_dir: &Path, hyper_pid_path: &Path) -> (Hyp
     let log_dir = state_dir.join("hyper-logs");
     std::fs::create_dir_all(&log_dir).expect("create isolated Hyper log directory");
     let mut parameters = Parameters::new();
-    parameters.set_transport_mode(TransportMode::Tcp);
+    // IPC, like the real daemon: the engine only dials a `hyperd` endpoint of
+    // the shape the daemon publishes (`<state dir>/sockets/<name>` on Unix, a
+    // local named pipe on Windows) and refuses TCP.
+    parameters.set_transport_mode(TransportMode::Ipc);
     parameters.set("log_dir", log_dir.to_string_lossy().as_ref());
-    let hyper = HyperProcess::new(None, Some(&parameters)).expect("start real TCP HyperProcess");
-    assert_eq!(hyper.transport_mode(), TransportMode::Tcp);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let socket_dir = state_dir.join("sockets");
+        std::fs::create_dir_all(&socket_dir).expect("create isolated Hyper socket directory");
+        std::fs::set_permissions(&socket_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("restrict isolated Hyper socket directory");
+        parameters.set_domain_socket_directory(socket_dir);
+    }
+    let hyper = HyperProcess::new(None, Some(&parameters)).expect("start real IPC HyperProcess");
+    assert_eq!(hyper.transport_mode(), TransportMode::Ipc);
     let hyper_pid = hyper.pid().expect("HyperProcess must own a child PID");
     let endpoint = hyper
-        .require_endpoint()
-        .expect("TCP HyperProcess must publish an endpoint")
-        .to_string();
+        .connection_endpoint_string()
+        .expect("IPC HyperProcess must publish a connection endpoint");
     std::fs::write(hyper_pid_path, hyper_pid.to_string()).expect("report exact Hyper PID");
     (hyper, endpoint)
 }

@@ -477,7 +477,7 @@ fn iceberg_export_round_trips_through_load_iceberg() {
     // Reload into a fresh table and verify rows.
     let ingest_opts = IcebergIngestOptions {
         table: "test_reloaded".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::lakehouse::IcebergMode::Replace,
         metadata_filename: None,
         version_as_of: None,
     };
@@ -581,7 +581,7 @@ fn iceberg_export_overwrite_replaces_directory() {
         iceberg_str,
         &IcebergIngestOptions {
             table: "t".into(),
-            mode: "replace".into(),
+            mode: hyperdb_mcp::lakehouse::IcebergMode::Replace,
             metadata_filename: None,
             version_as_of: None,
         },
@@ -692,9 +692,8 @@ fn parquet_export_round_trips_through_load_file() {
         path_str,
         &IngestOptions {
             table: "pq_export_reloaded".into(),
-            mode: "replace".into(),
+            mode: hyperdb_mcp::ingest::IngestMode::Replace,
             schema_override: None,
-            merge_key: None,
             target_db: None,
         },
     )
@@ -790,9 +789,8 @@ fn arrow_ipc_export_round_trips_through_load_file() {
         path_str,
         &IngestOptions {
             table: "arrow_reloaded".into(),
-            mode: "replace".into(),
+            mode: hyperdb_mcp::ingest::IngestMode::Replace,
             schema_override: None,
-            merge_key: None,
             target_db: None,
         },
     )

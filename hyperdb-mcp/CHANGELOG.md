@@ -70,6 +70,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   against one state directory at the same time is not supported: an old client
   may overwrite `daemon.json` (not verified against the old code), in which
   case a new client no longer finds the daemon through the record.
+- **BREAKING: `ingest::IngestOptions.mode` and `lakehouse::IcebergIngestOptions.mode`
+  are enums, and `IngestOptions.merge_key` is gone.** Use `IngestMode::{Replace,
+  Append, Merge { keys }}` and `IcebergMode::{Replace, Append}`; the merge keys
+  now live in the `Merge` variant. `IngestMode::parse` and `IcebergMode::parse`
+  accept only the exact lowercase names. Ingest paths that cannot merge return
+  `INVALID_ARGUMENT` for `Merge` instead of silently ignoring it.
 
 ### Removed
 
@@ -138,12 +144,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **`query_data` / `query_file` no longer leak their scratch table on a failed
   query** — the temp table is now dropped whether the query succeeds or fails,
   so a bad query no longer leaves a `_tmp_*` table behind in `describe`.
-- **Table listings (`describe`) now hide transient scratch tables** (`_tmp_*`
-  and `__hyperdb_merge_*`), not just `_hyperdb_*` internals.
+- **Table listings (`describe`) now hide transient scratch tables** (`_tmp_*`,
+  `__hyperdb_merge_*` and `__hyperdb_copy_*`), not just `_hyperdb_*` internals.
 - **`query_data` / `query_file` table-name substitution is whole-word** — an
   alias like `data` no longer corrupts a column named `metadata` or `data_url`.
 - **Unknown-table SQL errors now suggest running `describe`** and name the
   default `data` alias, instead of the generic "check SQL syntax" hint.
+- **An unrecognised `mode` no longer silently replaces data.** `load_data`,
+  `load_file`, `load_files`, `load_iceberg` and `copy_query` used to treat any
+  value other than the exact lowercase names (`Append`, `appendd`, `""`) as
+  `replace`. Each tool now parses `mode` once at the boundary and returns
+  `INVALID_ARGUMENT` with a did-you-mean hint; `load_files` rejects a bad entry
+  before ingesting anything.
+- **A failed `load_file` merge no longer loses the matched rows.** The
+  DELETE and INSERT now run in one transaction, so an INSERT failure (for
+  example a NULL into a NOT NULL column) restores the deleted rows. A NOT NULL
+  target column missing from the incoming data is rejected up front, columns
+  added for the merge are dropped again on failure, and the staging table
+  (`__hyperdb_merge_*`, hidden from listings) is always cleaned up.
+- **`copy_query` `mode=replace` no longer drops the target before the SELECT
+  succeeds.** The result is built in a hidden staging table
+  (`__hyperdb_copy_*`) and swapped in with two renames, so a failing SELECT
+  leaves the existing table untouched and the SELECT may read the target. A
+  `create`/`replace` into a missing target that fails at run time no longer
+  leaves an empty table behind. Hyper cannot roll back renames, so the swap
+  itself is not one atomic step.
+- **An out-of-range `NUMERIC` no longer panics inside the engine lock.** A
+  `schema` override such as `NUMERIC(40,2)`, or an Arrow `Decimal256(50,2)`
+  column, now returns `INVALID_ARGUMENT` (precision must be 1..=38, scale
+  0..=precision). Type strings are parsed strictly (`NUMERICX` and
+  `NUMERIC, x INT` are rejected) and stored in canonical form, so user text is
+  never spliced into DDL. A panic in any tool body is now caught and reported as
+  an internal error instead of poisoning the engine mutex; the engine is
+  discarded and the next call reconnects (in local mode this drops the whole
+  ephemeral workspace, so tables loaded earlier in the session are lost). `schema::map_hyper_type` now returns `Result`.
+- **The daemon's `hyperd` endpoint is no longer trusted from `daemon.json`
+  alone.** The client confirms it with the authenticated daemon's `STATUS` reply
+  and accepts only a daemon-owned IPC channel (`<state dir>/sockets/<name>`, or a
+  local named pipe on Windows), so a forged record cannot point sessions at a
+  TCP listener of an attacker's choosing; otherwise the session runs in local
+  mode.
 
 ## [1.0.0-rc.4] - 2026-09-08
 

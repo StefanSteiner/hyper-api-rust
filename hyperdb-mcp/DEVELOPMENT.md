@@ -232,16 +232,26 @@ Logs land next to the persistent file when one is supplied (so users find them i
 ## Daemon Mode Internals
 
 `Engine::new` defaults to *daemon mode* — it tries
-`daemon::spawn::ensure_daemon(resolve_port_scan())` first, which discovers an
+`daemon::spawn::ensure_daemon()` first, which discovers an
 existing daemon via `~/.hyperdb/daemon.json` (overridable via
 `HYPERDB_STATE_DIR` — see `daemon::state_perms`, which restricts that directory
 and the files in it to the owning user, and which needs the override to name a
 path that can carry those permissions: inside `%USERPROFILE%` on Windows, on a
 mode-supporting filesystem on Unix), else auto-spawns one as a detached
-background process. The Engine then connects via TCP
-(`Connection::connect(endpoint, …)`) without owning any `HyperProcess`, and
-records the daemon's `health_endpoint` so the server's debounced `HEARTBEAT`
-targets the discovered endpoint rather than re-resolving.
+background process. The Engine then connects over the daemon's local IPC
+channel (a Unix domain socket at `<state dir>/sockets/hyper`, or a Windows
+named pipe; `Connection::connect(endpoint, …)`) without owning any
+`HyperProcess`, and records the daemon's `health_endpoint` so the server's
+debounced `HEARTBEAT` targets the discovered endpoint rather than
+re-resolving.
+
+`daemon.json` is a locator, not a credential, so the `hyperd` endpoint in it is
+never dialed on its own. `daemon::discovery::trusted_hyperd_endpoint` asks the
+daemon for `STATUS` over the (state-directory-pinned) health endpoint and
+accepts the endpoint only if the reply equals the record's value and has the
+shape of a daemon-owned IPC channel (`<state dir>/sockets/<name>` on Unix, a
+local `\\.\pipe\<name>` on Windows). TCP endpoints and paths outside the
+state directory are refused and the engine falls back to local mode.
 
 Falls back to local mode (per-session `hyperd` via `HyperProcess::new`) when the daemon can't be reached (including a state directory that is not owned by the user or is group/other-writable), or always when `--no-daemon` is passed.
 

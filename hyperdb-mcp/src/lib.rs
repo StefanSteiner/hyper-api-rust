@@ -95,6 +95,7 @@ pub mod readme;
 pub mod saved_queries;
 #[doc(hidden)]
 pub mod schema;
+pub(crate) mod scratch;
 #[doc(hidden)]
 pub mod server;
 mod sql_classify;

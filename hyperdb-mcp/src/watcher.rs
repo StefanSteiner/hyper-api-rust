@@ -765,9 +765,8 @@ async fn ingest_one_ready_file(
     // identifier routes into the pool's primary.
     let opts = IngestOptions {
         table: table.to_string(),
-        mode: "append".into(),
+        mode: crate::ingest::IngestMode::Append,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     let data_str = data_path

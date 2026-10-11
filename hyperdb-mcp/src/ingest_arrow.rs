@@ -221,20 +221,30 @@ fn infer_parquet_schema(path: &str) -> Result<Vec<ColumnSchema>, McpError> {
 /// wrapped in a `::TYPE AS name` cast so the target table receives the
 /// narrowed/widened type. Non-overridden columns pass through by name.
 /// Column names are quoted to tolerate case, spaces, and reserved words.
-fn parquet_select_projection(inferred: &[ColumnSchema], final_columns: &[ColumnSchema]) -> String {
-    inferred
+///
+/// # Errors
+///
+/// An overridden column whose type does not parse (or whose `NUMERIC`
+/// precision/scale is out of range) is rejected here, so only the canonical
+/// type text is ever spliced into the cast.
+fn parquet_select_projection(
+    inferred: &[ColumnSchema],
+    final_columns: &[ColumnSchema],
+) -> Result<String, McpError> {
+    let parts = inferred
         .iter()
         .zip(final_columns.iter())
         .map(|(orig, col)| {
             let quoted = format!("\"{}\"", col.name.replace('"', "\"\""));
             if orig.hyper_type == col.hyper_type {
-                quoted
+                Ok(quoted)
             } else {
-                format!("{quoted}::{ty} AS {quoted}", ty = col.hyper_type)
+                let ty = crate::schema::column_type_sql(&col.hyper_type, &col.name)?;
+                Ok(format!("{quoted}::{ty} AS {quoted}"))
             }
         })
-        .collect::<Vec<_>>()
-        .join(", ")
+        .collect::<Result<Vec<_>, McpError>>()?;
+    Ok(parts.join(", "))
 }
 
 /// Build the SQL statement hyperd will run to ingest the Parquet file.
@@ -355,7 +365,7 @@ pub fn ingest_parquet_file(
     path: &str,
     opts: &IngestOptions,
 ) -> Result<IngestResult, McpError> {
-    if opts.mode == "merge" {
+    if opts.mode.is_merge() {
         return crate::ingest::merge_via_temp_table(engine, opts, |engine, tmp_opts| {
             ingest_parquet_file(engine, path, tmp_opts)
         });
@@ -368,9 +378,9 @@ pub fn ingest_parquet_file(
         Some(s) => crate::schema::apply_schema_override(inferred.clone(), s)?,
         None => inferred.clone(),
     };
-    let projection = parquet_select_projection(&inferred, &final_columns);
+    let projection = parquet_select_projection(&inferred, &final_columns)?;
 
-    let is_replace = opts.mode != "append";
+    let is_replace = opts.mode.replaces()?;
     let sql = build_parquet_ingest_sql(
         &opts.table,
         &absolute_path,
@@ -460,8 +470,8 @@ pub async fn ingest_parquet_file_async(
         .await
         .map_err(|e| McpError::new(ErrorCode::InternalError, format!("Task join error: {e}")))??;
 
-    let projection = parquet_select_projection(&inferred, &final_columns);
-    let is_replace = opts.mode != "append";
+    let projection = parquet_select_projection(&inferred, &final_columns)?;
+    let is_replace = opts.mode.replaces()?;
     let sql = build_parquet_ingest_sql(
         &opts.table,
         &absolute_path,
@@ -657,7 +667,7 @@ pub fn ingest_arrow_ipc_file(
     path: &str,
     opts: &IngestOptions,
 ) -> Result<IngestResult, McpError> {
-    if opts.mode == "merge" {
+    if opts.mode.is_merge() {
         return crate::ingest::merge_via_temp_table(engine, opts, |engine, tmp_opts| {
             ingest_arrow_ipc_file(engine, path, tmp_opts)
         });
@@ -676,7 +686,7 @@ pub fn ingest_arrow_ipc_file(
 
     let (columns, batches) = read_arrow_ipc_file(path)?;
 
-    let is_replace = opts.mode != "append";
+    let is_replace = opts.mode.replaces()?;
     // Arrow IPC uses the binary COPY protocol which resolves table names via
     // the search path. When targeting a non-primary database, temporarily
     // redirect the search path for the duration of the transaction. The
@@ -767,7 +777,7 @@ pub async fn ingest_arrow_ipc_file_async(
         .await
         .map_err(|e| McpError::new(ErrorCode::InternalError, format!("Task join error: {e}")))??;
 
-    let is_replace = opts.mode != "append";
+    let is_replace = opts.mode.replaces()?;
     let table_def = crate::schema::build_table_def(&opts.table, &columns)?;
 
     let txn = conn.transaction().await.map_err(McpError::from)?;
@@ -884,7 +894,7 @@ mod tests {
     /// would look like it worked.
     #[test]
     fn null_is_not_a_resolvable_override_type() {
-        assert!(crate::schema::map_hyper_type("NULL").is_none());
+        assert!(crate::schema::map_hyper_type("NULL").is_err());
     }
 
     /// Footer inspection must reject a physically `NullType` Parquet column,

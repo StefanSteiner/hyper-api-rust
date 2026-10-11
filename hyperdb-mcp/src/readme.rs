@@ -91,7 +91,7 @@ Every successful database-routed tool response carries canonical `resolved_datab
   one query, temporary table; format auto-detected (`[`/`{` → JSON, else CSV)
 - `query_file`(path, sql, table_name?="data", schema?, json_extract_path?) — same for a CSV|JSON|JSONL|
   Parquet|Arrow IPC file; fastest answer to "what's in this file?"
-- `schema`: partial override `{"col": "BIGINT"}`, rest inferred · `json_extract_path`: dot path to a
+- `schema`: partial override `{"col": "BIGINT"}`, rest inferred · `NUMERIC(p,s)` needs p 1..=38, s 0..=p (else INVALID_ARGUMENT) · `json_extract_path`: dot path to a
   nested JSON array, numeric segments index arrays (`content.0`), stringified JSON parsed en route
 
 ### Load
@@ -219,13 +219,16 @@ Give precision and scale: `::numeric(20,10)`.
 - Persistent-file contention: only a reserved persistent attachment lock is reported as
   `RESOURCE_BUSY`. Run `hyperdb-mcp doctor`, compare client/daemon identities, close the possible owner
   (Hyper, Tableau, or another process) or copy/select another `.hyper` file, then retry.
+- `mode` values are exact lowercase; anything else (`Append`, `appendd`, `""`, `merge` where unsupported)
+  → INVALID_ARGUMENT instead of falling back to replace.
 - `copy_query` mode: create (target must not exist; CREATE TABLE AS) | append (must exist; INSERT
-  INTO ... SELECT) | replace (drop and recreate, atomically).
+  INTO ... SELECT) | replace (result built in staging first; a failing SELECT leaves the target intact).
 - `load_file` merge (needs `merge_key`): key match → row deleted, incoming row inserted (target columns
   absent from the file → NULL; duplicate incoming keys all insert) · no match → INSERT · new file
   column → `ALTER TABLE ADD COLUMN` (nullable, existing rows NULL) · type change on an existing column
-  → rejected (use replace or a `schema` override). ⚠ DELETE+INSERT is not transactional (Hyper
-  auto-commits DDL): a mid-run failure leaves partial state, same as replace.
+  → rejected (use replace or a `schema` override). DELETE+INSERT runs in one transaction: a failed
+  merge leaves the target's rows and columns unchanged. A NOT NULL target column missing from the
+  incoming data is rejected up front.
 
 ## SQL dialect quick-reference
 

@@ -685,12 +685,22 @@ fn run_bounded_engine_report_child() {
 
 fn run_engine_report_child() {
     let state_dir = discovery::state_dir().expect("child state directory");
+    // An IPC endpoint of the shape a real daemon publishes (the engine refuses
+    // anything else before dialing), but nothing listens there. That makes the
+    // public Engine constructor enter the daemon connection-error branch
+    // without racing another process for a recently released port.
+    let unreachable_hyperd = if cfg!(windows) {
+        r"\\.\pipe\hyperdb-mcp-test-nobody-home".to_string()
+    } else {
+        state_dir
+            .join("sockets")
+            .join("hyper")
+            .to_string_lossy()
+            .into_owned()
+    };
     let mut health = RunningHealth::start_with_info(&state_dir, |endpoint| DaemonInfo {
         pid: 616_161,
-        // Port zero is never a reachable TCP server endpoint. It makes the
-        // public Engine constructor enter the daemon connection-error branch
-        // without racing another process for a recently released port.
-        hyperd_endpoint: "127.0.0.1:0".to_string(),
+        hyperd_endpoint: unreachable_hyperd.clone(),
         health_endpoint: endpoint.as_str().to_string(),
         started_at: "2026-08-14T12:34:56Z".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -712,9 +722,9 @@ fn run_engine_report_child() {
     let restart_requested = health.state.consume_restart_request();
     health.stop_and_join();
     assert!(
-        error
-            .message
-            .contains("Failed to connect to daemon hyperd at 127.0.0.1:0"),
+        error.message.contains(&format!(
+            "Failed to connect to daemon hyperd at {unreachable_hyperd}"
+        )),
         "public Engine constructor must fail in try_daemon_mode, got: {}",
         error.message
     );

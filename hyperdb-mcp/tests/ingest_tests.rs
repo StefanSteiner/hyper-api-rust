@@ -21,9 +21,8 @@ fn ingest_json_basic() {
     let data = r#"[{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]"#;
     let opts = IngestOptions {
         table: "users".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     let result = ingest_json(&mut te.engine, data, &opts).unwrap();
@@ -46,16 +45,14 @@ fn ingest_json_append_mode() {
     let data2 = r#"[{"id": 2}]"#;
     let opts_replace = IngestOptions {
         table: "t".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     let opts_append = IngestOptions {
         table: "t".into(),
-        mode: "append".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Append,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     ingest_json(&mut te.engine, data1, &opts_replace).unwrap();
@@ -78,9 +75,8 @@ fn ingest_csv_basic() {
     let csv_text = "id,name,score\n1,Alice,95.5\n2,Bob,88.0\n";
     let opts = IngestOptions {
         table: "scores".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     let result = ingest_csv(&mut te.engine, csv_text, &opts).unwrap();
@@ -107,9 +103,8 @@ fn ingest_json_with_schema_override() {
     );
     let opts = IngestOptions {
         table: "orders".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: Some(schema),
-        merge_key: None,
         target_db: None,
     };
     let result = ingest_json(&mut te.engine, data, &opts).unwrap();
@@ -124,9 +119,8 @@ fn ingest_json_empty_returns_error() {
     let data = "[]";
     let opts = IngestOptions {
         table: "empty".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     let result = ingest_json(&mut te.engine, data, &opts);
@@ -167,9 +161,8 @@ fn ingest_json_file_loads_json_array() {
     );
     let opts = IngestOptions {
         table: "people".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     let result = ingest_json_file(&mut te.engine, &path, &opts).unwrap();
@@ -198,9 +191,8 @@ fn ingest_json_file_loads_jsonl() {
     let (path, _keep) = tmp_with_ext("jsonl", jsonl);
     let opts = IngestOptions {
         table: "events".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     let result = ingest_json_file(&mut te.engine, &path, &opts).unwrap();
@@ -227,9 +219,8 @@ fn ingest_json_file_reports_bad_jsonl_line() {
     let (path, _keep) = tmp_with_ext("jsonl", bad);
     let opts = IngestOptions {
         table: "t".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     let Err(err) = ingest_json_file(&mut te.engine, &path, &opts) else {
@@ -256,9 +247,8 @@ fn ingest_csv_empty_cells_become_null() {
     let csv_text = "id,name,age\n1,Alice,30\n2,Bob,\n3,Carol,42\n";
     let opts = IngestOptions {
         table: "u".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     let result = ingest_csv(&mut te.engine, csv_text, &opts).unwrap();
@@ -394,9 +384,8 @@ fn ingest_json_file_handles_log_extension_via_content_sniff() {
 
     let opts = IngestOptions {
         table: "events".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     let result = ingest_json_file(&mut te.engine, &path, &opts).unwrap();
@@ -413,9 +402,8 @@ fn ingest_csv_file_empty_cells_become_null() {
     let (path, _keep) = tmp_with_ext("csv", b"code,label\nAAA,first\n,middle\nBBB,\n");
     let opts = IngestOptions {
         table: "lookup".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     let result = ingest_csv_file(&mut te.engine, &path, &opts).unwrap();
@@ -567,9 +555,8 @@ fn extract_json_path_then_ingest() {
 
     let opts = IngestOptions {
         table: "splunk_data".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     let result = ingest_json(&mut te.engine, &extracted, &opts).unwrap();
@@ -606,18 +593,18 @@ fn ingest_json_merge_basic() {
 
     let opts_replace = IngestOptions {
         table: "users".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     ingest_json(&mut te.engine, initial, &opts_replace).unwrap();
 
     let opts_merge = IngestOptions {
         table: "users".into(),
-        mode: "merge".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Merge {
+            keys: vec!["id".into()],
+        },
         schema_override: None,
-        merge_key: Some(vec!["id".into()]),
         target_db: None,
     };
     let merge_result = ingest_json(&mut te.engine, updates, &opts_merge).unwrap();
@@ -657,18 +644,18 @@ fn ingest_json_merge_adds_new_column() {
 
     let opts_replace = IngestOptions {
         table: "t".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     ingest_json(&mut te.engine, initial, &opts_replace).unwrap();
 
     let opts_merge = IngestOptions {
         table: "t".into(),
-        mode: "merge".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Merge {
+            keys: vec!["id".into()],
+        },
         schema_override: None,
-        merge_key: Some(vec!["id".into()]),
         target_db: None,
     };
     let merge_result = ingest_json(&mut te.engine, with_host, &opts_merge).unwrap();
@@ -707,9 +694,10 @@ fn ingest_json_merge_target_does_not_exist() {
     let data = r#"[{"id": 1, "name": "Alice"}]"#;
     let opts_merge = IngestOptions {
         table: "fresh".into(),
-        mode: "merge".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Merge {
+            keys: vec!["id".into()],
+        },
         schema_override: None,
-        merge_key: Some(vec!["id".into()]),
         target_db: None,
     };
     let result = ingest_json(&mut te.engine, data, &opts_merge).unwrap();
@@ -738,9 +726,8 @@ fn ingest_json_merge_missing_key_param() {
     let data = r#"[{"id": 1}]"#;
     let opts = IngestOptions {
         table: "t".into(),
-        mode: "merge".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Merge { keys: vec![] },
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     let err = ingest_json(&mut te.engine, data, &opts).unwrap_err();
@@ -761,18 +748,18 @@ fn ingest_json_merge_key_not_in_target() {
     // Target has only `id`. Merge attempts to key on `not_a_col`.
     let opts_replace = IngestOptions {
         table: "t".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     ingest_json(&mut te.engine, r#"[{"id": 1}]"#, &opts_replace).unwrap();
 
     let opts_merge = IngestOptions {
         table: "t".into(),
-        mode: "merge".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Merge {
+            keys: vec!["not_a_col".into()],
+        },
         schema_override: None,
-        merge_key: Some(vec!["not_a_col".into()]),
         target_db: None,
     };
     let err = ingest_json(
@@ -809,9 +796,8 @@ fn ingest_json_merge_key_type_mismatch() {
     so.insert("id".into(), serde_json::json!("BIGINT"));
     let opts_replace = IngestOptions {
         table: "t".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: Some(so),
-        merge_key: None,
         target_db: None,
     };
     ingest_json(&mut te.engine, r#"[{"id": 1, "name": "a"}]"#, &opts_replace).unwrap();
@@ -819,9 +805,10 @@ fn ingest_json_merge_key_type_mismatch() {
     // Incoming has id as quoted string, no override → inferred TEXT.
     let opts_merge = IngestOptions {
         table: "t".into(),
-        mode: "merge".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Merge {
+            keys: vec!["id".into()],
+        },
         schema_override: None,
-        merge_key: Some(vec!["id".into()]),
         target_db: None,
     };
     let err =
@@ -843,9 +830,8 @@ fn ingest_json_merge_existing_column_type_mismatch() {
     so.insert("score".into(), serde_json::json!("DOUBLE PRECISION"));
     let opts_replace = IngestOptions {
         table: "t".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: Some(so),
-        merge_key: None,
         target_db: None,
     };
     ingest_json(
@@ -858,9 +844,10 @@ fn ingest_json_merge_existing_column_type_mismatch() {
     // Incoming has score as quoted text.
     let opts_merge = IngestOptions {
         table: "t".into(),
-        mode: "merge".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Merge {
+            keys: vec!["id".into()],
+        },
         schema_override: None,
-        merge_key: Some(vec!["id".into()]),
         target_db: None,
     };
     let err = ingest_json(
@@ -885,18 +872,18 @@ fn ingest_json_merge_no_orphan_tmp_on_failure() {
     // Force a key-not-in-target failure (cheap, deterministic).
     let opts_replace = IngestOptions {
         table: "t".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     ingest_json(&mut te.engine, r#"[{"id": 1}]"#, &opts_replace).unwrap();
 
     let opts_merge = IngestOptions {
         table: "t".into(),
-        mode: "merge".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Merge {
+            keys: vec!["bogus_key".into()],
+        },
         schema_override: None,
-        merge_key: Some(vec!["bogus_key".into()]),
         target_db: None,
     };
     let _ = ingest_json(
@@ -947,9 +934,8 @@ fn ingest_json_merge_multi_key() {
     ]"#;
     let opts_replace = IngestOptions {
         table: "sales".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     ingest_json(&mut te.engine, initial, &opts_replace).unwrap();
@@ -961,9 +947,10 @@ fn ingest_json_merge_multi_key() {
     ]"#;
     let opts_merge = IngestOptions {
         table: "sales".into(),
-        mode: "merge".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Merge {
+            keys: vec!["region".into(), "year".into()],
+        },
         schema_override: None,
-        merge_key: Some(vec!["region".into(), "year".into()]),
         target_db: None,
     };
     ingest_json(&mut te.engine, updates, &opts_merge).unwrap();
@@ -1007,9 +994,8 @@ fn ingest_json_merge_type_canonicalization_does_not_false_reject() {
     so_int.insert("id".into(), serde_json::json!("INT"));
     let opts_replace = IngestOptions {
         table: "t".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: Some(so_int),
-        merge_key: None,
         target_db: None,
     };
     ingest_json(&mut te.engine, r#"[{"id": 1, "name": "a"}]"#, &opts_replace).unwrap();
@@ -1033,9 +1019,10 @@ fn ingest_json_merge_type_canonicalization_does_not_false_reject() {
     so_integer.insert("id".into(), serde_json::json!("INTEGER"));
     let opts_merge = IngestOptions {
         table: "t".into(),
-        mode: "merge".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Merge {
+            keys: vec!["id".into()],
+        },
         schema_override: Some(so_integer),
-        merge_key: Some(vec!["id".into()]),
         target_db: None,
     };
     let result = ingest_json(
@@ -1074,18 +1061,18 @@ fn ingest_csv_merge_basic() {
 
     let opts_replace = IngestOptions {
         table: "users_csv".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     ingest_csv(&mut te.engine, initial, &opts_replace).unwrap();
 
     let opts_merge = IngestOptions {
         table: "users_csv".into(),
-        mode: "merge".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Merge {
+            keys: vec!["id".into()],
+        },
         schema_override: None,
-        merge_key: Some(vec!["id".into()]),
         target_db: None,
     };
     let merge_result = ingest_csv(&mut te.engine, updates, &opts_merge).unwrap();
@@ -1103,4 +1090,63 @@ fn ingest_csv_merge_basic() {
     assert_eq!(rows[1]["name"], "Bob Jr."); // updated
     assert_eq!(rows[2]["name"], "Carol Updated"); // updated
     assert_eq!(rows[3]["name"], "Dave"); // inserted
+}
+
+// ---------------------------------------------------------------------
+// IngestMode::parse — an unrecognised mode must never become a replace.
+// ---------------------------------------------------------------------
+
+/// Only the exact lowercase names parse; everything else is
+/// `InvalidArgument` (with a did-you-mean hint for case/whitespace slips).
+#[test]
+fn ingest_mode_parse_is_strict() {
+    use hyperdb_mcp::error::ErrorCode;
+    use hyperdb_mcp::ingest::IngestMode;
+    let all = ["replace", "append", "merge"];
+    let rw = ["replace", "append"];
+
+    assert_eq!(
+        IngestMode::parse(None, None, &rw, "load_data").unwrap(),
+        IngestMode::Replace
+    );
+    assert_eq!(
+        IngestMode::parse(Some("append"), None, &rw, "load_data").unwrap(),
+        IngestMode::Append
+    );
+    assert_eq!(
+        IngestMode::parse(Some("merge"), Some(vec!["id".into()]), &all, "load_file").unwrap(),
+        IngestMode::Merge {
+            keys: vec!["id".into()]
+        }
+    );
+
+    for bad in ["Append", "APPEND", " append", "appendd", ""] {
+        let err = IngestMode::parse(Some(bad), None, &all, "load_file").expect_err(bad);
+        assert_eq!(err.code, ErrorCode::InvalidArgument, "{bad:?}");
+        assert!(err.message.contains("load_file"), "{}", err.message);
+        assert!(
+            err.message.contains("replace, append, merge"),
+            "{}",
+            err.message
+        );
+    }
+    let hint = IngestMode::parse(Some("Append"), None, &all, "load_file").unwrap_err();
+    assert!(
+        hint.message.contains("did you mean 'append'"),
+        "{}",
+        hint.message
+    );
+    let typo = IngestMode::parse(Some("appendd"), None, &all, "load_file").unwrap_err();
+    assert!(!typo.message.contains("did you mean"), "{}", typo.message);
+
+    // merge where the tool does not support it
+    let err = IngestMode::parse(Some("merge"), Some(vec!["id".into()]), &rw, "load_data")
+        .expect_err("merge unsupported");
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
+    assert!(err.message.contains("load_data"), "{}", err.message);
+
+    // merge_key rules
+    assert!(IngestMode::parse(Some("merge"), None, &all, "load_file").is_err());
+    assert!(IngestMode::parse(Some("merge"), Some(vec![]), &all, "load_file").is_err());
+    assert!(IngestMode::parse(Some("append"), Some(vec!["id".into()]), &all, "load_file").is_err());
 }

@@ -273,17 +273,10 @@ fn create_table_statements(
             "No columns to create table from",
         ));
     }
-    for col in columns {
-        if crate::schema::map_hyper_type(&col.hyper_type).is_none() {
-            return Err(McpError::new(
-                ErrorCode::SchemaMismatch,
-                format!(
-                    "Unknown type '{}' for column '{}'",
-                    col.hyper_type, col.name
-                ),
-            ));
-        }
-    }
+    let type_sqls: Vec<String> = columns
+        .iter()
+        .map(|col| crate::schema::column_type_sql(&col.hyper_type, &col.name))
+        .collect::<Result<_, _>>()?;
 
     let quoted_table = match target_db {
         Some(db) => {
@@ -296,14 +289,10 @@ fn create_table_statements(
 
     let col_defs: Vec<String> = columns
         .iter()
-        .map(|c| {
+        .zip(&type_sqls)
+        .map(|(c, ty)| {
             let nullable = if c.nullable { "" } else { " NOT NULL" };
-            format!(
-                "\"{}\" {}{}",
-                c.name.replace('"', "\"\""),
-                c.hyper_type,
-                nullable
-            )
+            format!("\"{}\" {ty}{nullable}", c.name.replace('"', "\"\""))
         })
         .collect();
 
@@ -624,7 +613,16 @@ impl Engine {
             return Ok(None);
         };
 
-        let endpoint = &info.hyperd_endpoint;
+        // `daemon.json` is a locator, not a credential: connect only to an
+        // endpoint the authenticated daemon itself confirms and that has the
+        // shape of its own IPC channel (see `trusted_hyperd_endpoint`).
+        let Some(trusted_endpoint) = daemon::discovery::state_dir().ok().and_then(|dir| {
+            daemon::discovery::trusted_hyperd_endpoint(&info, &health_endpoint, &dir)
+        }) else {
+            tracing::warn!("daemon hyperd endpoint was not confirmed, falling back to local mode");
+            return Ok(None);
+        };
+        let endpoint = &trusted_endpoint;
         // CreateAndReplace: same rationale as the local path — a per-pid
         // temp file from a crashed prior session shouldn't leak in.
         let connection = Connection::connect(
@@ -657,7 +655,7 @@ impl Engine {
 
         Ok(Some(Self {
             hyper: None,
-            daemon_endpoint: Some(info.hyperd_endpoint),
+            daemon_endpoint: Some(trusted_endpoint),
             daemon_health_endpoint: Some(health_endpoint),
             connection,
             ephemeral_path: ephemeral_path.to_path_buf(),
@@ -1479,17 +1477,10 @@ impl Engine {
         if cols.is_empty() {
             return Ok(());
         }
-        for col in cols {
-            if crate::schema::map_hyper_type(&col.hyper_type).is_none() {
-                return Err(McpError::new(
-                    ErrorCode::SchemaMismatch,
-                    format!(
-                        "Unknown type '{}' for column '{}'",
-                        col.hyper_type, col.name
-                    ),
-                ));
-            }
-        }
+        let type_sqls: Vec<String> = cols
+            .iter()
+            .map(|col| crate::schema::column_type_sql(&col.hyper_type, &col.name))
+            .collect::<Result<_, _>>()?;
         let quoted_table = match target_db {
             Some(db) => {
                 let esc_db = db.replace('"', "\"\"");
@@ -1500,13 +1491,8 @@ impl Engine {
         };
         let add_clauses = cols
             .iter()
-            .map(|c| {
-                format!(
-                    "ADD COLUMN \"{}\" {}",
-                    c.name.replace('"', "\"\""),
-                    c.hyper_type
-                )
-            })
+            .zip(&type_sqls)
+            .map(|(c, ty)| format!("ADD COLUMN \"{}\" {ty}", c.name.replace('"', "\"\"")))
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!("ALTER TABLE {quoted_table} {add_clauses}");
@@ -2102,10 +2088,11 @@ pub const HYPERDB_INTERNAL_PREFIX: &str = "_hyperdb_";
 
 /// Reserved prefixes for short-lived scratch tables the server creates and
 /// drops within a single tool call: `_tmp_` (`query_data` / `query_file`
-/// staging) and `__hyperdb_merge_` (`load_file` merge staging). Filtered
+/// staging), `__hyperdb_merge_` (`load_file` merge staging) and
+/// `__hyperdb_copy_` (`copy_query` replace staging / backup). Filtered
 /// from user-facing listings so an in-flight — or, after a mid-call
 /// failure, leaked — scratch table never surfaces as if it were user data.
-const INTERNAL_SCRATCH_PREFIXES: [&str; 2] = ["_tmp_", "__hyperdb_merge_"];
+const INTERNAL_SCRATCH_PREFIXES: [&str; 3] = ["_tmp_", "__hyperdb_merge_", "__hyperdb_copy_"];
 
 /// Returns true when `name` is one of `HyperDB`'s own internal tables:
 /// a persistent internal table ([`HYPERDB_INTERNAL_PREFIX`]) or a

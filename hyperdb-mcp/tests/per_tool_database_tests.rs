@@ -26,9 +26,8 @@ use tempfile::TempDir;
 fn qualified_table_unqualified_when_target_db_none() {
     let opts = IngestOptions {
         table: "widgets".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     assert_eq!(qualified_table(&opts), "\"widgets\"");
@@ -40,9 +39,8 @@ fn qualified_table_unqualified_when_target_db_none() {
 fn qualified_table_qualifies_when_target_db_set() {
     let opts = IngestOptions {
         table: "widgets".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: Some("persistent".into()),
     };
     assert_eq!(
@@ -57,9 +55,8 @@ fn qualified_table_qualifies_when_target_db_set() {
 fn qualified_table_escapes_embedded_quotes() {
     let opts = IngestOptions {
         table: "weird\"name".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: Some("db\"alias".into()),
     };
     assert_eq!(
@@ -120,9 +117,8 @@ fn ingest_json_with_persistent_target_lands_in_persistent() {
     let mut te = TestEngine::new_ephemeral();
     let opts = IngestOptions {
         table: "persisted_data".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: Some("persistent".into()),
     };
     let data = r#"[{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]"#;
@@ -156,9 +152,8 @@ fn ingest_csv_with_persistent_target_lands_in_persistent() {
     let mut te = TestEngine::new_ephemeral();
     let opts = IngestOptions {
         table: "csv_target".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: Some("persistent".into()),
     };
     let data = "id,name\n1,Alice\n2,Bob\n";
@@ -184,9 +179,8 @@ fn ingest_to_persistent_survives_engine_recreate() {
         let mut engine = Engine::new_no_daemon(Some(path_str.clone())).unwrap();
         let opts = IngestOptions {
             table: "library".into(),
-            mode: "replace".into(),
+            mode: hyperdb_mcp::ingest::IngestMode::Replace,
             schema_override: None,
-            merge_key: None,
             target_db: Some("persistent".into()),
         };
         let data = r#"[{"id": 1, "title": "Dune"}]"#;
@@ -209,9 +203,8 @@ fn ingest_with_no_target_db_lands_in_primary() {
     let mut te = TestEngine::new_ephemeral();
     let opts = IngestOptions {
         table: "scratch".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     let data = r#"[{"x": 1}]"#;
@@ -298,9 +291,8 @@ fn sample_table_in_persistent_returns_rows() {
     let mut te = TestEngine::new_ephemeral();
     let opts = IngestOptions {
         table: "samples".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: Some("persistent".into()),
     };
     ingest_json(
@@ -514,9 +506,10 @@ fn merge_into_persistent_creates_table_when_missing() {
     let mut te = TestEngine::new_ephemeral();
     let opts = IngestOptions {
         table: "merged_persist".into(),
-        mode: "merge".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Merge {
+            keys: vec!["id".into()],
+        },
         schema_override: None,
-        merge_key: Some(vec!["id".into()]),
         target_db: Some("persistent".into()),
     };
     let data = r#"[{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]"#;
@@ -545,9 +538,8 @@ fn merge_into_persistent_replaces_matching_and_appends_new() {
     // Seed target with two rows.
     let seed_opts = IngestOptions {
         table: "merge_target".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: Some("persistent".into()),
     };
     ingest_json(
@@ -560,9 +552,10 @@ fn merge_into_persistent_replaces_matching_and_appends_new() {
     // Merge: id=1 replaces, id=3 appends, id=2 stays.
     let merge_opts = IngestOptions {
         table: "merge_target".into(),
-        mode: "merge".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Merge {
+            keys: vec!["id".into()],
+        },
         schema_override: None,
-        merge_key: Some(vec!["id".into()]),
         target_db: Some("persistent".into()),
     };
     let result = ingest_json(
@@ -593,9 +586,8 @@ fn merge_into_persistent_alters_when_incoming_has_new_column() {
     let mut te = TestEngine::new_ephemeral();
     let seed_opts = IngestOptions {
         table: "widens".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: Some("persistent".into()),
     };
     ingest_json(
@@ -607,9 +599,10 @@ fn merge_into_persistent_alters_when_incoming_has_new_column() {
 
     let merge_opts = IngestOptions {
         table: "widens".into(),
-        mode: "merge".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Merge {
+            keys: vec!["id".into()],
+        },
         schema_override: None,
-        merge_key: Some(vec!["id".into()]),
         target_db: Some("persistent".into()),
     };
     let result = ingest_json(

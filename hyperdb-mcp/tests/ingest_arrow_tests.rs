@@ -115,9 +115,8 @@ fn ingest_parquet() {
 
     let opts = IngestOptions {
         table: "pq_data".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     let result = ingest_parquet_file(&mut te.engine, path_str, &opts).unwrap();
@@ -182,9 +181,8 @@ fn ingest_parquet_decimal128_not_null_preserves_values() {
 
     let opts = IngestOptions {
         table: "decimal_data".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     let result = ingest_parquet_file(&mut te.engine, path_str, &opts).unwrap();
@@ -246,9 +244,8 @@ fn ingest_parquet_reports_accurate_row_count_above_131072() {
 
     let opts = IngestOptions {
         table: "big_table".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     let result = ingest_parquet_file(&mut te.engine, path_str, &opts).unwrap();
@@ -280,9 +277,8 @@ fn ingest_parquet_append_adds_to_existing_rows() {
 
     let opts_replace = IngestOptions {
         table: "append_data".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     let r1 = ingest_parquet_file(&mut te.engine, path_str, &opts_replace).unwrap();
@@ -290,9 +286,8 @@ fn ingest_parquet_append_adds_to_existing_rows() {
 
     let opts_append = IngestOptions {
         table: "append_data".into(),
-        mode: "append".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Append,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     let r2 = ingest_parquet_file(&mut te.engine, path_str, &opts_append).unwrap();
@@ -322,9 +317,8 @@ fn ingest_parquet_applies_schema_override() {
     override_map.insert("id".to_string(), serde_json::Value::String("BIGINT".into()));
     let opts = IngestOptions {
         table: "override_data".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: Some(override_map),
-        merge_key: None,
         target_db: None,
     };
     let result = ingest_parquet_file(&mut te.engine, path_str, &opts).unwrap();
@@ -363,9 +357,8 @@ fn ingest_arrow_ipc() {
 
     let opts = IngestOptions {
         table: "arrow_data".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     let result = ingest_arrow_ipc_file(&mut te.engine, path_str, &opts).unwrap();
@@ -418,9 +411,8 @@ fn ingest_arrow_ipc_decimal128_not_null_preserves_values() {
 
     let opts = IngestOptions {
         table: "ipc_decimal".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     let result = ingest_arrow_ipc_file(&mut te.engine, path_str, &opts).unwrap();
@@ -457,9 +449,8 @@ fn ingest_arrow_ipc_append_adds_to_existing_rows() {
 
     let opts_replace = IngestOptions {
         table: "ipc_append".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     let r1 = ingest_arrow_ipc_file(&mut te.engine, path_str, &opts_replace).unwrap();
@@ -467,9 +458,8 @@ fn ingest_arrow_ipc_append_adds_to_existing_rows() {
 
     let opts_append = IngestOptions {
         table: "ipc_append".into(),
-        mode: "append".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Append,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     let r2 = ingest_arrow_ipc_file(&mut te.engine, path_str, &opts_append).unwrap();
@@ -497,9 +487,8 @@ fn ingest_arrow_ipc_rejects_schema_override() {
     override_map.insert("x".to_string(), serde_json::Value::String("BIGINT".into()));
     let opts = IngestOptions {
         table: "ipc_override".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: Some(override_map),
-        merge_key: None,
         target_db: None,
     };
     let Err(err) = ingest_arrow_ipc_file(&mut te.engine, path_str, &opts) else {
@@ -583,9 +572,8 @@ async fn load_files_runs_parallel_parquet_ingests() {
             let mut conn = pool.get().await.unwrap();
             let opts = IngestOptions {
                 table,
-                mode: "replace".into(),
+                mode: hyperdb_mcp::ingest::IngestMode::Replace,
                 schema_override: None,
-                merge_key: None,
                 target_db: None,
             };
             ingest_parquet_file_async(&mut conn, &path, &opts)
@@ -651,9 +639,8 @@ fn ingest_arrow_ipc_accepts_stream_format() {
 
     let opts = IngestOptions {
         table: "stream_data".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     let result = ingest_arrow_ipc_file(&mut te.engine, path_str, &opts).unwrap();
@@ -681,9 +668,8 @@ fn ingest_parquet_merge_basic() {
     create_test_parquet(initial_path.to_str().unwrap());
     let opts_replace = IngestOptions {
         table: "pq_merge".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     let r1 = ingest_parquet_file(
@@ -720,9 +706,10 @@ fn ingest_parquet_merge_basic() {
 
     let opts_merge = IngestOptions {
         table: "pq_merge".into(),
-        mode: "merge".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Merge {
+            keys: vec!["id".into()],
+        },
         schema_override: None,
-        merge_key: Some(vec!["id".into()]),
         target_db: None,
     };
     ingest_parquet_file(&mut te.engine, merge_path.to_str().unwrap(), &opts_merge).unwrap();
@@ -751,9 +738,8 @@ fn ingest_arrow_ipc_merge_basic() {
     create_test_arrow_ipc(initial_path.to_str().unwrap());
     let opts_replace = IngestOptions {
         table: "ipc_merge".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     let r1 = ingest_arrow_ipc_file(
@@ -790,9 +776,10 @@ fn ingest_arrow_ipc_merge_basic() {
 
     let opts_merge = IngestOptions {
         table: "ipc_merge".into(),
-        mode: "merge".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Merge {
+            keys: vec!["x".into()],
+        },
         schema_override: None,
-        merge_key: Some(vec!["x".into()]),
         target_db: None,
     };
     ingest_arrow_ipc_file(&mut te.engine, merge_path.to_str().unwrap(), &opts_merge).unwrap();
@@ -834,9 +821,8 @@ fn ingest_parquet_null_type_column_fails_before_issuing_sql() {
 
     let opts = IngestOptions {
         table: "nulltype_data".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     let err = ingest_parquet_file(&mut te.engine, path_str, &opts)
@@ -894,9 +880,8 @@ fn ingest_parquet_null_type_column_rejected_even_with_schema_override() {
     );
     let opts = IngestOptions {
         table: "nulltype_override".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: Some(override_map),
-        merge_key: None,
         target_db: None,
     };
     let err = ingest_parquet_file(&mut te.engine, path_str, &opts)
