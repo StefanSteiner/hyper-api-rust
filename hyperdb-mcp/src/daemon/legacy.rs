@@ -26,7 +26,8 @@
 //! [`STOP_WAIT`](super::spawn::STOP_WAIT) and another `STOP` on every client start until it exits; the
 //! old daemon removes its own record during its shutdown, which can race this
 //! module's removal (harmless, both only delete the same legacy file); each
-//! command uses its own connection; a probe costs about a second at worst; and
+//! command uses its own connection; a probe costs about a second at worst on
+//! Unix and up to about 3.5 seconds on Windows (see `CONNECT_TIMEOUT`); and
 //! a state directory that is not trusted never reaches this code (the client
 //! uses local mode without retiring anything).
 //!
@@ -262,7 +263,9 @@ fn status_pid(port: u16) -> StatusPid {
 
 /// Send one command on a fresh connection to `127.0.0.1:port` and return the
 /// first reply line. Connecting and the exchange each take at most
-/// [`PROBE_TIMEOUT`], so one probe costs about a second at worst.
+/// [`PROBE_TIMEOUT`], so one probe costs about a second at worst, except that
+/// on Windows the connect budget is `CONNECT_TIMEOUT` (3s) because a refused
+/// loopback connect can take that long to report, for about 3.5s in total.
 fn exchange(port: u16, command: &str) -> Probe {
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let mut stream = match TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) {
