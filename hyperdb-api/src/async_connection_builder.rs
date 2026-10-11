@@ -108,7 +108,10 @@ impl AsyncConnectionBuilder {
         self
     }
 
-    /// Sets the login timeout.
+    /// Sets the login timeout (TCP connections only).
+    ///
+    /// Bounds the TCP connect and any TLS handshake. It is ignored for
+    /// Unix-socket, named-pipe and gRPC connections.
     #[must_use]
     pub fn login_timeout(mut self, timeout: Duration) -> Self {
         self.login_timeout = Some(timeout);
@@ -137,6 +140,9 @@ impl AsyncConnectionBuilder {
     }
 
     /// Sets the application name sent to the server.
+    ///
+    /// Sent on TCP, Unix-socket and named-pipe connections; a gRPC connection
+    /// has no equivalent and ignores it.
     #[must_use]
     pub fn application_name(mut self, name: impl Into<String>) -> Self {
         self.application_name = Some(name.into());
@@ -240,6 +246,9 @@ impl AsyncConnectionBuilder {
     /// - `tab.pipe://` or a `\\host\pipe\name` path → named pipe (Windows only)
     /// - otherwise → TCP
     ///
+    /// `login_timeout` applies to TCP connections only; `application_name` is
+    /// ignored by gRPC; `user` and `password` are ignored by gRPC.
+    ///
     /// # Errors
     ///
     /// - Returns [`Error::Config`] if the endpoint cannot be parsed, or if the
@@ -335,6 +344,9 @@ impl AsyncConnectionBuilder {
         if let Some(password) = &self.password {
             config = config.with_password(password);
         }
+        if let Some(ref app_name) = self.application_name {
+            config = config.with_application_name(app_name);
+        }
         config = config.with_tls(self.tls);
 
         let db_path_str = self
@@ -382,6 +394,9 @@ impl AsyncConnectionBuilder {
         }
         if let Some(password) = &self.password {
             config = config.with_password(password);
+        }
+        if let Some(ref app_name) = self.application_name {
+            config = config.with_application_name(app_name);
         }
         config = config.with_tls(self.tls);
 

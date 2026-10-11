@@ -23,6 +23,11 @@ use hyperdb_api_core::client::tls::{TlsConfig, TlsMode};
 /// - `tab.pipe://...` or a `\\host\pipe\name` path → named pipe (Windows only)
 /// - otherwise `host:port` → TCP (e.g., `localhost:7483`)
 ///
+/// Not every setting applies to every transport: `login_timeout` is TCP-only,
+/// `application_name` is ignored by gRPC, and a gRPC connection ignores
+/// `user`/`password` and rejects `query_timeout`, `tls` and any create mode
+/// other than `DoNotCreate`.
+///
 /// # Example
 ///
 /// ```no_run
@@ -170,8 +175,9 @@ impl ConnectionBuilder {
 
     /// Sets the application name sent to the server.
     ///
-    /// This appears in server logs and can be used for monitoring. It applies
-    /// to TCP connections only.
+    /// This appears in server logs and can be used for monitoring. It is sent
+    /// on TCP, Unix-socket and named-pipe connections; a gRPC connection has
+    /// no equivalent and ignores it.
     #[must_use]
     pub fn application_name(mut self, name: impl Into<String>) -> Self {
         self.application_name = Some(name.into());
@@ -294,7 +300,8 @@ impl ConnectionBuilder {
     /// - `tab.pipe://...` or a `\\host\pipe\name` path → named pipe (Windows only)
     /// - otherwise `host:port` → TCP
     ///
-    /// `application_name` and `login_timeout` apply to TCP connections only.
+    /// `login_timeout` applies to TCP connections only; `application_name` is
+    /// ignored by gRPC; `user` and `password` are ignored by gRPC.
     ///
     /// # Errors
     ///
@@ -395,6 +402,9 @@ impl ConnectionBuilder {
         if let Some(password) = &self.password {
             config = config.with_password(password);
         }
+        if let Some(ref app_name) = self.application_name {
+            config = config.with_application_name(app_name);
+        }
         config = config.with_tls(self.tls);
 
         let db_path_str = self
@@ -448,6 +458,9 @@ impl ConnectionBuilder {
 
         if let Some(password) = &self.password {
             config = config.with_password(password);
+        }
+        if let Some(ref app_name) = self.application_name {
+            config = config.with_application_name(app_name);
         }
         config = config.with_tls(self.tls);
 

@@ -124,6 +124,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- `ConnectionBuilder` and `AsyncConnectionBuilder` now send `application_name` on Unix-socket and named-pipe connections too (it was applied to TCP only). The docs now state which settings each transport honors: `login_timeout` is TCP-only, and gRPC ignores `user`, `password` and `application_name`.
 - `Connection::copy_database` and `AsyncConnection::copy_database` now emit `CREATE DATABASE <dst> FROM <src>`; the `COPY DATABASE ... TO ...` they sent before is not Hyper grammar and always failed. The source must not be attached read-write. `close()` on a gRPC connection that has a database no longer tries `DETACH DATABASE` (rejected as read-only), so it no longer returns a spurious error.
 - Cancelling or dropping an `Inserter` after an auto-flush no longer leaves the connection mid-COPY: `cancel` now sends `CopyFail` and returns the connection to `ReadyForQuery`. `import_text` also cancels the COPY when reading the source fails.
 - `MappedInserter` no longer deadlocks on `cancel` after an auto-flush, and its staging table is dropped on every path (execute, cancel, error, drop). Staging tables are named `_hyper_staging_{pid}_{n}`, so two mapped inserters on one connection no longer collide.
