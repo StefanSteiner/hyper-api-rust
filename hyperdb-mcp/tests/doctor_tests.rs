@@ -351,9 +351,18 @@ fn snapshot_tree(root: &Path) -> Vec<(PathBuf, SnapshotNode)> {
             } else if !metadata.is_file() {
                 entries.push((relative, SnapshotNode::Special));
             } else {
-                let bytes = std::fs::read(&path).unwrap_or_else(|error| {
-                    panic!("read snapshot file {}: {error}", path.display())
-                });
+                let bytes = match std::fs::read(&path) {
+                    Ok(bytes) => bytes,
+                    // Windows enforces byte-range locks on reads (os error 32/33), so a
+                    // lock file held by the test cannot be read; its length stands in
+                    // for its contents.
+                    Err(error)
+                        if cfg!(windows) && matches!(error.raw_os_error(), Some(32 | 33)) =>
+                    {
+                        metadata.len().to_le_bytes().to_vec()
+                    }
+                    Err(error) => panic!("read snapshot file {}: {error}", path.display()),
+                };
                 entries.push((relative, SnapshotNode::File(bytes)));
             }
         }
