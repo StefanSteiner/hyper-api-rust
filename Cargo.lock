@@ -3622,6 +3622,7 @@ dependencies = [
 name = "sea-query-hyperdb"
 version = "1.0.0-rc.5"
 dependencies = [
+ "hyperdb-api",
  "sea-query",
 ]
 

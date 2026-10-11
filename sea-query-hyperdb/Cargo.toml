@@ -15,4 +15,9 @@ categories = ["database"]
 workspace = true
 
 [dependencies]
-sea-query = "1.0"
+sea-query = "1.0.2"
+
+[dev-dependencies]
+# path-only: no version pin so cargo doesn't try to resolve hyperdb-api against
+# crates.io during `cargo publish` (same pattern as hyperdb-api-derive).
+hyperdb-api = { path = "../hyperdb-api" }
