@@ -88,6 +88,8 @@ pub mod inspect;
 #[doc(hidden)]
 pub mod lakehouse;
 #[doc(hidden)]
+pub mod no_discover;
+#[doc(hidden)]
 pub mod paths;
 #[doc(hidden)]
 pub mod readme;
