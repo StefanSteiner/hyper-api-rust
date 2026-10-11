@@ -44,10 +44,11 @@ use crate::table_definition::TableDefinition;
 
 /// An async high-performance bulk data inserter.
 ///
-/// `AsyncInserter` is the async mirror of [`Inserter`](crate::Inserter). Both
-/// produce identical wire output (HyperBinary COPY) and have identical
-/// throughput characteristics; the difference is whether the network I/O is
-/// blocking (`Inserter`) or `async/await` (`AsyncInserter`).
+/// `AsyncInserter` is the async counterpart of [`Inserter`](crate::Inserter):
+/// the same HyperBinary COPY encoding, with `async/await` network I/O instead
+/// of blocking I/O. It offers the common typed `add_*` column methods;
+/// `add_row`, `add_optional`, `add_geography` and `add_data128` exist only on
+/// the sync `Inserter`.
 ///
 /// # Lifetime safety
 ///
@@ -243,7 +244,12 @@ impl<'conn> AsyncInserter<'conn> {
         if let Some(buffer) = self.chunk.take()
             && let Some(writer) = self.writer.as_mut()
         {
-            writer.send(&buffer).await?;
+            // Write straight to the socket and flush, as the sync `Inserter`
+            // does. `send` would only append to the connection's write buffer,
+            // which nothing drains until `finish`, so the whole COPY payload
+            // would pile up in client memory.
+            writer.send_direct(&buffer).await?;
+            writer.flush_stream().await?;
             self.chunk_count += 1;
         }
         Ok(())

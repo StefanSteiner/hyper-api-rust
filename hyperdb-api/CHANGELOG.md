@@ -124,6 +124,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- `AsyncInserter` now writes each auto-flushed chunk to the socket (as the sync `Inserter` does) instead of only appending it to the connection's write buffer. Previously the entire COPY payload accumulated in client memory until `execute()`, and server-side rejections surfaced only there. Its docs no longer claim parity with `Inserter`: `add_row`, `add_optional`, `add_geography` and `add_data128` are sync-only.
 - `ConnectionBuilder` and `AsyncConnectionBuilder` now send `application_name` on Unix-socket and named-pipe connections too (it was applied to TCP only). The docs now state which settings each transport honors: `login_timeout` is TCP-only, and gRPC ignores `user`, `password` and `application_name`.
 - `Connection::copy_database` and `AsyncConnection::copy_database` now emit `CREATE DATABASE <dst> FROM <src>`; the `COPY DATABASE ... TO ...` they sent before is not Hyper grammar and always failed. The source must not be attached read-write. `close()` on a gRPC connection that has a database no longer tries `DETACH DATABASE` (rejected as read-only), so it no longer returns a spurious error.
 - Cancelling or dropping an `Inserter` after an auto-flush no longer leaves the connection mid-COPY: `cancel` now sends `CopyFail` and returns the connection to `ReadyForQuery`. `import_text` also cancels the COPY when reading the source fails.
