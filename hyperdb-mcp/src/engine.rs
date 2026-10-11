@@ -1876,11 +1876,14 @@ impl Engine {
 /// | `NUMERIC` | number when representable as a finite `f64`, else string |
 /// | `DATE` | ISO 8601 date string (`YYYY-MM-DD`) |
 /// | `TIMESTAMP` / `TIMESTAMP_TZ` | ISO 8601 timestamp string |
+/// | `TIME` | `HH:MM:SS[.ffffff]` string (the type's `Display` form) |
+/// | `INTERVAL` | interval text, e.g. `1 mon 2 days 03:04:05` (the type's `Display` form) |
+/// | `BYTE_A` (`BYTES`) | PostgreSQL-style hex string: `\x` followed by lowercase hex digits |
 /// | `TEXT` / `VARCHAR` | string |
-/// | anything else | string (fallback; may be garbage for binary types) |
+/// | anything else | string (fallback; may be garbage for other binary types) |
 fn row_value_to_json(row: &hyperdb_api::Row, idx: usize, sql_type: &SqlType) -> Value {
     use hyperdb_api::oids;
-    use hyperdb_api::{Date, Numeric, OffsetTimestamp, Timestamp};
+    use hyperdb_api::{Date, Interval, Numeric, OffsetTimestamp, Time, Timestamp};
 
     if row.is_null(idx) {
         return Value::Null;
@@ -1955,11 +1958,35 @@ fn row_value_to_json(row: &hyperdb_api::Row, idx: usize, sql_type: &SqlType) -> 
             .get::<OffsetTimestamp>(idx)
             .map_or(Value::Null, |t| Value::String(t.to_string()));
     }
+    if oid_val == oids::TIME.0 {
+        return row
+            .get::<Time>(idx)
+            .map_or(Value::Null, |t| Value::String(t.to_string()));
+    }
+    if oid_val == oids::INTERVAL.0 {
+        return row
+            .get::<Interval>(idx)
+            .map_or(Value::Null, |i| Value::String(i.to_string()));
+    }
+    if oid_val == oids::BYTE_A.0 {
+        // PostgreSQL's `bytea` text form (`\x` + hex), which is also what
+        // `bytes_col::TEXT` yields in Hyper, so JSON output matches SQL.
+        return row.get::<Vec<u8>>(idx).map_or(Value::Null, |b| {
+            use std::fmt::Write as _;
+            let mut out = String::with_capacity(2 + b.len() * 2);
+            out.push_str("\\x");
+            for byte in &b {
+                // Writing to a String cannot fail.
+                let _ = write!(out, "{byte:02x}");
+            }
+            Value::String(out)
+        });
+    }
     if oid_val == oids::TEXT.0 || oid_val == oids::VARCHAR.0 {
         return row.get::<String>(idx).map_or(Value::Null, Value::String);
     }
     // Fallback: try as string. Safe for textual types we didn't list;
-    // produces garbage bytes for binary types (BYTEA, GEOGRAPHY, …)
+    // produces garbage bytes for other binary types (GEOGRAPHY, …)
     // — add explicit branches above when those start appearing in
     // real queries.
     row.get::<String>(idx).map_or(Value::Null, Value::String)
