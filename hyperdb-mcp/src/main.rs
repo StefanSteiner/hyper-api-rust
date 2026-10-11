@@ -287,7 +287,12 @@ async fn run_mcp_mode(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         server
     })
     .await?;
-    let service = server.serve(rmcp::transport::io::stdio()).await?;
+    let transport = NoDiscover(rmcp::transport::IntoTransport::<
+        rmcp::service::RoleServer,
+        _,
+        _,
+    >::into_transport(rmcp::transport::io::stdio()));
+    let service = server.serve(transport).await?;
     service.waiting().await?;
 
     Ok(())
@@ -414,4 +419,55 @@ fn daemon_status() {
     println!("  Health endpoint: {}", info.health_endpoint);
     println!("  Started:        {}", info.started_at);
     println!("  Version:        {}", info.version);
+}
+
+/// Stdio transport that answers `server/discover` itself with `-32601`.
+///
+/// Claude Code opens with a `server/discover` probe naming protocol
+/// `2026-07-28`. rmcp would either serve it, which locks the session into the
+/// stateless lifecycle and makes `initialize` answer `2026-07-28`, or reject it
+/// with `-32022`; both end in the client's "Server's protocol version is not
+/// supported". A server that predates `server/discover` answers `Method not
+/// found`, which makes the client fall back to `initialize`, so rmcp never sees
+/// the probe.
+struct NoDiscover<T>(T);
+
+impl<T: rmcp::transport::Transport<rmcp::service::RoleServer>>
+    rmcp::transport::Transport<rmcp::service::RoleServer> for NoDiscover<T>
+{
+    type Error = T::Error;
+
+    fn send(
+        &mut self,
+        item: rmcp::model::ServerJsonRpcMessage,
+    ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send + 'static {
+        self.0.send(item)
+    }
+
+    async fn receive(&mut self) -> Option<rmcp::model::ClientJsonRpcMessage> {
+        loop {
+            let message = self.0.receive().await?;
+            if let rmcp::model::ClientJsonRpcMessage::Request(request) = &message
+                && matches!(
+                    request.request,
+                    rmcp::model::ClientRequest::DiscoverRequest(_)
+                )
+            {
+                let error = rmcp::model::ErrorData::method_not_found::<
+                    rmcp::model::DiscoverRequestMethod,
+                >();
+                let reply =
+                    rmcp::model::ServerJsonRpcMessage::error(error, Some(request.id.clone()));
+                if self.0.send(reply).await.is_err() {
+                    return None;
+                }
+                continue;
+            }
+            return Some(message);
+        }
+    }
+
+    fn close(&mut self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
+        self.0.close()
+    }
 }

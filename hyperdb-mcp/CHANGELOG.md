@@ -91,6 +91,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- The stdio server now answers Claude Code's opening `server/discover` probe with `-32601 Method not found`, so the client falls back to `initialize` instead of failing with "Server's protocol version is not supported: 2026-07-28". Previously rmcp either served the probe, locking the session into the stateless `2026-07-28` lifecycle, or rejected it with `-32022`.
 - **Version takeover starts the new daemon reliably.** A newer client used to
   spawn the replacement as soon as the old daemon's health channel went quiet,
   while the old `hyperd` still held its socket; the new daemon then died
