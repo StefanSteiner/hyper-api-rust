@@ -311,6 +311,9 @@ impl AsyncConnection {
 
     /// Fetches a single row, erroring if the query returns zero rows.
     ///
+    /// Reads and discards the rest of the result to keep the connection
+    /// in sync, so add `LIMIT 1` to queries that match many rows.
+    ///
     /// # Errors
     ///
     /// - Returns the error from [`execute_query`](Self::execute_query) if
@@ -325,6 +328,9 @@ impl AsyncConnection {
     }
 
     /// Fetches a single row, returning `None` if the query is empty.
+    ///
+    /// Reads and discards the rest of the result to keep the connection
+    /// in sync, so add `LIMIT 1` to queries that match many rows.
     ///
     /// # Errors
     ///

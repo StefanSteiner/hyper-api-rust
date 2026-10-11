@@ -428,6 +428,13 @@ impl Connection {
         result
     }
 
+    /// Like [`execute_command`](Self::execute_command), but returns
+    /// `Ok(None)` instead of blocking when the connection is currently held
+    /// by a live result stream or COPY writer. For destructors only.
+    pub(crate) fn try_execute_command(&self, command: &str) -> Result<Option<u64>> {
+        self.transport.try_execute_command(command)
+    }
+
     /// Executes a SQL query and returns a streaming result set.
     ///
     /// Results are streamed in chunks (up to 65,536 rows over TCP), keeping memory
@@ -617,6 +624,12 @@ impl Connection {
     ///
     /// Returns an error if the query returns no rows.
     ///
+    /// Only the first chunk of the result is read. If more rows remain, the
+    /// query is cancelled and the in-flight backlog discarded so the
+    /// connection stays in sync (a server error that would only appear in
+    /// the unread rows is not reported). Add `LIMIT 1` to queries that match
+    /// many rows to avoid producing them at all.
+    ///
     /// # Example
     ///
     /// ```no_run
@@ -649,6 +662,12 @@ impl Connection {
     /// Fetches an optional single row from a query.
     ///
     /// Returns `None` if the query returns no rows.
+    ///
+    /// Only the first chunk of the result is read. If more rows remain, the
+    /// query is cancelled and the in-flight backlog discarded so the
+    /// connection stays in sync (a server error that would only appear in
+    /// the unread rows is not reported). Add `LIMIT 1` to queries that match
+    /// many rows to avoid producing them at all.
     ///
     /// # Example
     ///
@@ -1055,7 +1074,9 @@ impl Connection {
 
     /// Fetches an optional scalar value from a query.
     ///
-    /// Returns `None` if the query returns no rows or NULL.
+    /// Returns `None` if the first cell is SQL `NULL`. A query that returns
+    /// zero rows is an error (see `# Errors`); use
+    /// [`fetch_optional`](Self::fetch_optional) to distinguish "no row".
     ///
     /// # Example
     ///

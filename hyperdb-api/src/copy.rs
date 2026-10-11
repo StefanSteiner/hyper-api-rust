@@ -483,9 +483,23 @@ impl Connection {
         let chunk_size = options.chunk_size.unwrap_or(DEFAULT_IMPORT_CHUNK_SIZE);
         let mut buf = vec![0u8; chunk_size];
         loop {
-            let n = reader
-                .read(&mut buf)
-                .map_err(|e| Error::connection_with_io("Failed to read import data", e))?;
+            let n = match reader.read(&mut buf) {
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    // Abort the COPY explicitly so the connection returns to
+                    // ReadyForQuery and the caller sees the read error, not a
+                    // later "unexpected protocol package".
+                    if let Err(cancel_err) = writer.cancel("failed to read import data") {
+                        tracing::warn!(
+                            target: "hyperdb_api",
+                            error = %cancel_err,
+                            "import_text: aborting the COPY after a read error failed",
+                        );
+                    }
+                    return Err(Error::connection_with_io("Failed to read import data", e));
+                }
+            };
             if n == 0 {
                 break;
             }

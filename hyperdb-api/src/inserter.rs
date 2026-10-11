@@ -28,7 +28,7 @@ use hyperdb_api_core::types::bytes::BytesMut;
 use hyperdb_api_core::types::{
     Date, Geography, Interval, Numeric, OffsetTimestamp, Time, Timestamp,
 };
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::catalog::Catalog;
 use crate::connection::Connection;
@@ -295,7 +295,7 @@ impl<'conn> Inserter<'conn> {
 
     /// Returns the number of complete rows added so far, including rows already flushed to the server.
     ///
-    /// Reset to 0 by [`execute`](Self::execute) and [`cancel`](Self::cancel).
+    /// The inserter is consumed by [`execute`](Self::execute) and [`cancel`](Self::cancel).
     #[must_use]
     pub fn row_count(&self) -> u64 {
         self.row_count
@@ -662,18 +662,32 @@ impl<'conn> Inserter<'conn> {
     /// This sends any remaining buffered data and finishes the COPY operation.
     /// Returns the number of rows inserted.
     ///
-    /// The inserter is single-use: calling `execute` a second time returns
-    /// `Ok(0)` because the internal row counter has been reset and no further
-    /// data has been added. To insert additional batches, create a new
+    /// Takes `self` by value: an inserter is single-use, so reusing it after
+    /// `execute` is a compile error rather than a silent resend of the
+    /// already-committed rows. To insert additional batches, create a new
     /// [`Inserter`].
+    ///
+    /// ```compile_fail,E0382
+    /// # use hyperdb_api::{Connection, Inserter, Result, TableDefinition};
+    /// # fn reuse(conn: &Connection, def: &TableDefinition) -> Result<()> {
+    /// let mut inserter = Inserter::new(conn, def)?;
+    /// inserter.execute()?;
+    /// inserter.execute()?; // error[E0382]: use of moved value: `inserter`
+    /// # Ok(())
+    /// # }
+    /// ```
     ///
     /// # Errors
     ///
     /// - Returns [`Error::InvalidTableDefinition`] if a row is incomplete.
+    ///   Because `execute` consumes the inserter, this discards **all** rows
+    ///   added so far, including chunks already auto-flushed to the server
+    ///   (the open COPY is aborted when the inserter is dropped, so nothing
+    ///   is committed).
     /// - Returns [`Error::FeatureNotSupported`] on a gRPC connection.
     /// - Returns [`Error::Server`] if the server rejects the COPY or its data.
     /// - Returns [`Error::Connection`] or [`Error::Closed`] on transport failure.
-    pub fn execute(&mut self) -> Result<u64> {
+    pub fn execute(mut self) -> Result<u64> {
         if self.chunk.column_index() != 0 {
             return Err(Error::invalid_table_definition(
                 "Incomplete row at execute time",
@@ -735,19 +749,37 @@ impl<'conn> Inserter<'conn> {
             "inserter-end"
         );
 
-        // Reset row counter so a stray second execute() call returns Ok(0)
-        // instead of attempting another COPY trailer on a finished writer.
-        self.row_count = 0;
-
         Ok(rows)
     }
 
     /// Cancels the insert and discards all buffered rows.
-    pub fn cancel(&mut self) {
-        // Drop the in-progress writer (if any). The Drop impl on CopyInWriter
-        // sends a CopyFail to the server.
-        self.writer = None;
-        self.row_count = 0;
+    ///
+    /// If a COPY session is open it is aborted with `CopyFail` so the
+    /// connection returns to `ReadyForQuery` and stays usable; nothing sent
+    /// so far is committed. Takes `self` by value so the cancelled inserter
+    /// cannot be reused.
+    ///
+    /// A failure while aborting the COPY is logged at WARN level (the
+    /// connection is then marked desynchronized by the client layer) rather
+    /// than returned, so that cancelling never masks the error that
+    /// prompted it.
+    pub fn cancel(mut self) {
+        self.cancel_in_place();
+    }
+
+    /// Aborts any open COPY without consuming
+    /// `self` (used by [`MappedInserter`], which owns an `Inserter` field).
+    pub(crate) fn cancel_in_place(&mut self) {
+        if let Some(writer) = self.writer.take()
+            && let Err(e) = writer.cancel("Inserter cancelled")
+        {
+            warn!(
+                target: "hyperdb_api",
+                error = %e,
+                table = %self.table_def.qualified_name(),
+                "inserter-cancel: aborting the COPY session failed",
+            );
+        }
     }
 }
 
@@ -1135,14 +1167,94 @@ impl IntoValue for &Geography {
 /// [`Inserter::with_column_mappings`].
 #[derive(Debug)]
 pub struct MappedInserter<'conn> {
+    // Field order matters: fields drop in declaration order, and the
+    // `inner` inserter's COPY writer must be gone (CopyFail sent, connection
+    // back at ReadyForQuery) before `staging` runs `DROP TABLE` on the same
+    // connection. Never run a statement while a `CopyInWriter` is alive.
     /// The underlying inserter for the staging table.
     inner: Inserter<'conn>,
     /// The target table name.
     target_table: crate::TableName,
     /// The column mappings.
     mappings: Vec<ColumnMapping>,
-    /// The staging table name.
-    staging_table: String,
+    /// Owns the staging table and drops it when no longer needed.
+    staging: StagingTable<'conn>,
+}
+
+/// Process-wide counter that keeps staging-table names unique across
+/// [`MappedInserter`]s sharing a process (and a connection).
+static STAGING_TABLE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// RAII owner of a `MappedInserter` staging table.
+///
+/// Drops the (temporary) table on [`Drop`] if it was not already dropped,
+/// logging a WARN on failure instead of panicking or masking the original
+/// error.
+#[derive(Debug)]
+struct StagingTable<'conn> {
+    connection: &'conn Connection,
+    name: String,
+    dropped: bool,
+}
+
+impl StagingTable<'_> {
+    fn drop_sql(&self) -> String {
+        use hyperdb_api_core::protocol::escape::SqlIdentifier;
+        format!("DROP TABLE IF EXISTS {}", SqlIdentifier(&self.name))
+    }
+
+    /// Drops the staging table. Idempotent.
+    fn drop_now(&mut self) -> Result<()> {
+        if self.dropped {
+            return Ok(());
+        }
+        // Set first: a failed DROP is not retried from `Drop`.
+        self.dropped = true;
+        self.connection
+            .execute_command(&self.drop_sql())
+            .map(|_| ())
+    }
+}
+
+impl Drop for StagingTable<'_> {
+    /// Best-effort cleanup that never blocks.
+    ///
+    /// A destructor must not wait on the connection lock: if this thread
+    /// still holds a live result stream or COPY writer, that lock is
+    /// non-reentrant and waiting would hang forever. So the drop is attempted
+    /// with a try-lock; when the connection is busy, or the thread is
+    /// panicking, the table is left in place. It is session-scoped
+    /// (`CREATE TEMPORARY TABLE`), so the server reclaims it when the
+    /// connection closes. The explicit `execute`/`cancel` paths call
+    /// [`drop_now`](Self::drop_now) and do block.
+    fn drop(&mut self) {
+        if self.dropped {
+            return;
+        }
+        self.dropped = true;
+        if std::thread::panicking() {
+            warn!(
+                target: "hyperdb_api",
+                table = %self.name,
+                "MappedInserter dropped while panicking; leaving session-scoped staging table",
+            );
+            return;
+        }
+        match self.connection.try_execute_command(&self.drop_sql()) {
+            Ok(Some(_)) => {}
+            Ok(None) => warn!(
+                target: "hyperdb_api",
+                table = %self.name,
+                "connection busy while dropping MappedInserter; leaving session-scoped staging table",
+            ),
+            Err(e) => warn!(
+                target: "hyperdb_api",
+                error = %e,
+                table = %self.name,
+                "failed to drop MappedInserter staging table",
+            ),
+        }
+    }
 }
 
 impl<'conn> MappedInserter<'conn> {
@@ -1159,17 +1271,32 @@ impl<'conn> MappedInserter<'conn> {
     {
         let target_table = target_table.try_into()?;
 
-        // Create a unique staging table name
-        let staging_table = format!("_hyper_staging_{}", std::process::id());
+        // Unique staging table name. The table is `TEMPORARY`, hence scoped to
+        // this session, so other processes never see it; what matters is the
+        // process-wide counter, which keeps two inserters on the same
+        // connection apart. The pid is only a debugging aid in the name.
+        let staging_table = format!(
+            "_hyper_staging_{}_{}",
+            std::process::id(),
+            STAGING_TABLE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
 
         // Create the staging table definition (temporary)
         let mut staging_def = inserter_def.clone();
         staging_def.name.clone_from(&staging_table);
+        staging_def.set_persistence(crate::Persistence::Temporary);
 
-        // Create the staging table
+        // Create the staging table (`CREATE TEMPORARY TABLE`)
         let create_sql = staging_def.to_create_sql(true)?;
-        let create_temp = create_sql.replace("CREATE TABLE", "CREATE TEMPORARY TABLE");
-        connection.execute_command(&create_temp)?;
+        connection.execute_command(&create_sql)?;
+
+        // From here on the guard owns cleanup, including if the inner
+        // inserter cannot be constructed.
+        let staging = StagingTable {
+            connection,
+            name: staging_table,
+            dropped: false,
+        };
 
         // Create the inner inserter for the staging table
         let inner = Inserter::new(connection, &staging_def)?;
@@ -1178,7 +1305,7 @@ impl<'conn> MappedInserter<'conn> {
             inner,
             target_table,
             mappings: mappings.to_vec(),
-            staging_table,
+            staging,
         })
     }
 
@@ -1301,44 +1428,46 @@ impl<'conn> MappedInserter<'conn> {
     ///   to the target table is rejected (e.g. a mapping expression fails
     ///   to evaluate).
     /// - Returns [`Error::Server`] if dropping the staging table fails.
-    pub fn execute(&mut self) -> Result<u64> {
-        let connection = self.inner.connection;
-        let staging_table = self.staging_table.clone();
+    pub fn execute(self) -> Result<u64> {
+        let MappedInserter {
+            inner,
+            target_table,
+            mappings,
+            mut staging,
+        } = self;
+        let connection = inner.connection;
 
-        // Insert data into staging table
-        let _staging_rows = self.inner.execute()?;
+        // Insert data into staging table. `inner` is consumed here, so its
+        // COPY writer is finished (or aborted on error) before any further
+        // statement runs on the connection. On error, `staging` is dropped
+        // by its guard.
+        inner.execute()?;
 
         // Build the INSERT...SELECT statement
         use hyperdb_api_core::protocol::escape::SqlIdentifier;
 
-        let target_columns: Vec<String> = self
-            .mappings
+        let target_columns: Vec<String> = mappings
             .iter()
             .map(|m| format!("{}", SqlIdentifier(&m.column_name)))
             .collect();
 
-        let select_items: Vec<String> = self
-            .mappings
-            .iter()
-            .map(ColumnMapping::to_select_item)
-            .collect();
+        let select_items: Vec<String> =
+            mappings.iter().map(ColumnMapping::to_select_item).collect();
 
         let sql = format!(
             "INSERT INTO {} ({}) SELECT {} FROM {}",
-            self.target_table,
+            target_table,
             target_columns.join(", "),
             select_items.join(", "),
-            SqlIdentifier(&staging_table),
+            SqlIdentifier(&staging.name),
         );
 
-        // Execute the INSERT...SELECT (returns row count directly)
+        // Execute the INSERT...SELECT (returns row count directly). On
+        // failure the guard still drops the staging table.
         let row_count = connection.execute_command(&sql)?;
 
         // Drop the staging table
-        connection.execute_command(&format!(
-            "DROP TABLE IF EXISTS {}",
-            SqlIdentifier(&staging_table)
-        ))?;
+        staging.drop_now()?;
 
         // Return the number of rows inserted
         Ok(row_count)
@@ -1346,27 +1475,26 @@ impl<'conn> MappedInserter<'conn> {
 
     /// Cancels the insert and drops the staging table.
     ///
-    /// This method handles cleanup failures gracefully by logging warnings
-    /// instead of returning errors. This prevents masking the original error
-    /// that caused the cancellation.
+    /// Any open COPY into the staging table is aborted first (the connection
+    /// is locked by the COPY writer until then), after which the staging
+    /// table is dropped. This method handles cleanup failures gracefully by
+    /// logging warnings instead of returning errors. This prevents masking
+    /// the original error that caused the cancellation.
     ///
     /// # Logging
     ///
     /// Cleanup failures are logged using the `tracing` crate at WARN level.
-    /// If `tracing` is not initialized, errors are written to stderr.
-    pub fn cancel(&mut self) {
-        let connection = self.inner.connection;
-        let staging_table = &self.staging_table;
-
-        // Drop the staging table, but don't fail if cleanup fails
-        // This avoids masking the original error that caused cancellation
-        if let Err(e) = connection.execute_command(&format!(
-            "DROP TABLE IF EXISTS \"{}\"",
-            staging_table.replace('"', "\"\"")
-        )) {
-            // Log the cleanup failure for debugging
-            // In production, consider using a logging framework like `tracing`
-            eprintln!("Warning: Failed to drop staging table '{staging_table}' during cancel: {e}");
+    pub fn cancel(mut self) {
+        // Abort the COPY first: statements cannot run on the connection
+        // while the inner inserter's writer holds it.
+        self.inner.cancel_in_place();
+        if let Err(e) = self.staging.drop_now() {
+            warn!(
+                target: "hyperdb_api",
+                error = %e,
+                table = %self.staging.name,
+                "failed to drop staging table during cancel",
+            );
         }
     }
 }

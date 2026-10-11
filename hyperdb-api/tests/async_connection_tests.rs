@@ -658,3 +658,47 @@ async fn string_constructors_connect_over_a_unix_socket() {
     .unwrap();
     assert_eq!(conn.database(), db.to_str());
 }
+
+/// First-row fetches over a result larger than one 65,536-row chunk must
+/// drain the backlog so the connection stays in sync.
+#[tokio::test(flavor = "current_thread")]
+async fn first_row_fetches_on_multi_chunk_results_keep_connection_in_sync() {
+    for rows in [70_000_i64, 65_536] {
+        let (_hyper, conn) = fresh_async_conn("async_first_row_drain").await.unwrap();
+        conn.execute_command("CREATE TABLE t (v INT)")
+            .await
+            .unwrap();
+        conn.execute_command(&format!(
+            "INSERT INTO t SELECT * FROM generate_series(1, {rows})"
+        ))
+        .await
+        .unwrap();
+
+        let row = conn.fetch_one("SELECT v FROM t ORDER BY v").await.unwrap();
+        assert_eq!(row.get::<i32>(0), Some(1));
+        assert_eq!(
+            conn.query_count("SELECT COUNT(*) FROM t").await.unwrap(),
+            rows
+        );
+
+        let row = conn
+            .fetch_optional("SELECT v FROM t ORDER BY v")
+            .await
+            .unwrap();
+        assert!(row.is_some());
+        assert_eq!(
+            conn.query_count("SELECT COUNT(*) FROM t").await.unwrap(),
+            rows
+        );
+
+        let v: i32 = conn
+            .fetch_scalar("SELECT v FROM t ORDER BY v")
+            .await
+            .unwrap();
+        assert_eq!(v, 1);
+        assert_eq!(
+            conn.query_count("SELECT COUNT(*) FROM t").await.unwrap(),
+            rows
+        );
+    }
+}

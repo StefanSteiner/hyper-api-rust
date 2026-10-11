@@ -148,6 +148,11 @@ impl<'conn> PreparedStatement<'conn> {
 
     /// Fetches exactly one row; errors if the result is empty.
     ///
+    /// Only the first chunk is read; if more rows remain the query is
+    /// cancelled and the backlog discarded (see
+    /// [`Rowset::first_row`](crate::Rowset::first_row)). Add `LIMIT 1` to
+    /// avoid producing the extra rows.
+    ///
     /// # Errors
     ///
     /// - Returns the error from [`query`](Self::query).
@@ -158,6 +163,11 @@ impl<'conn> PreparedStatement<'conn> {
     }
 
     /// Fetches at most one row; returns `None` if the result is empty.
+    ///
+    /// Only the first chunk is read; if more rows remain the query is
+    /// cancelled and the backlog discarded (see
+    /// [`Rowset::first_row`](crate::Rowset::first_row)). Add `LIMIT 1` to
+    /// avoid producing the extra rows.
     ///
     /// # Errors
     ///

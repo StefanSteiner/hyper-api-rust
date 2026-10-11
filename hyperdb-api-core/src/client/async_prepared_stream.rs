@@ -28,9 +28,9 @@ use super::statement::Column;
 /// triggers a best-effort server-side cancel and marks the connection
 /// desynchronized — same Drop semantics as
 /// [`AsyncQueryStream`](super::async_stream_query::AsyncQueryStream).
-pub struct AsyncPreparedQueryStream<'a> {
-    conn: Option<MutexGuard<'a, AsyncRawConnection<AsyncStream>>>,
-    canceller: &'a dyn Cancellable,
+pub struct AsyncPreparedQueryStream<'conn> {
+    conn: Option<MutexGuard<'conn, AsyncRawConnection<AsyncStream>>>,
+    canceller: &'conn dyn Cancellable,
     finished: bool,
     chunk_size: usize,
     /// Columns captured at prepare time.
@@ -47,10 +47,10 @@ impl std::fmt::Debug for AsyncPreparedQueryStream<'_> {
     }
 }
 
-impl<'a> AsyncPreparedQueryStream<'a> {
+impl<'conn> AsyncPreparedQueryStream<'conn> {
     pub(crate) fn new(
-        conn: MutexGuard<'a, AsyncRawConnection<AsyncStream>>,
-        canceller: &'a dyn Cancellable,
+        conn: MutexGuard<'conn, AsyncRawConnection<AsyncStream>>,
+        canceller: &'conn dyn Cancellable,
         chunk_size: usize,
         columns: Arc<Vec<Column>>,
     ) -> Self {
@@ -121,6 +121,48 @@ impl<'a> AsyncPreparedQueryStream<'a> {
             }
         }
         Ok(Some(rows))
+    }
+
+    /// Reads and discards the rest of the response through `ReadyForQuery`
+    /// without building any rows, leaving the connection ready for the next
+    /// request. A no-op if the stream already finished.
+    ///
+    /// Use this after taking the rows you need from a stream that may hold
+    /// more data than one chunk: [`next_chunk`](Self::next_chunk) returns as
+    /// soon as it has `chunk_size` rows, *before* reading `CommandComplete`
+    /// and `ReadyForQuery`, so simply dropping the stream at that point
+    /// leaves the wire mid-response.
+    ///
+    /// # Errors
+    ///
+    /// - Returns `Error` (I/O) / `Error` (closed) if the transport fails
+    ///   while reading.
+    /// - Returns `Error` (server) if the server sends an `ErrorResponse`
+    ///   before `ReadyForQuery`; the error is still drained through
+    ///   `ReadyForQuery` first.
+    pub async fn drain_to_ready(&mut self) -> Result<()> {
+        if self.finished {
+            return Ok(());
+        }
+        let Some(conn) = self.conn.as_mut() else {
+            return Ok(());
+        };
+        loop {
+            match conn.read_message().await? {
+                Message::ReadyForQuery(_) => {
+                    self.finished = true;
+                    self.conn = None;
+                    return Ok(());
+                }
+                Message::ErrorResponse(body) => {
+                    self.finished = true;
+                    let err = conn.consume_error(&body).await;
+                    self.conn = None;
+                    return Err(err);
+                }
+                _ => {}
+            }
+        }
     }
 }
 

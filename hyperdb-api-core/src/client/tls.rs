@@ -755,7 +755,14 @@ pub(crate) fn send_cancel_sync(
 
     let Some(connector) = tls else {
         tcp.write_all(&buf).map_err(cancel_send_error)?;
-        return tcp.flush().map_err(Error::from_io);
+        tcp.flush().map_err(Error::from_io)?;
+        // Wait for the server to close the cancel connection, which is how
+        // it signals that the request has been processed (libpq's
+        // `PQcancel` does the same). Without this the cancel races the
+        // caller's next query on the main connection and can fail it.
+        tcp.shutdown(Shutdown::Write).ok();
+        drain_sync(&mut tcp);
+        return Ok(());
     };
 
     let mut stream = match negotiate_sync(tcp, connector, Fallback::Deny, Some(CANCEL_TLS_TIMEOUT))?
@@ -782,15 +789,35 @@ pub(crate) fn send_cancel_sync(
     Ok(())
 }
 
-fn drain_sync(sock: &mut TcpStream) {
+/// A blocking socket the cancel-request path can wait on for the server's
+/// close.
+pub(crate) trait SyncCancelSocket: io::Read {
+    /// Sets the read timeout used while waiting for the close.
+    fn set_cancel_read_timeout(&self, timeout: Duration) -> io::Result<()>;
+}
+
+impl SyncCancelSocket for TcpStream {
+    fn set_cancel_read_timeout(&self, timeout: Duration) -> io::Result<()> {
+        self.set_read_timeout(Some(timeout))
+    }
+}
+
+#[cfg(unix)]
+impl SyncCancelSocket for std::os::unix::net::UnixStream {
+    fn set_cancel_read_timeout(&self, timeout: Duration) -> io::Result<()> {
+        self.set_read_timeout(Some(timeout))
+    }
+}
+
+pub(crate) fn drain_sync<S: SyncCancelSocket>(sock: &mut S) {
     let deadline = Instant::now() + CANCEL_DRAIN_TIMEOUT;
     let mut sink = [0u8; 4096];
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() || sock.set_read_timeout(Some(remaining)).is_err() {
+        if remaining.is_zero() || sock.set_cancel_read_timeout(remaining).is_err() {
             return;
         }
-        match sock.read(&mut sink) {
+        match io::Read::read(sock, &mut sink) {
             Ok(0) | Err(_) => return,
             Ok(_) => {}
         }
@@ -818,7 +845,17 @@ pub(crate) async fn send_cancel_async(
 
     let Some(connector) = tls else {
         tcp.write_all(&buf).await.map_err(cancel_send_error)?;
-        return tcp.flush().await.map_err(Error::from_io);
+        tcp.flush().await.map_err(Error::from_io)?;
+        // Wait for the server's close (its "request processed" signal) so
+        // the cancel cannot land on the caller's next query.
+        let close = async {
+            tcp.shutdown().await?;
+            let mut sink = [0u8; 64];
+            while tcp.read(&mut sink).await? > 0 {}
+            Ok::<(), io::Error>(())
+        };
+        let _ = tokio::time::timeout(CANCEL_DRAIN_TIMEOUT, close).await;
+        return Ok(());
     };
 
     let mut stream =

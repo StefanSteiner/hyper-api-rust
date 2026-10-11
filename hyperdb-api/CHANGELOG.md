@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Breaking:** `Inserter::execute`, `Inserter::cancel`, `AsyncInserter::execute`, `AsyncInserter::cancel` and the mapped-inserter equivalents now take `self` by value. An inserter is single-use; reusing one after `execute`/`cancel` is a compile error instead of a silent re-send of already-committed rows or a wedged COPY session. Note that `execute` returning an incomplete-row error now discards all rows, including chunks already auto-flushed to the server (nothing is committed).
 - **BREAKING:** the `arrow` dependency moved from **59** to **60**. Arrow types
   appear in this crate's public API, so consumers must move to `arrow` 60 in
   lockstep. No source change was needed on our side. `parquet` (used by
@@ -123,6 +124,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Cancelling or dropping an `Inserter` after an auto-flush no longer leaves the connection mid-COPY: `cancel` now sends `CopyFail` and returns the connection to `ReadyForQuery`. `import_text` also cancels the COPY when reading the source fails.
+- `MappedInserter` no longer deadlocks on `cancel` after an auto-flush, and its staging table is dropped on every path (execute, cancel, error, drop). Staging tables are named `_hyper_staging_{pid}_{n}`, so two mapped inserters on one connection no longer collide.
+- On the sync path, `fetch_one`, `fetch_optional`, `fetch_scalar`, `fetch_optional_scalar`, `query_count`, `first_row` and the `QueryAs`/`QueryScalar` single-row fetchers used to leave the unread remainder of a multi-chunk (more than 65,536 rows) result on the wire, so the next request failed with "connection is desynchronized". They now read only the first chunk and drop the stream, whose `Drop` cancels the query and discards the backlog.
+  Add `LIMIT 1` to avoid producing the extra rows. A server error that would only occur in the unread rows is not reported.
+- Async prepared `fetch_one` / `fetch_optional` now stream and take the first row instead of materializing the whole result (a memory improvement), and read the remainder of the response so the connection stays in sync.
+- A cancel request no longer races the caller's next query: the cancel connection is now held open until the server closes it, so a stray `57014 canceled` can no longer fail the query that follows an abandoned stream.
+- `StagingTable` (the `MappedInserter` staging table) no longer runs blocking SQL in its destructor: if the connection is busy (for example the same thread still holds a live result) or the thread is panicking, the session-scoped temporary table is left to be reclaimed when the connection closes instead of deadlocking.
 - **Reserved-word table and column names** (`order`, `user`, `table`, ...) no
   longer break generated SQL. `TableDefinition::qualified_name`, `table_name`,
   `schema_name`, `database_name`, `to_drop_sql` and the `MappedInserter`

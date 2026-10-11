@@ -59,6 +59,27 @@ fn as_refs(params: &[BoundParam]) -> Vec<&dyn ToSqlParam> {
     params.iter().map(|p| p as &dyn ToSqlParam).collect()
 }
 
+/// Runs `sql` (binding `params` when present) and returns only its first
+/// row. Any unread remainder is cancelled and discarded (see
+/// [`Rowset::first_row`](crate::Rowset::first_row)) so the connection stays in
+/// sync without materializing the whole result.
+fn first_row(conn: &Connection, sql: &str, params: &[BoundParam]) -> Result<Option<crate::Row>> {
+    if params.is_empty() {
+        conn.fetch_optional(sql)
+    } else {
+        conn.query_params(sql, &as_refs(params))?.first_row()
+    }
+}
+
+/// Maps one row into `T`, resolving column names against the row's schema.
+fn map_row<T: FromRow>(row: &crate::Row) -> Result<T> {
+    let indices = row
+        .schema()
+        .map(crate::row_accessor::RowAccessor::build_indices)
+        .unwrap_or_default();
+    T::from_row(crate::RowAccessor::new(row, &indices))
+}
+
 /// A compiled, type-safe query. Created by the `query_as!` macro.
 ///
 /// Call `.fetch_all(&conn)`, `.fetch_one(&conn)`, or `.fetch_optional(&conn)`
@@ -115,7 +136,10 @@ impl<T: FromRow> QueryAs<T> {
     ///
     /// Returns a `hyperdb_api::Error` on connection or SQL failure.
     pub fn fetch_optional(self, conn: &Connection) -> Result<Option<T>> {
-        Ok(self.fetch_rows(conn)?.into_iter().next())
+        first_row(conn, &self.sql, &self.params)?
+            .as_ref()
+            .map(map_row::<T>)
+            .transpose()
     }
 
     /// Runs the query, binding `$N` arguments when there are any.
@@ -175,10 +199,7 @@ impl<T: RowValue> QueryScalar<T> {
     ///
     /// Returns `Error::Conversion` if the query returns zero rows.
     pub fn fetch_one(self, conn: &Connection) -> Result<T> {
-        let rows = self.fetch_rows(conn)?;
-        rows.into_iter()
-            .next()
-            .map(|r| r.0)
+        self.fetch_optional(conn)?
             .ok_or_else(|| crate::Error::Conversion("query_scalar!: query returned no rows".into()))
     }
 
@@ -188,8 +209,11 @@ impl<T: RowValue> QueryScalar<T> {
     ///
     /// Returns a `hyperdb_api::Error` on connection or SQL failure.
     pub fn fetch_optional(self, conn: &Connection) -> Result<Option<T>> {
-        let rows = self.fetch_rows(conn)?;
-        Ok(rows.into_iter().next().map(|r| r.0))
+        first_row(conn, &self.sql, &self.params)?
+            .as_ref()
+            .map(map_row::<ScalarRow<T>>)
+            .transpose()
+            .map(|opt| opt.map(|r| r.0))
     }
 
     /// Runs the query, binding `$N` arguments when there are any.

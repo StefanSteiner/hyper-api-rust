@@ -374,3 +374,311 @@ fn test_inserter_geography_nullable() {
     assert!(rows[0].1.is_some(), "First row should have a geography");
     assert!(rows[1].1.is_none(), "Second row should have NULL");
 }
+
+// =============================================================================
+// COPY lifecycle: cancel / drop / reuse / staging-table cleanup
+// =============================================================================
+
+/// More rows than one auto-flush chunk (`CHUNK_ROW_LIMIT` = 64_000), so the
+/// inserter has opened a COPY session before `cancel`/drop.
+const ROWS_OVER_AUTOFLUSH: i32 = 64_001;
+
+fn create_int_table(test: &TestConnection, name: &str) -> TableDefinition {
+    let table_def = TableDefinition::new(name).add_nullable_column("a", SqlType::int());
+    Catalog::new(&test.connection)
+        .create_table(&table_def)
+        .expect("Failed to create table");
+    table_def
+}
+
+fn count_rows(test: &TestConnection, table: &str) -> i64 {
+    test.count_tuples(table).expect("COUNT(*) must succeed")
+}
+
+/// Cancelling an inserter whose COPY session is open must abort the COPY
+/// (nothing committed) and leave the connection usable.
+#[test]
+fn test_inserter_cancel_after_autoflush_leaves_connection_usable() {
+    let test = TestConnection::new().expect("Failed to create test connection");
+    let table_def = create_int_table(&test, "cancel_copy");
+
+    let mut inserter =
+        Inserter::new(&test.connection, &table_def).expect("Failed to create inserter");
+    for i in 0..ROWS_OVER_AUTOFLUSH {
+        inserter.add_row(&[&i]).expect("add_row");
+    }
+    inserter.cancel();
+
+    assert_eq!(
+        count_rows(&test, "cancel_copy"),
+        0,
+        "cancel must commit nothing"
+    );
+    assert_eq!(test.execute_scalar_i32("SELECT 41 + 1").unwrap(), 42);
+
+    // A brand-new inserter on the same table sees none of the cancelled rows.
+    let mut fresh = Inserter::new(&test.connection, &table_def).expect("inserter");
+    fresh.add_row(&[&7i32]).unwrap();
+    fresh.add_row(&[&8i32]).unwrap();
+    assert_eq!(fresh.execute().unwrap(), 2);
+    assert_eq!(count_rows(&test, "cancel_copy"), 2);
+}
+
+/// Dropping an inserter mid-COPY (no execute/cancel) must also leave the
+/// connection usable.
+#[test]
+fn test_inserter_dropped_mid_copy_leaves_connection_usable() {
+    let test = TestConnection::new().expect("Failed to create test connection");
+    let table_def = create_int_table(&test, "drop_copy");
+
+    {
+        let mut inserter =
+            Inserter::new(&test.connection, &table_def).expect("Failed to create inserter");
+        for i in 0..ROWS_OVER_AUTOFLUSH {
+            inserter.add_row(&[&i]).expect("add_row");
+        }
+    }
+
+    assert_eq!(count_rows(&test, "drop_copy"), 0);
+    assert_eq!(test.execute_scalar_i32("SELECT 41 + 1").unwrap(), 42);
+}
+
+/// A finished inserter must not leak state into the next one on the same
+/// table: 64_001 rows via execute, then a fresh inserter adds exactly its own.
+/// (Reusing the *same* inserter is a compile error, see the `compile_fail`
+/// doctest on `Inserter::execute`.)
+#[test]
+fn test_inserter_execute_then_fresh_inserter() {
+    let test = TestConnection::new().expect("Failed to create test connection");
+    let table_def = create_int_table(&test, "exec_then_fresh");
+
+    let mut inserter = Inserter::new(&test.connection, &table_def).expect("inserter");
+    for i in 0..ROWS_OVER_AUTOFLUSH {
+        inserter.add_row(&[&i]).unwrap();
+    }
+    assert_eq!(
+        inserter.execute().unwrap(),
+        u64::try_from(ROWS_OVER_AUTOFLUSH).unwrap()
+    );
+
+    let mut fresh = Inserter::new(&test.connection, &table_def).expect("inserter");
+    fresh.add_row(&[&1i32]).unwrap();
+    assert_eq!(fresh.execute().unwrap(), 1);
+    assert_eq!(
+        count_rows(&test, "exec_then_fresh"),
+        i64::from(ROWS_OVER_AUTOFLUSH) + 1
+    );
+}
+
+/// A reader that fails mid-stream: `import_text` must abort the COPY and
+/// leave the connection usable.
+#[test]
+fn test_import_text_read_error_leaves_connection_usable() {
+    use hyperdb_api::copy::CopyOptions;
+
+    struct FailingReader {
+        sent: bool,
+    }
+    impl std::io::Read for FailingReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.sent {
+                return Err(std::io::Error::other("boom"));
+            }
+            self.sent = true;
+            let line = b"1\n2\n";
+            buf[..line.len()].copy_from_slice(line);
+            Ok(line.len())
+        }
+    }
+
+    let test = TestConnection::new().expect("Failed to create test connection");
+    let _ = create_int_table(&test, "import_fail");
+
+    let err = test
+        .connection
+        .import_text(
+            "import_fail",
+            &CopyOptions::tsv(),
+            FailingReader { sent: false },
+        )
+        .expect_err("import must report the read error");
+    assert!(err.to_string().contains("read import data"), "got: {err}");
+
+    assert_eq!(count_rows(&test, "import_fail"), 0);
+    assert_eq!(test.execute_scalar_i32("SELECT 41 + 1").unwrap(), 42);
+}
+
+/// Runs `body` on a thread and fails the test (instead of hanging forever) if
+/// it does not finish within `secs`. The connection is moved into the thread;
+/// the `HyperProcess` stays on the caller so a timeout kills `hyperd`.
+fn run_with_timeout(
+    secs: u64,
+    body: impl FnOnce(hyperdb_api::Connection) + Send + 'static,
+) -> hyperdb_api::HyperProcess {
+    let TestConnection {
+        hyper, connection, ..
+    } = TestConnection::new().expect("Failed to create test connection");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        body(connection);
+        let _ = tx.send(());
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(secs))
+        .expect("body did not finish in time (deadlock?)");
+    hyper
+}
+
+/// `MappedInserter::cancel` used to run `DROP TABLE` while the inner
+/// inserter's `CopyInWriter` still held the connection lock (a same-thread
+/// self-deadlock). It must abort the COPY first, then drop staging.
+#[test]
+fn test_mapped_inserter_cancel_after_autoflush_does_not_deadlock() {
+    use hyperdb_api::ColumnMapping;
+
+    let _hyper = run_with_timeout(30, |conn| {
+        conn.execute_command("CREATE TABLE mapped_target (a INT)")
+            .unwrap();
+        let def = TableDefinition::new("ignored").add_nullable_column("a", SqlType::int());
+        let mut inserter = Inserter::with_column_mappings(
+            &conn,
+            &def,
+            "mapped_target",
+            &[ColumnMapping::new("a")],
+        )
+        .unwrap();
+        for i in 0..ROWS_OVER_AUTOFLUSH {
+            inserter.add_row(&[&i]).unwrap();
+        }
+        inserter.cancel();
+
+        assert_eq!(
+            conn.execute_scalar_query::<i64>("SELECT 1").unwrap(),
+            Some(1)
+        );
+        let leftover = conn
+            .execute_scalar_query::<i64>(
+                "SELECT COUNT(*) FROM pg_catalog.pg_class WHERE relname LIKE '\\_hyper\\_staging\\_%'",
+            )
+            .unwrap();
+        assert_eq!(leftover, Some(0), "staging table must be dropped");
+        assert_eq!(
+            conn.execute_scalar_query::<i64>("SELECT COUNT(*) FROM mapped_target")
+                .unwrap(),
+            Some(0)
+        );
+    });
+}
+
+/// Two mapped inserters on one connection used a pid-only staging name and
+/// collided on `CREATE TEMPORARY TABLE`.
+#[test]
+fn test_two_mapped_inserters_on_one_connection_do_not_collide() {
+    use hyperdb_api::ColumnMapping;
+
+    let test = TestConnection::new().expect("Failed to create test connection");
+    test.execute_command("CREATE TABLE mapped_two (a INT)")
+        .unwrap();
+    let def = TableDefinition::new("ignored").add_nullable_column("a", SqlType::int());
+    let maps = [ColumnMapping::new("a")];
+
+    let mut one = Inserter::with_column_mappings(&test.connection, &def, "mapped_two", &maps)
+        .expect("first mapped inserter");
+    let mut two = Inserter::with_column_mappings(&test.connection, &def, "mapped_two", &maps)
+        .expect("second mapped inserter must not collide on the staging name");
+    one.add_row(&[&1i32]).unwrap();
+    two.add_row(&[&2i32]).unwrap();
+    assert_eq!(one.execute().unwrap(), 1);
+    assert_eq!(two.execute().unwrap(), 1);
+    assert_eq!(count_rows(&test, "mapped_two"), 2);
+}
+
+// =============================================================================
+// Server rejects a value mid-COPY (row 10 of an auto-flushed 64,001-row batch)
+// =============================================================================
+
+/// Creates `name (a VARCHAR(3))` in the database but describes it to the
+/// inserter as `TEXT`, so a longer string is rejected by the *server* while
+/// the COPY is streaming.
+fn inserter_into_narrow_varchar<'a>(test: &'a TestConnection, name: &str) -> Inserter<'a> {
+    test.execute_command(&format!("CREATE TABLE {name} (a VARCHAR(3))"))
+        .expect("create table");
+    let def = TableDefinition::new(name).add_nullable_column("a", SqlType::text());
+    let mut inserter = Inserter::new(&test.connection, &def).expect("inserter");
+    for i in 0..ROWS_OVER_AUTOFLUSH {
+        let value = if i == 10 { "toolong" } else { "ok" };
+        inserter.add_row(&[&value]).expect("add_row");
+    }
+    inserter
+}
+
+fn assert_in_sync_after_rejected_copy(test: &TestConnection, table: &str) {
+    for expected in [42, 43, 44] {
+        assert_eq!(
+            test.execute_scalar_i32(&format!("SELECT {expected}"))
+                .unwrap(),
+            expected
+        );
+    }
+    assert_eq!(
+        count_rows(test, table),
+        0,
+        "rejected COPY must commit nothing"
+    );
+}
+
+#[test]
+fn test_inserter_server_rejected_mid_copy_then_drop_leaves_connection_in_sync() {
+    let test = TestConnection::new().expect("Failed to create test connection");
+    drop(inserter_into_narrow_varchar(&test, "reject_drop"));
+    assert_in_sync_after_rejected_copy(&test, "reject_drop");
+}
+
+#[test]
+fn test_inserter_server_rejected_mid_copy_then_cancel_leaves_connection_in_sync() {
+    let test = TestConnection::new().expect("Failed to create test connection");
+    inserter_into_narrow_varchar(&test, "reject_cancel").cancel();
+    assert_in_sync_after_rejected_copy(&test, "reject_cancel");
+}
+
+#[test]
+fn test_inserter_server_rejected_mid_copy_execute_errors_and_stays_in_sync() {
+    let test = TestConnection::new().expect("Failed to create test connection");
+    let result = inserter_into_narrow_varchar(&test, "reject_exec").execute();
+    assert!(result.is_err(), "server must reject the over-long value");
+    assert_in_sync_after_rejected_copy(&test, "reject_exec");
+}
+
+/// `StagingTable`'s destructor used to run `DROP TABLE` through the
+/// connection even while the same thread still held a live result stream
+/// (which owns the non-reentrant connection lock), hanging forever. It must
+/// now notice the busy connection, leak the session-scoped temp table and
+/// return.
+#[test]
+fn test_mapped_inserter_dropped_while_result_stream_is_live_does_not_deadlock() {
+    use hyperdb_api::ColumnMapping;
+
+    let _hyper = run_with_timeout(15, |conn| {
+        conn.execute_command("CREATE TABLE mapped_busy (a INT)")
+            .unwrap();
+        let def = TableDefinition::new("ignored").add_nullable_column("a", SqlType::int());
+        let inserter =
+            Inserter::with_column_mappings(&conn, &def, "mapped_busy", &[ColumnMapping::new("a")])
+                .unwrap();
+
+        // A live stream holds the connection lock until it is dropped.
+        let mut rows = conn
+            .execute_query("SELECT v FROM generate_series(1, 200000) v")
+            .unwrap();
+        let _ = rows.next_chunk().unwrap();
+
+        // Must return instead of deadlocking on the held lock.
+        drop(inserter);
+        drop(rows);
+
+        // The connection is still usable afterwards.
+        assert_eq!(
+            conn.execute_scalar_query::<i64>("SELECT 1").unwrap(),
+            Some(1)
+        );
+    });
+}

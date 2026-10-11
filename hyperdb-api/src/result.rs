@@ -1364,16 +1364,25 @@ impl<'conn> Rowset<'conn> {
     /// # }
     /// ```
     ///
+    /// # Unread rows are cancelled
+    ///
+    /// Only the first chunk is read. If the result holds more rows, the
+    /// rowset is dropped with the remainder unread, and its `Drop` cancels the
+    /// query and discards the in-flight backlog so the connection is ready for
+    /// the next request. A server error that would only have surfaced in the
+    /// unread part of the result is therefore not reported. Add `LIMIT 1` to
+    /// the query to avoid producing the extra rows at all.
+    ///
     /// # Errors
     ///
     /// Returns the error from [`next_chunk`](Self::next_chunk). An empty
     /// result set yields `Ok(None)`, not an error.
     pub fn first_row(mut self) -> crate::error::Result<Option<Row>> {
-        if let Some(chunk) = self.next_chunk()? {
-            Ok(chunk.into_iter().next())
-        } else {
-            Ok(None)
-        }
+        // `self` is dropped on return; for an unfinished stream that cancels
+        // and drains (see `QueryStream`'s `Drop`).
+        Ok(self
+            .next_chunk()?
+            .and_then(|chunk| chunk.into_iter().next()))
     }
 
     /// Gets the first row or returns an error if no rows were found.

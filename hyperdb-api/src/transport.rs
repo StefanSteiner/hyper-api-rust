@@ -152,6 +152,17 @@ impl Transport {
         }
     }
 
+    /// Like [`execute_command`](Self::execute_command) but returns `Ok(None)`
+    /// instead of blocking when the connection is busy. For destructors.
+    pub(crate) fn try_execute_command(&self, sql: &str) -> Result<Option<u64>> {
+        match self {
+            Transport::Tcp(tcp) => Ok(tcp.client.try_exec(sql)?),
+            Transport::Grpc(_) => Err(Error::feature_not_supported(
+                "gRPC transport is read-only. Write operations are not supported over gRPC.",
+            )),
+        }
+    }
+
     /// Execute a query returning raw Arrow IPC bytes.
     pub(crate) fn execute_query_to_arrow(&self, sql: &str) -> Result<bytes::Bytes> {
         match self {

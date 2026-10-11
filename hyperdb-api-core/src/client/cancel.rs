@@ -43,21 +43,19 @@
 ///   transport-level failures (e.g. the cancel connection can't be opened)
 ///   are logged and swallowed. This keeps `cancel()` usable from `Drop`
 ///   impls, which cannot propagate errors.
-/// - `cancel()` is **idempotent and late-safe**. It is always possible
-///   for the in-flight query to complete between the moment a caller
-///   decides to cancel and the moment the cancel actually reaches the
-///   server — the query's natural `ReadyForQuery` and the cancel
-///   request race. Both PG wire and gRPC handle this correctly: the
-///   PG wire `CancelRequest` travels on a *separate* connection and
-///   only affects the query currently bound to the target connection's
-///   process id, so a cancel that arrives after the query finished
-///   targets nothing and is a harmless no-op; the gRPC `cancel_query`
-///   RPC is similarly keyed on a server-assigned query id and
-///   returns gracefully when the id corresponds to a completed query.
-///   Connection-pool state is never affected by a late cancel,
-///   because cancels never mutate the underlying connection's
-///   protocol state — they only signal the server to abort work on
-///   an already-separately-tracked query.
+/// - `cancel()` is **late-safe, provided it is synchronous with the
+///   server**. A cancel can arrive after the query it targeted finished (the
+///   natural `ReadyForQuery` and the cancel race). Hyper does **not** discard
+///   such a cancel: if it is processed while the next query is running, that
+///   query fails with `57014 canceled` (reproduced by
+///   `late_cancel_never_fails_the_next_query`). The PG wire implementation
+///   therefore waits for the server to close the cancel connection (its
+///   "request processed" signal, as libpq's `PQcancel` does) before
+///   returning, which orders the cancel before anything the caller sends
+///   next. Implementations must preserve that ordering. (Windows named
+///   pipes do not wait today, so the race remains possible there.) The gRPC
+///   `cancel_query` RPC is keyed on a server-assigned query id and returns
+///   gracefully when the id corresponds to a completed query.
 ///
 /// # Writing an implementation
 ///

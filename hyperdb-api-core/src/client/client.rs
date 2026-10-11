@@ -638,6 +638,11 @@ impl Client {
                 })?;
 
                 stream.flush().map_err(Error::from_io)?;
+                // Wait for the server to close the cancel connection (its
+                // "request processed" signal) so the cancel cannot land on
+                // the caller's next query. See `tls::send_cancel_sync`.
+                stream.shutdown(std::net::Shutdown::Write).ok();
+                tls::drain_sync(&mut stream);
             }
             #[cfg(windows)]
             ConnectionEndpoint::NamedPipe { host, name } => {
@@ -864,11 +869,11 @@ impl Client {
     /// - Returns [`Error`] (server) or [`Error`] (I/O) if the initial
     ///   `Parse`/`Bind`/`Execute` sequence for the streaming query
     ///   fails on the server or on the wire.
-    pub fn query_streaming<'a>(
-        &'a self,
+    pub fn query_streaming<'conn>(
+        &'conn self,
         query: &str,
         chunk_size: usize,
-    ) -> Result<QueryStream<'a>> {
+    ) -> Result<QueryStream<'conn>> {
         let mut conn = self.lock_connection()?;
         conn.start_query_binary(query)?;
         Ok(QueryStream {
@@ -893,7 +898,35 @@ impl Client {
     /// server-side SQL errors, and wire-protocol I/O failures all
     /// surface as [`Error`].
     pub fn exec(&self, query: &str) -> Result<u64> {
-        let mut conn = self.lock_connection()?;
+        let conn = self.lock_connection()?;
+        self.exec_locked(conn, query)
+    }
+
+    /// Like [`exec`](Self::exec), but returns `Ok(None)` instead of blocking
+    /// when the connection is currently locked (a live result stream or COPY
+    /// writer, possibly on the calling thread itself).
+    ///
+    /// Intended for destructors, where blocking on a lock the same thread
+    /// already holds would hang forever.
+    ///
+    /// # Errors
+    ///
+    /// Same error modes as [`exec`](Self::exec) once the lock is obtained.
+    pub fn try_exec(&self, query: &str) -> Result<Option<u64>> {
+        match self.connection.try_lock() {
+            Ok(conn) => self.exec_locked(conn, query).map(Some),
+            Err(std::sync::TryLockError::WouldBlock) => Ok(None),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                Err(Error::connection("connection mutex poisoned"))
+            }
+        }
+    }
+
+    fn exec_locked(
+        &self,
+        mut conn: MutexGuard<'_, RawConnection<SyncStream>>,
+        query: &str,
+    ) -> Result<u64> {
         let messages = conn.simple_query(query)?;
         drop(conn); // Release lock before processing notices
 
@@ -1183,7 +1216,10 @@ impl Client {
     ) -> Result<CopyInWriter<'_>> {
         let mut conn = self.lock_connection()?;
         conn.start_copy_in_with_format(table_name, columns, format)?;
-        Ok(CopyInWriter { connection: conn })
+        Ok(CopyInWriter {
+            connection: conn,
+            completed: false,
+        })
     }
 
     /// Starts a COPY IN operation from a raw SQL query string.
@@ -1234,7 +1270,10 @@ impl Client {
         }
         let mut conn = self.lock_connection()?;
         conn.start_copy_in_raw(query)?;
-        Ok(CopyInWriter { connection: conn })
+        Ok(CopyInWriter {
+            connection: conn,
+            completed: false,
+        })
     }
 
     /// Returns true if the connection is alive (no error has occurred).
@@ -1336,9 +1375,62 @@ impl Cancellable for Client {
 ///
 /// This struct holds the connection lock while sending data to ensure
 /// exclusive access during the COPY operation.
+///
+/// # Drop behavior
+///
+/// The server stays in the COPY IN sub-protocol until it sees `CopyDone` or
+/// `CopyFail`, so simply releasing the connection lock would leave the next
+/// request to fail with `unexpected protocol package` (and desynchronize the
+/// extended protocol). Dropping a writer that was neither
+/// [`finish`](Self::finish)ed nor [`cancel`](Self::cancel)led therefore sends
+/// `CopyFail`, flushes, and drains to `ReadyForQuery` within a bounded
+/// message budget. If that cannot be done the connection is marked
+/// desynchronized so later calls fail fast instead of misparsing the wire.
+///
+/// When the drop happens during panic unwinding
+/// ([`std::thread::panicking`]) no network I/O is attempted: the connection is
+/// marked desynchronized immediately, so a stalled peer cannot turn a panic
+/// into a hang. Discard such a connection.
 #[derive(Debug)]
-pub struct CopyInWriter<'a> {
-    connection: MutexGuard<'a, RawConnection<SyncStream>>,
+pub struct CopyInWriter<'conn> {
+    connection: MutexGuard<'conn, RawConnection<SyncStream>>,
+    /// Set once `finish`/`cancel` has taken over wire-level cleanup.
+    completed: bool,
+}
+
+impl Drop for CopyInWriter<'_> {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        // Never do blocking network I/O while unwinding from a panic: the
+        // peer may stall and turn the panic into a hang. Leave the wire as
+        // it is and poison the connection instead.
+        if std::thread::panicking() {
+            warn!(
+                target: "hyperdb_api_core::client",
+                "CopyInWriter dropped during panic unwinding; skipping CopyFail and \
+                 marking the connection desynchronized",
+            );
+            self.connection.mark_desynchronized();
+            return;
+        }
+        warn!(
+            target: "hyperdb_api_core::client",
+            "CopyInWriter dropped without finish() or cancel(); sending CopyFail",
+        );
+        if let Err(e) = self
+            .connection
+            .cancel_copy("CopyInWriter dropped without finish() or cancel()")
+        {
+            warn!(
+                target: "hyperdb_api_core::client",
+                error = %e,
+                "CopyFail on drop did not reach ReadyForQuery; connection marked desynchronized",
+            );
+            self.connection.mark_desynchronized();
+        }
+    }
 }
 
 impl CopyInWriter<'_> {
@@ -1409,6 +1501,7 @@ impl CopyInWriter<'_> {
     ///   failure (constraint violation, type coercion error, etc.)
     ///   via an `ErrorResponse` after `CopyDone`.
     pub fn finish(mut self) -> Result<u64> {
+        self.completed = true;
         self.connection.finish_copy()
     }
 
@@ -1419,9 +1512,12 @@ impl CopyInWriter<'_> {
     /// # Errors
     ///
     /// Returns [`Error`] (I/O) if writing the `CopyFail` frame or
-    /// flushing the transport fails, or [`Error`] (server) if the server
-    /// reports an unexpected status after the cancel.
+    /// flushing the transport fails, [`Error`] (closed) if the server drops
+    /// the connection before `ReadyForQuery`, or [`Error`] (protocol) if the
+    /// drain budget is exhausted. In every error case the connection is
+    /// marked desynchronized and must be discarded.
     pub fn cancel(mut self, reason: &str) -> Result<()> {
+        self.completed = true;
         self.connection.cancel_copy(reason)
     }
 }
@@ -1449,15 +1545,15 @@ fn parse_affected_rows(tag: &str) -> Option<u64> {
 /// via a `MutexGuard`. Dropping the stream before fully iterating triggers
 /// a server-side cancel (see [`Drop`] below) so the connection is returned
 /// to the pool cleanly.
-pub struct QueryStream<'a> {
-    conn: Option<MutexGuard<'a, RawConnection<SyncStream>>>,
+pub struct QueryStream<'conn> {
+    conn: Option<MutexGuard<'conn, RawConnection<SyncStream>>>,
     /// Best-effort cancel handle, used in [`Drop`] when the stream is
     /// abandoned before completion. For the current sync client this is
     /// the owning [`Client`] itself (which implements [`Cancellable`] via
     /// a PG wire `CancelRequest` on a fresh connection). When a gRPC
     /// equivalent lands it will plug in the same trait with a
     /// `cancel_query(query_id)` RPC implementation.
-    canceller: &'a dyn Cancellable,
+    canceller: &'conn dyn Cancellable,
     finished: bool,
     chunk_size: usize,
     schema: Option<Vec<super::statement::Column>>,
@@ -1492,20 +1588,23 @@ impl Drop for QueryStream<'_> {
         // cannot fail.
         self.canceller.cancel();
 
-        // After cancel, the server stops producing new rows and emits
-        // `ErrorResponse(QueryCanceled) + ReadyForQuery` promptly. We still
-        // need to drain those trailing messages off the wire so the
-        // connection returns to the pool cleanly. The budget here is small
-        // because we only expect: (a) whatever rows the server had already
-        // flushed before seeing the cancel, (b) `ErrorResponse`,
-        // (c) `ReadyForQuery`. A well-behaved server reaches `ReadyForQuery`
-        // within a handful of messages. If that budget is somehow exceeded
-        // the bounded drain logs a warning and marks the connection
-        // desynchronized — downstream users will surface the desync as a
-        // transport-level failure and reconnect.
+        // After the cancel the server stops producing rows and emits
+        // `ErrorResponse(QueryCanceled) + ReadyForQuery`, but the cancel is
+        // not instantaneous: rows it flushed before observing it are still
+        // in the socket (hundreds of thousands for a fast, narrow result).
+        // `drain_abandoned_stream` therefore charges `DataRow`s against a
+        // separate, much larger ceiling and every other message (error,
+        // notices, `CommandComplete`) against the small budget below. If
+        // either is exceeded, e.g. because the cancel was lost, the drain
+        // logs a warning and marks the connection desynchronized rather than
+        // reading without bound inside a destructor that holds the
+        // connection lock.
         const POST_CANCEL_DRAIN_CAP: usize = 1024;
         if let Some(ref mut conn) = self.conn {
-            let _ok = conn.drain_until_ready_bounded(POST_CANCEL_DRAIN_CAP);
+            let _ok = conn.drain_abandoned_stream(
+                POST_CANCEL_DRAIN_CAP,
+                super::connection::ABANDONED_STREAM_MAX_DATA_ROWS,
+            );
         }
     }
 }
@@ -1600,6 +1699,48 @@ impl QueryStream<'_> {
             }
         }
         Ok(Some(rows))
+    }
+
+    /// Reads and discards the rest of the response through `ReadyForQuery`
+    /// without building any rows, leaving the connection ready for the next
+    /// request. A no-op if the stream already finished.
+    ///
+    /// Unlike dropping the stream (whose `Drop` cancels the query and
+    /// discards the backlog), this reads the *entire* remainder of the result
+    /// with no cancel and no limit, and reports a server error that appears
+    /// in the unread part. Prefer a plain drop when the rest of the result is
+    /// not wanted; use this when the remainder must be consumed.
+    ///
+    /// # Errors
+    ///
+    /// - Returns `Error` (I/O) / `Error` (closed) if the transport fails
+    ///   while reading.
+    /// - Returns `Error` (server) if the server sends an `ErrorResponse`
+    ///   before `ReadyForQuery`; the error is still drained through
+    ///   `ReadyForQuery` first.
+    pub fn drain_to_ready(&mut self) -> Result<()> {
+        if self.finished {
+            return Ok(());
+        }
+        let Some(conn) = self.conn.as_mut() else {
+            return Ok(());
+        };
+        loop {
+            match conn.read_message()? {
+                Message::ReadyForQuery(_) => {
+                    self.finished = true;
+                    self.conn = None;
+                    return Ok(());
+                }
+                Message::ErrorResponse(body) => {
+                    self.finished = true;
+                    let err = conn.consume_error(&body);
+                    self.conn = None;
+                    return Err(err);
+                }
+                _ => {}
+            }
+        }
     }
 }
 

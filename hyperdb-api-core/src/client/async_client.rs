@@ -503,6 +503,16 @@ impl AsyncClient {
                     );
                     Error::from_io(e)
                 })?;
+                // Wait for the server's close (its "request processed"
+                // signal) so the cancel cannot land on the next query.
+                let close = async {
+                    use tokio::io::AsyncReadExt;
+                    stream.shutdown().await?;
+                    let mut sink = [0u8; 64];
+                    while stream.read(&mut sink).await? > 0 {}
+                    Ok::<(), std::io::Error>(())
+                };
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(1), close).await;
             }
             #[cfg(windows)]
             ConnectionEndpoint::NamedPipe { host, name } => {
@@ -1247,6 +1257,16 @@ impl Drop for AsyncPreparedStatement {
 /// by queuing a `CopyFail` message in the connection's write buffer. The next
 /// async operation on the connection will flush and drain the cancel response,
 /// restoring the connection to a usable state.
+///
+/// # Limitation
+///
+/// If the connection mutex is held by another task at the moment of the drop,
+/// the `CopyFail` cannot be queued and only a warning is logged. The
+/// connection is then still inside the COPY sub-protocol, and later requests
+/// on it will fail with a protocol error. The desynchronized flag lives
+/// inside the same mutex, so `Drop` cannot set it without the lock; close and
+/// replace such a connection. Always call [`finish()`](Self::finish) or
+/// [`cancel()`](Self::cancel) explicitly.
 #[derive(Debug)]
 pub struct AsyncCopyInWriter<'a> {
     connection: &'a Mutex<AsyncRawConnection<AsyncStream>>,
@@ -1358,6 +1378,13 @@ impl Drop for AsyncCopyInWriterOwned {
         // flush and drain.
         if let Ok(mut conn) = self.connection.try_lock() {
             conn.queue_copy_fail("AsyncCopyInWriterOwned dropped without finish/cancel");
+        } else {
+            warn!(
+                target: "hyperdb_api_core::client",
+                "AsyncCopyInWriterOwned dropped without finish() or cancel(), \
+                 and the connection mutex was locked. The connection may be \
+                 left in an unusable COPY-IN state."
+            );
         }
     }
 }

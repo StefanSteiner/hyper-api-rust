@@ -58,9 +58,9 @@ use crate::table_definition::TableDefinition;
 /// # Single-use
 ///
 /// Like the sync `Inserter`, `AsyncInserter` is intended for one COPY session
-/// per instance. After [`execute`](Self::execute) returns, the row counter is
-/// zeroed so a stray second call returns `Ok(0)` rather than corrupting the
-/// stream. To insert a second batch, construct a new `AsyncInserter`.
+/// per instance. [`execute`](Self::execute) and [`cancel`](Self::cancel) take
+/// `self` by value, so reusing a finished inserter is a compile error. To
+/// insert a second batch, construct a new `AsyncInserter`.
 #[derive(Debug)]
 pub struct AsyncInserter<'conn> {
     connection: &'conn AsyncConnection,
@@ -254,16 +254,21 @@ impl<'conn> AsyncInserter<'conn> {
     /// Sends any remaining buffered data and finishes the COPY operation.
     /// Returns the number of rows inserted.
     ///
-    /// The inserter is single-use: calling `execute` a second time returns
-    /// `Ok(0)`. Construct a new `AsyncInserter` to insert another batch.
+    /// Takes `self` by value: the inserter is single-use, so reuse after
+    /// `execute` is a compile error rather than a silent resend of the
+    /// already-committed rows. Construct a new `AsyncInserter` to insert
+    /// another batch.
     ///
     /// # Errors
     ///
     /// - Returns [`Error::InvalidTableDefinition`] if there's an incomplete row (partial column).
+    ///   Because `execute` consumes the inserter, this discards **all** rows
+    ///   added so far, including chunks already auto-flushed to the server
+    ///   (nothing is committed).
     /// - Returns [`Error::Server`] if the server rejects the COPY or its data.
     /// - Returns [`Error::Connection`] on a transport I/O failure, or
     ///   [`Error::Closed`] if the server closed the connection.
-    pub async fn execute(&mut self) -> Result<u64> {
+    pub async fn execute(mut self) -> Result<u64> {
         if self.chunk.column_index() != 0 {
             return Err(Error::invalid_table_definition(
                 "Incomplete row at execute time",
@@ -297,18 +302,17 @@ impl<'conn> AsyncInserter<'conn> {
             "async-inserter-end"
         );
 
-        // Reset so a stray second execute() returns Ok(0).
-        self.row_count = 0;
         Ok(rows)
     }
 
     /// Cancels the insert and discards all buffered rows.
     ///
-    /// The Drop impl on `AsyncCopyInWriter` queues a `CopyFail` on the
+    /// Takes `self` by value so a cancelled inserter cannot be reused. The
+    /// Drop impl on `AsyncCopyInWriter` queues a `CopyFail` on the
     /// connection so the server tears the COPY down cleanly on the next
     /// connection use.
-    pub fn cancel(&mut self) {
-        self.writer = None;
-        self.row_count = 0;
+    pub fn cancel(self) {
+        // Dropping `self` drops the writer, which tears the COPY down.
+        drop(self);
     }
 }

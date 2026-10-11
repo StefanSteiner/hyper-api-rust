@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `Client::try_exec`, a non-blocking `exec` that returns `None` when the connection is busy (for destructors).
+- `drain_to_ready()` on `QueryStream`, `PreparedQueryStream`, `AsyncQueryStream` and `AsyncPreparedQueryStream`, which consumes the rest of a result through `ReadyForQuery` so single-row callers can leave the connection in sync.
 - **`client::tls`: TLS for TCP connections**, negotiated with PostgreSQL's
   `SSLRequest` and libpq `sslmode` semantics. `TlsConfig` / `TlsMode` (with
   `ParseTlsModeError`) are set through `Config::with_tls` and read back with
@@ -60,6 +62,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- A dropped `CopyInWriter` now cancels the COPY (`CopyFail`) instead of leaving the connection mid-COPY; `finish_copy`/`cancel_copy` are bounded by `POST_ERROR_DRAIN_CAP`, check connection health first, and mark the connection desynchronized on write/flush/read failure. The async COPY writer drop now warns when it cannot clean up.
+- Dropping a sync `QueryStream` / `PreparedQueryStream` that still has a multi-chunk backlog no longer desynchronizes the connection: the post-cancel drain charges `DataRow`s against a separate ceiling (about 4.2 million rows) instead of the small message budget. The ceiling keeps a lost or ignored cancel from becoming an unbounded read inside a destructor; past it the connection is marked desynchronized.
+- `Client::cancel` (and the async equivalent) now wait for the server to close the cancel connection before returning, so the cancel cannot land on the next query. A `CopyInWriter` dropped during panic unwinding no longer performs network I/O; it marks the connection desynchronized. A failed buffered write in `send_copy_data_direct` now also marks the connection desynchronized.
 - `protocol::escape::SqlIdentifier`, `format_table_name` and `escape_identifier`
   now always quote identifiers. They previously left lowercase names bare, so
   reserved words such as `order` produced invalid SQL. Output changes from

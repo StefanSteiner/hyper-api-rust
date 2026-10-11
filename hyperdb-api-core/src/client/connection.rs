@@ -46,6 +46,17 @@ use super::auth::{self, AuthState};
 use super::error::{Error, Result};
 use super::statement::{ParamFormat, bind_format_codes};
 
+/// Hard ceiling on `DataRow`s an abandoned-stream drain will discard before
+/// giving up and marking the connection desynchronized (64 full 65,536-row
+/// chunks, about 4.2 million rows).
+///
+/// A cancel is not instantaneous: a fast server keeps producing while the
+/// cancel connection is opened (measured: ~700,000 rows of backlog for a
+/// one-column result on loopback), so the ceiling has to sit well above that.
+/// It still turns a lost or ignored cancel into bounded work instead of an
+/// unbounded read inside a destructor holding the connection lock.
+pub(crate) const ABANDONED_STREAM_MAX_DATA_ROWS: usize = 64 * 65_536;
+
 /// Maximum number of messages [`RawConnection::consume_error`] (and its
 /// async sibling) will read while draining the tail of a failed request.
 ///
@@ -667,12 +678,14 @@ where
     ///
     /// The canonical way to abort a running query is to open a *separate*
     /// connection and send `CancelRequest` with the original connection's
-    /// process id and secret. That is exactly what
-    /// [`QueryStream`](super::client::QueryStream)'s `Drop` impl does
-    /// (via the [`Cancellable`](super::cancel::Cancellable) trait)
-    /// before calling this bounded drain. Cancel-then-drain converges on
-    /// `ReadyForQuery` within a handful of messages because the server
-    /// stops producing new `DataRow`s once it observes the cancel.
+    /// process id and secret. [`QueryStream`](super::client::QueryStream)'s
+    /// `Drop` impl does that (via the
+    /// [`Cancellable`](super::cancel::Cancellable) trait) and then calls
+    /// the dedicated `drain_abandoned_stream` rather than this method,
+    /// because after a cancel the in-flight backlog is mostly `DataRow`s
+    /// that this method's flat message budget would wrongly count against
+    /// the stream. This method is for drains where *every* message is
+    /// expected to be short (error recovery, COPY teardown).
     ///
     /// # Poisoned connections
     ///
@@ -724,6 +737,79 @@ where
         // failure surfaces at a well-defined API boundary instead.
         self.desynchronized = true;
         false
+    }
+
+    /// Drains an abandoned result stream through its trailing `ReadyForQuery`.
+    ///
+    /// Unlike [`drain_until_ready_bounded`](Self::drain_until_ready_bounded),
+    /// `DataRow` messages are charged against a separate, much larger budget.
+    /// A cancel is fire-and-forget and races the server: rows it had already
+    /// produced are buffered in the socket (a result larger than one chunk
+    /// leaves tens of thousands of `DataRow`s in flight), and they must be
+    /// consumed. The server stops producing once it observes the cancel, so
+    /// that backlog is finite.
+    ///
+    /// Two budgets keep this safe to run inside a destructor while holding
+    /// the connection lock:
+    ///
+    /// - `max_other_messages` bounds every non-row message (the
+    ///   `ErrorResponse`, notices, `CommandComplete`) and guards against a
+    ///   server that never sends `ReadyForQuery`.
+    /// - `max_data_rows` is a hard ceiling on discarded `DataRow`s. It is
+    ///   what stops the drain from reading an unbounded result when the
+    ///   cancel was lost or not honoured (the cancel connection failed to
+    ///   open, the server was at its connection limit, ...).
+    ///
+    /// Returns `true` on `ReadyForQuery`. On a read error or an exhausted
+    /// budget the connection is marked desynchronized and `false` is returned.
+    pub(crate) fn drain_abandoned_stream(
+        &mut self,
+        max_other_messages: usize,
+        max_data_rows: usize,
+    ) -> bool {
+        let mut other = 0usize;
+        let mut rows = 0usize;
+        loop {
+            match self.read_message() {
+                Ok(Message::ReadyForQuery(_)) => return true,
+                Ok(Message::DataRow(_)) => {
+                    rows += 1;
+                    if rows > max_data_rows {
+                        warn!(
+                            target: "hyperdb_api_core::client",
+                            max_data_rows,
+                            "drain_abandoned_stream: DataRow ceiling exceeded (cancel lost or \
+                             not honoured); connection marked desynchronized",
+                        );
+                        self.desynchronized = true;
+                        return false;
+                    }
+                }
+                Ok(_) => {
+                    other += 1;
+                    if other > max_other_messages {
+                        warn!(
+                            target: "hyperdb_api_core::client",
+                            max_other_messages,
+                            "drain_abandoned_stream: no ReadyForQuery within the budget; \
+                             connection marked desynchronized and should not be reused",
+                        );
+                        self.desynchronized = true;
+                        return false;
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        target: "hyperdb_api_core::client",
+                        error = %e,
+                        "drain_abandoned_stream: read error mid-drain; \
+                         connection marked desynchronized",
+                    );
+                    self.desynchronized = true;
+                    return false;
+                }
+            }
+        }
     }
 
     /// Convenience: parse a server [`Message::ErrorResponse`] body into an
@@ -958,7 +1044,10 @@ where
     pub fn send_copy_data_direct(&mut self, data: &[u8]) -> Result<()> {
         // First flush any pending buffered data
         if !self.write_buf.is_empty() {
-            self.stream.write_all(&self.write_buf)?;
+            // A failed write may leave a partial frame on the wire.
+            self.stream
+                .write_all(&self.write_buf)
+                .inspect_err(|_| self.desynchronized = true)?;
             self.write_buf.clear();
         }
 
@@ -968,8 +1057,17 @@ where
             .map_err(|_| Error::protocol("CopyData payload exceeds u32::MAX bytes"))?;
         let len_be = msg_len.to_be_bytes();
         let header = [b'd', len_be[0], len_be[1], len_be[2], len_be[3]];
-        self.stream.write_all(&header)?;
-        self.stream.write_all(data)?;
+        // A failure on either write may leave a partial `CopyData` frame on
+        // the wire. The server would then misparse whatever we send next as
+        // the remainder of that frame, so the connection is unusable.
+        if let Err(e) = self.stream.write_all(&header) {
+            self.desynchronized = true;
+            return Err(e.into());
+        }
+        if let Err(e) = self.stream.write_all(data) {
+            self.desynchronized = true;
+            return Err(e.into());
+        }
         Ok(())
     }
 
@@ -999,17 +1097,22 @@ where
     ///   accumulated rows).
     /// - Returns [`Error`] (I/O) on wire-protocol read/write failure.
     pub fn finish_copy(&mut self) -> Result<u64> {
+        // A desynchronized wire (e.g. a partial CopyData frame) would make the
+        // read loop below block forever waiting for a reply that never comes.
+        self.ensure_healthy()?;
         // Ensure all data is sent
-        self.flush()?;
+        self.flush_or_desync()?;
 
         // Send CopyDone
         frontend::copy_done(&mut self.write_buf);
-        self.flush()?;
+        self.flush_or_desync()?;
 
-        // Wait for CommandComplete and ReadyForQuery
+        // Wait for CommandComplete and ReadyForQuery. A healthy server emits
+        // only a handful of messages here, so the read is bounded: a server
+        // that never sends ReadyForQuery must not hang the caller forever.
         let mut row_count = 0u64;
-        loop {
-            let msg = self.read_message()?;
+        for _ in 0..POST_ERROR_DRAIN_CAP {
+            let msg = self.read_message_or_desync()?;
             match msg {
                 Message::CommandComplete(body) => {
                     if let Ok(tag) = body.tag() {
@@ -1032,28 +1135,39 @@ where
                 }
             }
         }
+        self.desynchronized = true;
+        Err(Error::protocol(
+            "finish_copy: no ReadyForQuery within the drain budget; \
+             connection marked desynchronized",
+        ))
     }
 
     /// Cancels a COPY IN operation.
     ///
-    /// This sends `CopyFail` and waits for the error response.
+    /// This sends `CopyFail` and waits for the error response. The wait is
+    /// bounded by [`POST_ERROR_DRAIN_CAP`] messages; if `ReadyForQuery` does
+    /// not arrive in that budget the connection is marked desynchronized.
     ///
     /// # Errors
     ///
     /// Returns [`Error`] (I/O) if flushing the buffer or writing the
-    /// `CopyFail` frame fails, or [`Error`] (closed) if the server
-    /// drops the connection before returning `ReadyForQuery`.
+    /// `CopyFail` frame fails, [`Error`] (closed) if the server drops the
+    /// connection before returning `ReadyForQuery`, or [`Error`] (protocol)
+    /// if the drain budget is exhausted. In every error case the connection
+    /// is marked desynchronized.
     pub fn cancel_copy(&mut self, reason: &str) -> Result<()> {
+        // See `finish_copy`: never wait on a desynchronized wire.
+        self.ensure_healthy()?;
         // Ensure buffer is clear
-        self.flush()?;
+        self.flush_or_desync()?;
 
         // Send CopyFail
         frontend::copy_fail(reason, &mut self.write_buf);
-        self.flush()?;
+        self.flush_or_desync()?;
 
         // Wait for ErrorResponse and ReadyForQuery
-        loop {
-            let msg = self.read_message()?;
+        for _ in 0..POST_ERROR_DRAIN_CAP {
+            let msg = self.read_message_or_desync()?;
             match msg {
                 Message::ReadyForQuery(_) => {
                     return Ok(());
@@ -1066,6 +1180,32 @@ where
                 }
             }
         }
+        self.desynchronized = true;
+        Err(Error::protocol(
+            "cancel_copy: no ReadyForQuery within the drain budget; \
+             connection marked desynchronized",
+        ))
+    }
+
+    /// Marks the connection as desynchronized from the server.
+    ///
+    /// Used by RAII guards (for example `CopyInWriter`'s `Drop`) that cannot
+    /// bring the wire back to `ReadyForQuery`.
+    pub(crate) fn mark_desynchronized(&mut self) {
+        self.desynchronized = true;
+    }
+
+    /// [`flush`](Self::flush), marking the connection desynchronized on failure
+    /// (a failed flush may leave a partial frame on the wire).
+    fn flush_or_desync(&mut self) -> Result<()> {
+        self.flush().inspect_err(|_| self.desynchronized = true)
+    }
+
+    /// [`read_message`](Self::read_message), marking the connection
+    /// desynchronized on failure inside a COPY exchange.
+    fn read_message_or_desync(&mut self) -> Result<Message> {
+        self.read_message()
+            .inspect_err(|_| self.desynchronized = true)
     }
 
     /// Executes a COPY ... TO STDOUT query and returns all output data.
