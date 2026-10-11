@@ -41,7 +41,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
     CallToolResult, ContentBlock, Implementation, InitializeRequestParams, InitializeResult,
     ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParams, PromptMessage,
-    ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource,
+    ProtocolVersion, ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource,
     ResourceContents, ResourceTemplate, Role, ServerCapabilities, ServerConfig,
     SubscribeRequestParams, UnsubscribeRequestParams,
 };
@@ -56,6 +56,7 @@ use serde_json::{Value, json};
 use sqlformat::{FormatOptions, Indent, QueryParams as SqlQueryParams};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Number of rows returned by the `hyper://tables/{name}/sample` JSON
@@ -1020,7 +1021,7 @@ pub struct HyperMcpServer {
     /// `_table_catalog` once per process. Reset to `false` if the
     /// underlying engine is torn down (e.g. connection lost) so the next
     /// call re-bootstraps.
-    catalog_ready: Arc<Mutex<bool>>,
+    catalog_ready: Arc<AtomicBool>,
     watchers: Arc<crate::watcher::WatcherRegistry>,
     saved_queries: Arc<dyn SavedQueryStore>,
     subscriptions: Arc<SubscriptionRegistry>,
@@ -1127,7 +1128,7 @@ impl HyperMcpServer {
         Self {
             engine: Arc::new(Mutex::new(None)),
             engine_initialization: Mutex::new(()),
-            catalog_ready: Arc::new(Mutex::new(false)),
+            catalog_ready: Arc::new(AtomicBool::new(false)),
             watchers: Arc::new(crate::watcher::WatcherRegistry::new()),
             saved_queries,
             subscriptions: Arc::new(SubscriptionRegistry::new()),
@@ -1483,9 +1484,7 @@ impl HyperMcpServer {
         // New engine → catalog may need to be created/reconciled even if we
         // already did it against a prior (now-dead) engine. Preserve the
         // existing engine-then-catalog lock order.
-        if let Ok(mut ready) = self.catalog_ready.lock() {
-            *ready = false;
-        }
+        self.catalog_ready.store(false, Ordering::Release);
         drop(initialization);
         Ok(guard)
     }
@@ -1525,10 +1524,10 @@ impl HyperMcpServer {
         if self.read_only {
             return;
         }
-        let Ok(mut ready) = self.catalog_ready.lock() else {
-            return;
-        };
-        if *ready {
+        // An atomic (not a Mutex) so a panic can never poison the flag and
+        // silently disable catalog bootstrap. Callers hold the engine lock,
+        // so bootstrap is already serialized.
+        if self.catalog_ready.load(Ordering::Acquire) {
             return;
         }
         if let Err(e) = crate::table_catalog::ensure_exists(engine) {
@@ -1537,7 +1536,7 @@ impl HyperMcpServer {
         if let Err(e) = crate::table_catalog::reconcile(engine) {
             tracing::warn!(err = %e.message, "failed to reconcile _table_catalog on startup");
         }
-        *ready = true;
+        self.catalog_ready.store(true, Ordering::Release);
     }
 
     /// Best-effort catalog upsert after a successful ingest. Logs and
@@ -1656,9 +1655,7 @@ impl HyperMcpServer {
                         .unwrap_or_else(|| "non-string panic payload".to_string());
                     tracing::error!(panic = %detail, "tool call panicked; discarding engine");
                     *guard = None;
-                    if let Ok(mut ready) = self.catalog_ready.lock() {
-                        *ready = false;
-                    }
+                    self.catalog_ready.store(false, Ordering::Release);
                     Err(McpError::new(
                         ErrorCode::InternalError,
                         format!(
@@ -1685,9 +1682,7 @@ impl HyperMcpServer {
                     *guard = None;
                     // Reset so the next call re-bootstraps the catalog
                     // against the fresh engine.
-                    if let Ok(mut ready) = self.catalog_ready.lock() {
-                        *ready = false;
-                    }
+                    self.catalog_ready.store(false, Ordering::Release);
                 }
             }
             drop(guard);
@@ -3954,7 +3949,21 @@ impl HyperMcpServer {
                 Err(e) => Self::err_content(e),
             };
         };
-        self.ensure_catalog_ready(engine);
+        // Same panic containment as `with_engine`: a panic in the catalog
+        // bootstrap must not unwind through the engine mutex guard.
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.ensure_catalog_ready(engine);
+        }))
+        .is_err()
+        {
+            tracing::error!("catalog bootstrap panicked in status; reporting degraded status");
+            self.catalog_ready.store(false, Ordering::Release);
+            drop(guard);
+            return match self.status_degraded() {
+                Ok(status) => Self::ok_content(status),
+                Err(e) => Self::err_content(e),
+            };
+        }
         let result = engine.status();
 
         match result {
@@ -4907,6 +4916,17 @@ impl HyperMcpServer {
     reason = "ServerHandler trait methods are async by trait contract; several handlers here (and the tool_handler/prompt_handler macro expansions) have no await points but keeping them as async fn matches the trait signature callers expect"
 )]
 impl ServerHandler for HyperMcpServer {
+    /// Newest MCP revision this server speaks. rmcp's default also advertises
+    /// `2026-07-28`, the stateless-lifecycle revision; clients that do not
+    /// implement it reject the server with "Server's protocol version is not
+    /// supported: 2026-07-28". Capped at rmcp's `LATEST_WITH_INITIALIZE` (2025-11-25), the newest
+    /// revision that still uses the `initialize` handshake (`LATEST` is `2026-07-28`).
+    fn supported_protocol_versions(&self) -> std::borrow::Cow<'static, [ProtocolVersion]> {
+        std::borrow::Cow::Borrowed(ProtocolVersion::known_up_to(
+            &ProtocolVersion::LATEST_WITH_INITIALIZE,
+        ))
+    }
+
     fn get_info(&self) -> ServerConfig {
         let sql_dialect = "\n\
 \n\
@@ -5740,7 +5760,8 @@ fn replace_via_staging(
                 swap_err.code,
                 format!(
                     "copy_query replace failed ({swap_err}) and the original table could not be restored ({restore_err}); \
-                     your data is preserved in hidden table '{backup_name}'"
+                     your data may still be in hidden table '{backup_name}' (for a persistent or attached \
+                     target; an ephemeral/local target's hidden table is discarded when the session ends)"
                 ),
             )),
         };

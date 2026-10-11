@@ -4776,3 +4776,73 @@ async fn tool_load_file_arrow_decimal256_out_of_range_is_clean_error() -> TestRe
     );
     h.shutdown().await
 }
+
+/// Claude Code rejects a server that answers `initialize` with, or lists,
+/// the stateless-lifecycle revision `2026-07-28`. The server must cap its
+/// protocol versions at rmcp's `LATEST_WITH_INITIALIZE` revision.
+#[tokio::test]
+async fn initialize_never_negotiates_protocol_2026_07_28() -> TestResult {
+    use rmcp::ServerHandler;
+    use rmcp::model::ProtocolVersion;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let server = HyperMcpServer::with_no_daemon(None, true, true);
+    let advertised: Vec<String> = server
+        .supported_protocol_versions()
+        .iter()
+        .map(|v| v.as_str().to_string())
+        .collect();
+    assert!(
+        !advertised.iter().any(|v| v == "2026-07-28"),
+        "advertised versions must not include 2026-07-28: {advertised:?}"
+    );
+    assert!(
+        advertised
+            .iter()
+            .any(|v| v == ProtocolVersion::LATEST_WITH_INITIALIZE.as_str()),
+        "LATEST_WITH_INITIALIZE must stay supported: {advertised:?}"
+    );
+
+    // Raw JSON-RPC handshake: a client asking for 2026-07-28 must be answered
+    // with a version at or below LATEST (2025-11-25; ISO dates sort lexically).
+    let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+    let server_task = tokio::spawn(async move {
+        if let Ok(running) = server.serve(server_io).await {
+            let _ = running.waiting().await;
+        }
+    });
+    let (read_half, mut write_half) = tokio::io::split(client_io);
+    let init = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2026-07-28",
+            "capabilities": {},
+            "clientInfo": {"name": "version-cap-test", "version": "0"}
+        }
+    });
+    write_half.write_all(format!("{init}\n").as_bytes()).await?;
+    write_half.flush().await?;
+
+    let mut line = String::new();
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        BufReader::new(read_half).read_line(&mut line),
+    )
+    .await??;
+    let response: serde_json::Value = serde_json::from_str(line.trim())?;
+    let negotiated = response["result"]["protocolVersion"]
+        .as_str()
+        .ok_or_else(|| format!("initialize response had no protocolVersion: {response}"))?;
+    assert!(
+        negotiated <= ProtocolVersion::LATEST_WITH_INITIALIZE.as_str(),
+        "negotiated {negotiated}, expected <= {}",
+        ProtocolVersion::LATEST_WITH_INITIALIZE.as_str()
+    );
+    assert_ne!(negotiated, "2026-07-28");
+
+    drop(write_half);
+    server_task.abort();
+    Ok(())
+}

@@ -241,7 +241,10 @@ impl IngestMode {
                     Self::Replace
                 })
             }
-            other => unreachable!("parse_mode_name returned a mode outside the known set: {other}"),
+            other => Err(McpError::new(
+                ErrorCode::InternalError,
+                format!("{tool}: internal error: unexpected mode '{other}' from mode parser"),
+            )),
         }
     }
 

@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **BREAKING (Rust API): `schema::map_hyper_type` now returns `Result`** instead
+  of panicking on an out-of-range `NUMERIC`; callers must handle the error.
 - **`get_readme` is now written in a compact schema notation.** Tool
   signatures read `tool(required, optional?=default) → result`, with a legend
   at the top. The document is about 10% smaller yet carries more: per-tool
@@ -154,14 +156,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `load_file`, `load_files`, `load_iceberg` and `copy_query` used to treat any
   value other than the exact lowercase names (`Append`, `appendd`, `""`) as
   `replace`. Each tool now parses `mode` once at the boundary and returns
-  `INVALID_ARGUMENT` with a did-you-mean hint; `load_files` rejects a bad entry
+  `INVALID_ARGUMENT` (with a did-you-mean hint for case and whitespace slips such as `Append` or ` append `); `load_files` rejects a bad entry
   before ingesting anything.
 - **A failed `load_file` merge no longer loses the matched rows.** The
   DELETE and INSERT now run in one transaction, so an INSERT failure (for
   example a NULL into a NOT NULL column) restores the deleted rows. A NOT NULL
   target column missing from the incoming data is rejected up front, columns
   added for the merge are dropped again on failure, and the staging table
-  (`__hyperdb_merge_*`, hidden from listings) is always cleaned up.
+  (`__hyperdb_merge_*`, hidden from listings) is cleaned up.
 - **`copy_query` `mode=replace` no longer drops the target before the SELECT
   succeeds.** The result is built in a hidden staging table
   (`__hyperdb_copy_*`) and swapped in with two renames, so a failing SELECT
@@ -174,10 +176,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   column, now returns `INVALID_ARGUMENT` (precision must be 1..=38, scale
   0..=precision). Type strings are parsed strictly (`NUMERICX` and
   `NUMERIC, x INT` are rejected) and stored in canonical form, so user text is
-  never spliced into DDL. A panic in any tool body is now caught and reported as
-  an internal error instead of poisoning the engine mutex; the engine is
-  discarded and the next call reconnects (in local mode this drops the whole
-  ephemeral workspace, so tables loaded earlier in the session are lost). `schema::map_hyper_type` now returns `Result`.
+  never spliced into DDL. A panic in a tool body that runs under the engine lock
+  is now caught and reported as an internal error instead of poisoning the
+  engine mutex; the engine is discarded and the next call reconnects (in local
+  mode this drops the whole ephemeral workspace, so tables loaded earlier in
+  the session are lost). `status` contains only a panic in its catalog
+  bootstrap (it then reports the degraded response), and panics in
+  `load_files` worker tasks are not covered by this guard.
+- **The MCP server no longer advertises protocol revision `2026-07-28`.**
+  Claude Code rejected the server with "Server's protocol version is not
+  supported: 2026-07-28". The server now supports revisions up to `2025-11-25`
+  (rmcp's `LATEST_WITH_INITIALIZE`) and negotiates a client asking for newer
+  down to that.
+- **The catalog-bootstrap flag can no longer be poisoned.** A panic could
+  previously leave `_table_catalog` bootstrap silently disabled.
+- **`IngestMode::parse` no longer panics** on an unexpected mode name; it
+  returns an `INTERNAL_ERROR`.
 - **The daemon's `hyperd` endpoint is no longer trusted from `daemon.json`
   alone.** The client confirms it with the authenticated daemon's `STATUS` reply
   and accepts only a daemon-owned IPC channel (`<state dir>/sockets/<name>`, or a
