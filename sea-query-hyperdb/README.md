@@ -1,12 +1,14 @@
-# sea-query-hyper
+# sea-query-hyperdb
 
 HyperDB SQL dialect backend for [sea-query](https://crates.io/crates/sea-query).
 
 This crate provides `HyperQueryBuilder`, a sea-query backend that generates SQL
-compatible with HyperDB's SQL dialect. HyperDB is largely PostgreSQL-compatible,
-so this builder currently delegates to `PostgresQueryBuilder` for all operations.
-As Hyper's SQL dialect evolves, this builder will be updated to emit Hyper-specific
-syntax where needed.
+compatible with HyperDB's SQL dialect. HyperDB speaks a large subset of
+PostgreSQL, so the builder reuses `PostgresQueryBuilder`'s rendering for most
+constructs (quoting, `$n` placeholders, `E'...'` string escaping, `ILIKE`,
+`DISTINCT ON`, `NULLS FIRST/LAST`, `TABLESAMPLE`, ...). It is not a pass-through:
+statement dispatch, value rendering and some expression forms are Hyper's own,
+and the output is tested against a real `hyperd`.
 
 ---
 
@@ -15,12 +17,12 @@ syntax where needed.
 ```toml
 [dependencies]
 sea-query-hyperdb = "1.0"
-sea-query = "0.30"
+sea-query = "1.0"
 ```
 
 ```rust
-use sea_query::{Query, Expr, Iden};
-use sea_query_hyper::HyperQueryBuilder;
+use sea_query::{Expr, ExprTrait, Iden, Query};
+use sea_query_hyperdb::HyperQueryBuilder;
 
 #[derive(Iden)]
 enum Users {
@@ -52,8 +54,8 @@ Build queries with sea-query, convert to SQL strings, and pass them to
 
 ```rust,ignore
 use hyperdb_api::Connection;
-use sea_query::{Query, Expr, Iden, Order};
-use sea_query_hyper::HyperQueryBuilder;
+use sea_query::{Expr, ExprTrait, Iden, Order, Query};
+use sea_query_hyperdb::HyperQueryBuilder;
 
 #[derive(Iden)]
 enum Products {
@@ -80,9 +82,34 @@ let result = conn.execute_query(&sql)?;
 
 ## HyperDB-Specific Dialect
 
-Use `HyperQueryBuilder` instead of `PostgresQueryBuilder` so your code
-automatically picks up Hyper-specific syntax as the dialect evolves. Both produce
-identical SQL today.
+Use `HyperQueryBuilder` instead of `PostgresQueryBuilder`. For ordinary
+queries the SQL is the same, but the two differ where Hyper does:
+
+- `Value::Enum` is a bare string (Hyper has no enum types, so no `::"type"` hint)
+- `Value::Char` supports any Unicode character
+- SQLite-only operators and the MySQL-only `PARTITION BY KEY` are written out
+  rather than panicking, and Hyper then rejects them
+- Syntax Hyper lacks (`@>`, `<@`, `&&`, `@@`, `%`, `<->`, partitioning) is
+  rendered as written and fails server-side with an error
+
+Known limitations (sea-query keeps these structs' fields crate-private, so they
+are rendered by `PostgresQueryBuilder` and Hyper's overrides for non-ASCII
+`Value::Char`, `Value::Enum` and SQLite operators do not apply inside them):
+`ORDER BY` expressions (including `Order::Field`), `EXPLAIN`, `CREATE INDEX`
+(partial-index `WHERE`) and `ALTER TABLE`. sea-query itself still panics on
+`ColumnType::Year`, `ALTER TABLE` with no options, `JoinOn::Columns`, a
+`WITH` query without a statement and some table-reference forms; those
+panics are upstream and not masked here.
+
+`!~`, `!~*` and `SIMILAR TO` have no typed sea-query operator; use
+`BinOper::Custom("!~")` or `Expr::cust(..)`. `JoinOn::Columns` is not implemented
+by sea-query for any backend.
+
+Always build values through `Expr::val(..)` / `.eq(..)` where you can. Inlined
+literals (`Expr::Constant`, `to_string`, `inject_parameters`) are escaped with
+PostgreSQL rules (`E'...'` when a backslash or control character is present),
+which is what Hyper expects; earlier releases used MySQL rules here (see the
+changelog).
 
 `HyperQueryBuilder` implements all sea-query backend traits:
 
@@ -99,14 +126,13 @@ Sea-query supports advanced SQL features that work with `HyperQueryBuilder`.
 **Window functions:**
 
 ```rust,ignore
-use sea_query::{Query, Expr, Alias, WindowDef};
+use sea_query::{Alias, Expr, ExprTrait, Query, WindowStatement};
 
 let sql = Query::select()
     .columns([Users::Name, Users::Salary])
-    .expr_as(
-        Expr::col(Users::Salary).sum().over(
-            WindowDef::new().partition_by(Users::Department)
-        ),
+    .expr_window_as(
+        Expr::col(Users::Salary).sum(),
+        WindowStatement::partition_by(Users::Department),
         Alias::new("dept_total"),
     )
     .from(Users::Table)
@@ -116,10 +142,11 @@ let sql = Query::select()
 **Complex JOINs:**
 
 ```rust,ignore
-use sea_query::{Query, Expr};
+use sea_query::{Expr, ExprTrait, Query};
 
 let sql = Query::select()
-    .columns([(Users::Table, Users::Name), (Departments::Table, Departments::Name)])
+    .column((Users::Table, Users::Name))
+    .column((Departments::Table, Departments::Name))
     .from(Users::Table)
     .inner_join(
         Departments::Table,
@@ -132,6 +159,8 @@ let sql = Query::select()
 **Aggregates with GROUP BY / HAVING:**
 
 ```rust,ignore
+use sea_query::{Alias, Expr, ExprTrait, Query};
+
 let sql = Query::select()
     .column(Users::Department)
     .expr_as(Expr::cust("AVG(salary)"), Alias::new("avg_salary"))
@@ -147,8 +176,15 @@ let sql = Query::select()
 
 When using sea-query with HyperDB, be aware of these architectural constraints:
 
-- **No indexes** -- `CREATE INDEX` is accepted but has no performance effect
-- **No primary/foreign/unique keys** -- constraint definitions are accepted but not enforced
+- **No key or check constraints** -- Hyper rejects `PRIMARY KEY`, `UNIQUE`,
+  `FOREIGN KEY`/`REFERENCES`, and `CHECK` in `CREATE TABLE`, so don't call
+  `.primary_key()`, `.unique_key()`, or `.check()` on a `ColumnDef` or add
+  foreign keys
+- **No indexes** -- `CREATE INDEX` fails with `0A000: Index support is
+  disabled`, so don't emit `Index::create()` statements
+- **No auto-increment** -- `.auto_increment()` emits a
+  `GENERATED BY DEFAULT AS IDENTITY` column, which Hyper does not accept
+- **No `JSON`, `JSONB`, or `UUID` column types** -- use `TEXT`
 - **Limited ALTER TABLE** -- some column modifications may not be supported
 
 ---

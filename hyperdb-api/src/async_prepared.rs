@@ -83,8 +83,11 @@ impl<'conn> AsyncPreparedStatement<'conn> {
     /// - Returns [`Error::FeatureNotSupported`] on gRPC transport.
     /// - Returns [`Error::Server`] if the server rejects `Bind` or
     ///   `Execute`.
-    /// - Returns [`Error::Io`] on transport-level I/O failures.
-    pub async fn query(&self, params: &[&dyn ToSqlParam]) -> Result<AsyncRowset<'conn>> {
+    /// - Returns [`Error::Connection`] on transport-level I/O failures.
+    pub async fn query<'stmt>(
+        &'stmt self,
+        params: &[&dyn ToSqlParam],
+    ) -> Result<AsyncRowset<'stmt>> {
         let (encoded, formats) = encode_params(params);
         let client = async_tcp_client(self.connection)?;
         let stream = client
@@ -106,7 +109,7 @@ impl<'conn> AsyncPreparedStatement<'conn> {
     /// - Returns [`Error::FeatureNotSupported`] on gRPC transport.
     /// - Returns [`Error::Server`] if the server rejects `Bind` or
     ///   `Execute`.
-    /// - Returns [`Error::Io`] on transport-level I/O failures.
+    /// - Returns [`Error::Connection`] on transport-level I/O failures.
     pub async fn execute(&self, params: &[&dyn ToSqlParam]) -> Result<u64> {
         let (encoded, formats) = encode_params(params);
         let client = async_tcp_client(self.connection)?;
@@ -259,8 +262,21 @@ impl AsyncPreparedStatementOwned {
     /// - Returns [`Error::FeatureNotSupported`] on gRPC transport.
     /// - Returns [`Error::Server`] if the server rejects `Bind` or
     ///   `Execute`, or raises a runtime error while streaming.
-    /// - Returns [`Error::Io`] on transport-level I/O failures.
+    /// - Returns [`Error::Connection`] on transport-level I/O failures.
     pub async fn fetch_all(&self, params: &[&dyn ToSqlParam]) -> Result<Vec<Row>> {
+        self.with_rowset(params, async |rowset| rowset.collect_rows().await)
+            .await
+    }
+
+    /// Starts the streaming execution and hands the resulting rowset to `f`.
+    ///
+    /// The rowset borrows the connection guard obtained here, so it cannot be
+    /// returned; the consumer runs inside the guard's scope instead.
+    async fn with_rowset<R>(
+        &self,
+        params: &[&dyn ToSqlParam],
+        f: impl AsyncFnOnce(AsyncRowset<'_>) -> Result<R>,
+    ) -> Result<R> {
         let (encoded, formats) = encode_params(params);
         let client = async_tcp_client_arc(&self.connection)?;
         let stream = client
@@ -271,8 +287,7 @@ impl AsyncPreparedStatementOwned {
                 crate::result::DEFAULT_BINARY_CHUNK_SIZE,
             )
             .await?;
-        let rowset = AsyncRowset::from_prepared(stream);
-        rowset.collect_rows().await
+        f(AsyncRowset::from_prepared(stream)).await
     }
 
     /// Executes the statement as a command; returns the affected-row count.
@@ -282,7 +297,7 @@ impl AsyncPreparedStatementOwned {
     /// - Returns [`Error::FeatureNotSupported`] on gRPC transport.
     /// - Returns [`Error::Server`] if the server rejects `Bind` or
     ///   `Execute`.
-    /// - Returns [`Error::Io`] on transport-level I/O failures.
+    /// - Returns [`Error::Connection`] on transport-level I/O failures.
     pub async fn execute(&self, params: &[&dyn ToSqlParam]) -> Result<u64> {
         let (encoded, formats) = encode_params(params);
         let client = async_tcp_client_arc(&self.connection)?;
@@ -291,29 +306,42 @@ impl AsyncPreparedStatementOwned {
             .await?)
     }
 
+    /// Streams the result and returns only its first row, reading the rest
+    /// of the response through `ReadyForQuery` (discarding it) so the
+    /// connection is left ready for the next request. Does not materialize
+    /// the whole result set.
+    async fn first_row(&self, params: &[&dyn ToSqlParam]) -> Result<Option<Row>> {
+        self.with_rowset(params, async |rowset| rowset.first_row().await)
+            .await
+    }
+
     /// Fetches exactly one row; errors on empty.
+    ///
+    /// Reads (and discards) the rest of the result to keep the connection in
+    /// sync, so add `LIMIT 1` for statements that can return huge results.
     ///
     /// # Errors
     ///
-    /// - Returns the error from [`fetch_all`](Self::fetch_all).
+    /// - Returns [`Error::FeatureNotSupported`] on gRPC transport.
+    /// - Returns [`Error::Server`] if the server rejects `Bind` or `Execute`.
     /// - Returns [`Error::Conversion`] with message `"Query returned no rows"`
     ///   if the result is empty.
     pub async fn fetch_one(&self, params: &[&dyn ToSqlParam]) -> Result<Row> {
-        self.fetch_all(params)
+        self.first_row(params)
             .await?
-            .into_iter()
-            .next()
             .ok_or_else(|| crate::error::Error::conversion("Query returned no rows"))
     }
 
     /// Fetches at most one row; `None` on empty.
     ///
+    /// See [`fetch_one`](Self::fetch_one) for the full-read note.
+    ///
     /// # Errors
     ///
-    /// Returns the error from [`fetch_all`](Self::fetch_all); an empty
-    /// result yields `Ok(None)`.
+    /// As [`fetch_one`](Self::fetch_one), except an empty result yields
+    /// `Ok(None)`.
     pub async fn fetch_optional(&self, params: &[&dyn ToSqlParam]) -> Result<Option<Row>> {
-        Ok(self.fetch_all(params).await?.into_iter().next())
+        self.first_row(params).await
     }
 
     /// Fetches the first column of the first row as `T`.

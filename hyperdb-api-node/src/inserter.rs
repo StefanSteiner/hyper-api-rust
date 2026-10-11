@@ -27,7 +27,7 @@ use crate::types::TableDefinition;
 ///
 /// Rows are buffered in memory; `execute()` encodes them into Hyper's
 /// binary COPY format and ships them to the server on a tokio task.
-/// For Arrow IPC data, use [`ArrowInserter`](crate::arrow_inserter::ArrowInserter)
+/// For Arrow IPC data, use `ArrowInserter`
 /// instead — it bypasses the per-row JS encoding loop entirely.
 #[napi]
 #[derive(Debug)]
@@ -159,11 +159,11 @@ impl RowInserter {
                         // JS Number → Int32 column: caller explicitly chose
                         // the `int32Columns` bucket, so narrowing the f64
                         // element is the documented behavior of this path.
-                        #[expect(
-                            clippy::cast_possible_truncation,
-                            reason = "caller placed value in `int32Columns` → value is asserted to fit in i32; narrowing f64 is the documented coercion for this columnar path"
-                        )]
-                        let narrowed = arr[row_idx] as i32;
+                        let narrowed = narrow_i32(
+                            f64_to_i64(arr[row_idx])
+                                .map_err(|e| Error::from_reason(e.to_string()))?,
+                        )
+                        .map_err(|e| Error::from_reason(e.to_string()))?;
                         row.push(InsertValue::I32(narrowed));
                     } else {
                         row.push(InsertValue::Null);
@@ -180,11 +180,8 @@ impl RowInserter {
                         // integer precision, so the caller is responsible for
                         // providing in-range values; this is the documented
                         // behavior of the `int64Columns` path.
-                        #[expect(
-                            clippy::cast_possible_truncation,
-                            reason = "caller placed value in `int64Columns` → value is asserted to fit in i64; narrowing f64 is the documented coercion for this columnar path"
-                        )]
-                        let narrowed = arr[row_idx] as i64;
+                        let narrowed = f64_to_i64(arr[row_idx])
+                            .map_err(|e| Error::from_reason(e.to_string()))?;
                         row.push(InsertValue::I64(narrowed));
                     } else {
                         row.push(InsertValue::Null);
@@ -232,51 +229,12 @@ impl RowInserter {
             return Ok(0);
         }
 
-        // Start a COPY IN session and stream the pre-encoded buffer.
-        let client = conn.async_tcp_client().ok_or_else(|| {
-            Error::from_reason(
-                "Inserter requires a TCP connection. \
-                 gRPC connections do not support COPY operations.",
-            )
-        })?;
-
-        let columns: Vec<String> = table_def.columns().iter().map(|c| c.name.clone()).collect();
-        let column_refs: Vec<&str> = columns.iter().map(std::string::String::as_str).collect();
-        let table_name = table_def.qualified_name();
-
-        let mut writer = client
-            .copy_in_arc_with_format(&table_name, &column_refs, "HYPERBINARY")
+        // Stream the pre-encoded buffer as one COPY IN session.
+        let count = conn
+            .copy_in_hyperbinary(&table_def, &encoded)
             .await
             .map_err(|e| Error::from_reason(e.to_string()))?;
-
-        // hyperd caps COPY packets at ~150 MB; slice the pre-encoded
-        // buffer so large inserts don't trigger `packet with length
-        // > 157286400` on the server side.
-        const MAX_COPY_CHUNK: usize = 64 * 1024 * 1024;
-        let mut cursor = 0;
-        while cursor < encoded.len() {
-            let end = (cursor + MAX_COPY_CHUNK).min(encoded.len());
-            writer
-                .send_direct(&encoded[cursor..end])
-                .await
-                .map_err(|e| Error::from_reason(e.to_string()))?;
-            writer
-                .flush_stream()
-                .await
-                .map_err(|e| Error::from_reason(e.to_string()))?;
-            cursor = end;
-        }
-
-        let count = writer
-            .finish()
-            .await
-            .map_err(|e| Error::from_reason(e.to_string()))?;
-        #[expect(
-            clippy::cast_possible_wrap,
-            reason = "NAPI BigInt ↔ Hyper u64 bit-pattern reinterpret; JS consumers read the BigInt as an unsigned inserted-row count"
-        )]
-        let signed = count as i64;
-        Ok(signed)
+        i64::try_from(count).map_err(|_| Error::from_reason("row count exceeds i64::MAX"))
     }
 }
 
@@ -315,9 +273,7 @@ fn encode_rows(
     }
 }
 
-/// Adds a value to the chunk using the column's SQL type for correct binary encoding.
-///
-/// Narrows an integer to `i16` for a `SMALLINT` destination column, or fails.
+/// Narrows an `i64` to `i16` for a `SMALLINT` destination column, or fails.
 ///
 /// Truncating with `as` would be silent data corruption: `add_i16` encodes two
 /// bytes, so a wrapped value is a *valid* encoding of the wrong number and
@@ -343,6 +299,31 @@ fn narrow_i32(v: i64) -> std::result::Result<i32, hyperdb_api::Error> {
             i32::MAX
         ))
     })
+}
+
+/// Converts a JS number to `i64` for an integer destination column, or fails.
+///
+/// A bare `f64 as i64` saturates out-of-range values and maps `NaN` to `0`,
+/// both of which are valid encodings of the wrong number. Fractional parts are
+/// truncated toward zero, as before.
+fn f64_to_i64(n: f64) -> std::result::Result<i64, hyperdb_api::Error> {
+    // `i64::MIN as f64` is exact; `i64::MAX as f64` rounds up to 2^63, so the
+    // upper bound is exclusive.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "bounds of the i64 range compared against an f64; 2^63 is exactly representable"
+    )]
+    let in_range = n >= i64::MIN as f64 && n < i64::MAX as f64;
+    if !in_range {
+        return Err(hyperdb_api::Error::invalid_operation(format!(
+            "value {n} is not a finite number that fits an integer column"
+        )));
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "guarded above: `n` is finite and within the i64 range; truncating the fraction is the documented coercion"
+    )]
+    Ok(n as i64)
 }
 
 /// Encodes an `InsertValue` according to the destination column's SQL type.
@@ -394,9 +375,9 @@ fn add_value_typed(
             _ => chunk.add_i64(*n),
         },
         InsertValue::F64(n) => match col_type {
-            Some(hyperdb_api::SqlType::Int) => chunk.add_i32(*n as i32),
-            Some(hyperdb_api::SqlType::SmallInt) => chunk.add_i16(*n as i16),
-            Some(hyperdb_api::SqlType::BigInt) => chunk.add_i64(*n as i64),
+            Some(hyperdb_api::SqlType::Int) => chunk.add_i32(narrow_i32(f64_to_i64(*n)?)?),
+            Some(hyperdb_api::SqlType::SmallInt) => chunk.add_i16(narrow_i16(f64_to_i64(*n)?)?),
+            Some(hyperdb_api::SqlType::BigInt) => chunk.add_i64(f64_to_i64(*n)?),
             Some(hyperdb_api::SqlType::Float) => chunk.add_f32(*n as f32),
             _ => chunk.add_f64(*n),
         },
@@ -407,7 +388,7 @@ fn add_value_typed(
     clippy::trivially_copy_pass_by_ref,
     reason = "signature kept for API consistency with the trait family that unifies Copy and non-Copy implementers"
 )]
-/// Parses a JS object `{ 0: number[], 2: number[] }` into a `HashMap`<usize, Vec<f64>>.
+/// Parses a JS object `{ 0: number[], 2: number[] }` into a `HashMap<usize, Vec<f64>>`.
 fn parse_number_columns(_env: &Env, obj: &Object) -> Result<HashMap<usize, Vec<f64>>> {
     let names = obj.get_property_names()?;
     let len = names.get_named_property::<u32>("length")?;
@@ -447,8 +428,7 @@ fn js_value_to_insert_value(val: Unknown) -> Result<InsertValue> {
     match val.get_type()? {
         ValueType::Null | ValueType::Undefined => Ok(InsertValue::Null),
         ValueType::Boolean => {
-            // napi-rs 3: `coerce_to_bool()` now returns `Result<bool>` directly;
-            // the old 2.x pattern of `.get_value()` on a `JsBoolean` wrapper is gone.
+            // The match arm guarantees a JS boolean; `coerce_to_bool` returns its value.
             let b = val.coerce_to_bool()?;
             Ok(InsertValue::Bool(b))
         }
@@ -489,13 +469,8 @@ fn js_value_to_insert_value(val: Unknown) -> Result<InsertValue> {
             }
         }
         ValueType::String => {
-            // SAFETY: we just matched `ValueType::String` from `val.get_type()`
-            // above, so NAPI has validated that the JS value is a JsString.
-            // `JsUnknown::cast` simply reinterprets the wrapper to the
-            // type-specific handle and is sound under that invariant.
-            // napi-rs 3: `cast::<T>()` now returns `Result<T>` (previously `T`),
-            // so the `?` propagates the type-check failure before we call
-            // `into_utf8()`.
+            // SAFETY: `get_type()` returned `ValueType::String`, so the handle is a
+            // JS string; `Unknown::cast::<JsString>` wraps it without a further type check.
             let s = unsafe { val.cast::<napi::JsString>() }?
                 .into_utf8()?
                 .as_str()?
@@ -503,15 +478,9 @@ fn js_value_to_insert_value(val: Unknown) -> Result<InsertValue> {
             Ok(InsertValue::String(s))
         }
         ValueType::Object => {
-            // SAFETY: we matched `ValueType::Object` above, which covers both
-            // plain objects and Node `Buffer` instances. `JsUnknown::cast`
-            // only reinterprets the handle; if the underlying object is not
-            // actually a `Buffer`, `into_value()` fails with `Err(..)` and
-            // we fall back to the string-coercion branch. NAPI's value type
-            // tag guarantees soundness of the `cast` itself.
-            // napi-rs 3: `cast::<Buffer>()` now returns `Result<Buffer>` directly
-            // (previously it was `Buffer` + an `.into_value()` step that could
-            // fail). `Buffer` derefs to `[u8]`, so `.to_vec()` copies the bytes.
+            // SAFETY: `get_type()` returned `ValueType::Object`. `Unknown::cast::<Buffer>`
+            // calls `napi_get_buffer_info`, which returns `Err` for a non-Buffer object,
+            // so plain objects fall through to the string-coercion branch.
             if let Ok(buf) = unsafe { val.cast::<Buffer>() } {
                 Ok(InsertValue::Bytes(buf.to_vec()))
             } else {
@@ -522,6 +491,25 @@ fn js_value_to_insert_value(val: Unknown) -> Result<InsertValue> {
         _ => {
             let s = val.coerce_to_string()?.into_utf8()?.as_str()?.to_string();
             Ok(InsertValue::String(s))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::f64_to_i64;
+
+    #[test]
+    fn f64_to_i64_truncates_in_range_values() {
+        assert_eq!(f64_to_i64(3.9).unwrap(), 3);
+        assert_eq!(f64_to_i64(-3.9).unwrap(), -3);
+        assert_eq!(f64_to_i64(-9_223_372_036_854_775_808.0).unwrap(), i64::MIN);
+    }
+
+    #[test]
+    fn f64_to_i64_rejects_nan_infinity_and_out_of_range() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 9.3e18, -9.3e18] {
+            assert!(f64_to_i64(bad).is_err(), "{bad} must be rejected");
         }
     }
 }

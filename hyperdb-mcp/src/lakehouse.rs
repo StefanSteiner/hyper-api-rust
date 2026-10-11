@@ -22,6 +22,44 @@ use crate::stats::{IngestStats, StatsTimer};
 use hyperdb_api::escape_string_literal;
 use std::path::Path;
 
+/// How an Iceberg ingest populates its target table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IcebergMode {
+    /// Drop any existing table and recreate it (`CREATE TABLE AS`).
+    Replace,
+    /// `INSERT INTO ... SELECT` into the existing table.
+    Append,
+}
+
+impl IcebergMode {
+    /// Parse the `load_iceberg` `mode` parameter; omitted means `replace`.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorCode::InvalidArgument`] for any value other than the exact
+    /// lowercase `replace` / `append`.
+    pub fn parse(mode: Option<&str>) -> Result<Self, McpError> {
+        match crate::ingest::parse_mode_name(
+            mode,
+            Some("replace"),
+            &["replace", "append"],
+            "load_iceberg",
+        )? {
+            "append" => Ok(Self::Append),
+            _ => Ok(Self::Replace),
+        }
+    }
+
+    /// The canonical lowercase name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Replace => "replace",
+            Self::Append => "append",
+        }
+    }
+}
+
 /// Parameters for an Iceberg ingest. Mirrors `LoadFileParams` but with
 /// Iceberg-specific knobs and no schema-override support (hyperd derives
 /// the schema from the Iceberg metadata, so overrides would have no
@@ -30,8 +68,8 @@ use std::path::Path;
 pub struct IcebergIngestOptions {
     /// Target table name.
     pub table: String,
-    /// `"replace"` (drops + CTAS) or `"append"` (INSERT INTO ... SELECT).
-    pub mode: String,
+    /// Replace (drops + CTAS) or append (INSERT INTO ... SELECT).
+    pub mode: IcebergMode,
     /// Optional specific metadata filename to pin a snapshot, e.g.
     /// `"v2.metadata.json"`. If omitted, hyperd uses whatever
     /// `metadata/version-hint.text` (or the latest `vN.metadata.json`)
@@ -186,7 +224,10 @@ pub fn ingest_iceberg_table(
     let timer = StatsTimer::start();
     let absolute_path = resolve_iceberg_path(path)?;
 
-    let is_replace = opts.mode != "append";
+    let is_replace = match opts.mode {
+        IcebergMode::Replace => true,
+        IcebergMode::Append => false,
+    };
     let sql = build_iceberg_ingest_sql(&opts.table, &absolute_path, opts, is_replace);
 
     // Same tx-shape as parquet ingest. The COUNT(*) *must* run outside
@@ -237,7 +278,7 @@ mod tests {
     fn builds_replace_sql_with_minimal_options() {
         let opts = IcebergIngestOptions {
             table: "my_table".into(),
-            mode: "replace".into(),
+            mode: IcebergMode::Replace,
             metadata_filename: None,
             version_as_of: None,
         };
@@ -252,7 +293,7 @@ mod tests {
     fn builds_append_sql_with_metadata_filename() {
         let opts = IcebergIngestOptions {
             table: "t".into(),
-            mode: "append".into(),
+            mode: IcebergMode::Append,
             metadata_filename: Some("v2.metadata.json".into()),
             version_as_of: None,
         };
@@ -267,7 +308,7 @@ mod tests {
     fn builds_sql_with_version_as_of() {
         let opts = IcebergIngestOptions {
             table: "t".into(),
-            mode: "replace".into(),
+            mode: IcebergMode::Replace,
             metadata_filename: None,
             version_as_of: Some(7),
         };
@@ -282,7 +323,7 @@ mod tests {
     fn builds_sql_with_both_metadata_and_version() {
         let opts = IcebergIngestOptions {
             table: "t".into(),
-            mode: "replace".into(),
+            mode: IcebergMode::Replace,
             metadata_filename: Some("v3.metadata.json".into()),
             version_as_of: Some(42),
         };
@@ -297,7 +338,7 @@ mod tests {
     fn escapes_single_quotes_in_path() {
         let opts = IcebergIngestOptions {
             table: "t".into(),
-            mode: "replace".into(),
+            mode: IcebergMode::Replace,
             metadata_filename: None,
             version_as_of: None,
         };
@@ -313,7 +354,7 @@ mod tests {
     fn escapes_single_quotes_in_metadata_filename() {
         let opts = IcebergIngestOptions {
             table: "t".into(),
-            mode: "replace".into(),
+            mode: IcebergMode::Replace,
             metadata_filename: Some("v1.metadata'.json".into()),
             version_as_of: None,
         };
@@ -328,7 +369,7 @@ mod tests {
     fn escapes_quotes_in_table_name() {
         let opts = IcebergIngestOptions {
             table: "weird\"name".into(),
-            mode: "replace".into(),
+            mode: IcebergMode::Replace,
             metadata_filename: None,
             version_as_of: None,
         };

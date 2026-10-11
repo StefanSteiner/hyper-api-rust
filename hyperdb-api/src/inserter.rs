@@ -28,7 +28,7 @@ use hyperdb_api_core::types::bytes::BytesMut;
 use hyperdb_api_core::types::{
     Date, Geography, Interval, Numeric, OffsetTimestamp, Time, Timestamp,
 };
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::catalog::Catalog;
 use crate::connection::Connection;
@@ -209,8 +209,7 @@ impl<'conn> Inserter<'conn> {
     ///
     /// * `connection` - The database connection.
     /// * `inserter_def` - Defines the columns to be provided to the inserter (staging table).
-    /// * `target_table` - The qualified name of the target table to insert into.
-    ///   Use `TableDefinition::qualified_name()` for properly escaped names like `"schema"."table"`.
+    /// * `target_table` - The target table; anything convertible to [`TableName`](crate::TableName), e.g. `"schema.table"`.
     /// * `mappings` - Column mappings defining how values are transformed.
     ///
     /// # Example
@@ -250,8 +249,7 @@ impl<'conn> Inserter<'conn> {
     ///         ColumnMapping::with_expression("created_at", "NOW()"),
     ///     ];
     ///
-    ///     // For simple table names in the public schema, use quoted name
-    ///     // For qualified names, use target_table_def.qualified_name()
+    ///     // Any value convertible to `TableName` works: "orders", "public.orders", or a `TableName`.
     ///     let mut inserter = Inserter::with_column_mappings(&conn, &inserter_def, "orders", &mappings)?;
     ///
     ///     inserter.add_row(&[&1i32, &"Widget", &5i32, &10.0f64])?;
@@ -295,7 +293,9 @@ impl<'conn> Inserter<'conn> {
         self.table_def.column_count()
     }
 
-    /// Returns the number of complete rows buffered.
+    /// Returns the number of complete rows added so far, including rows already flushed to the server.
+    ///
+    /// The inserter is consumed by [`execute`](Self::execute) and [`cancel`](Self::cancel).
     #[must_use]
     pub fn row_count(&self) -> u64 {
         self.row_count
@@ -378,7 +378,8 @@ impl<'conn> Inserter<'conn> {
     ///
     /// # Errors
     ///
-    /// See [`add_bool`](Self::add_bool).
+    /// See [`add_bool`](Self::add_bool). Returns [`Error::Conversion`] if the value is longer
+    /// than `u32::MAX` bytes.
     #[inline]
     pub fn add_str(&mut self, value: &str) -> Result<()> {
         self.chunk.add_str(value)
@@ -388,7 +389,8 @@ impl<'conn> Inserter<'conn> {
     ///
     /// # Errors
     ///
-    /// See [`add_bool`](Self::add_bool).
+    /// See [`add_bool`](Self::add_bool). Returns [`Error::Conversion`] if the value is longer
+    /// than `u32::MAX` bytes.
     #[inline]
     pub fn add_bytes(&mut self, value: &[u8]) -> Result<()> {
         self.chunk.add_bytes(value)
@@ -454,8 +456,8 @@ impl<'conn> Inserter<'conn> {
     ///   (COPY is TCP-only) and no COPY session exists yet.
     /// - Returns [`Error::Server`] if the server rejects the `COPY IN` start
     ///   or the subsequent data send.
-    /// - Returns [`Error::Io`] on transport-level I/O failures while writing
-    ///   the chunk.
+    /// - Returns [`Error::Connection`] on a transport I/O failure, or
+    ///   [`Error::Closed`] if the server closed the connection.
     pub fn flush(&mut self) -> Result<()> {
         if self.chunk.is_empty() {
             return Ok(());
@@ -616,7 +618,8 @@ impl<'conn> Inserter<'conn> {
     ///
     /// # Errors
     ///
-    /// See [`add_bool`](Self::add_bool).
+    /// See [`add_bool`](Self::add_bool). Returns [`Error::Conversion`] if the value is longer
+    /// than `u32::MAX` bytes.
     #[inline]
     pub fn add_geography(&mut self, value: &Geography) -> Result<()> {
         self.chunk.add_geography(value)
@@ -624,41 +627,24 @@ impl<'conn> Inserter<'conn> {
 
     /// Adds a Numeric value.
     ///
-    /// For NUMERIC(precision, scale) where precision ≤ [`Numeric::SMALL_NUMERIC_MAX_PRECISION`]
-    /// (18), the value is stored as i64. For higher precision, 128-bit storage is used.
+    /// The value is rescaled to the column's declared scale (`NUMERIC(p, s)`),
+    /// so `Numeric::new(12345, 1)` (1234.5) inserted into a `NUMERIC(10, 2)`
+    /// column is stored as `1234.50`. For precision ≤
+    /// [`Numeric::SMALL_NUMERIC_MAX_PRECISION`] (18) the value is stored as
+    /// i64. For higher precision, 128-bit storage is used.
     ///
     /// # Errors
     ///
-    /// Returns an error if the column's precision cannot be determined from the
-    /// table definition. Ensure that NUMERIC columns are defined with explicit
-    /// `SqlType` information including precision.
+    /// - Returns an error if the column's precision and scale cannot be
+    ///   determined from the table definition. Ensure that NUMERIC columns are
+    ///   defined with explicit `SqlType` information including precision.
+    /// - Returns [`Error::Conversion`] if the value cannot be represented at
+    ///   the column's scale without losing digits or overflowing.
     pub fn add_numeric(&mut self, value: Numeric) -> Result<()> {
         let column_index = self.chunk.column_index();
-
-        // Check the column's precision to determine storage format
-        let precision = self
-            .table_def
-            .columns
-            .get(column_index)
-            .and_then(super::table_definition::ColumnDefinition::sql_type)
-            .and_then(|t| t.precision())
-            .ok_or_else(|| {
-                let col_name = self
-                    .table_def
-                    .columns
-                    .get(column_index)
-                    .map_or("<unknown>", |c| c.name.as_str());
-                Error::conversion(format!(
-                    "Cannot determine numeric precision for column '{col_name}' at index {column_index}. \
-                     Ensure the column is defined with explicit SqlType including precision.\n\n\
-                     Example fix:\n  \
-                     table_def.add_column_with_type(\"{col_name}\", SqlType::Numeric {{ precision: 10, scale: 2 }}, true);"
-                ))
-            })?;
-
+        let (precision, unscaled) = numeric_for_column(&self.table_def, column_index, value)?;
         if precision <= Numeric::SMALL_NUMERIC_MAX_PRECISION {
             // Small numeric: stored as i64
-            let unscaled = value.unscaled_value();
             let narrowed = i64::try_from(unscaled).map_err(|_| {
                 Error::conversion(format!(
                     "Numeric value {unscaled} is out of range for i64 storage (precision {precision})"
@@ -667,7 +653,7 @@ impl<'conn> Inserter<'conn> {
             self.chunk.add_i64(narrowed)
         } else {
             // Big numeric: stored as 128-bit
-            self.chunk.add_data128(&value.to_packed())
+            self.chunk.add_data128(&unscaled.to_le_bytes())
         }
     }
 
@@ -676,18 +662,32 @@ impl<'conn> Inserter<'conn> {
     /// This sends any remaining buffered data and finishes the COPY operation.
     /// Returns the number of rows inserted.
     ///
-    /// The inserter is single-use: calling `execute` a second time returns
-    /// `Ok(0)` because the internal row counter has been reset and no further
-    /// data has been added. To insert additional batches, create a new
+    /// Takes `self` by value: an inserter is single-use, so reusing it after
+    /// `execute` is a compile error rather than a silent resend of the
+    /// already-committed rows. To insert additional batches, create a new
     /// [`Inserter`].
+    ///
+    /// ```compile_fail,E0382
+    /// # use hyperdb_api::{Connection, Inserter, Result, TableDefinition};
+    /// # fn reuse(conn: &Connection, def: &TableDefinition) -> Result<()> {
+    /// let mut inserter = Inserter::new(conn, def)?;
+    /// inserter.execute()?;
+    /// inserter.execute()?; // error[E0382]: use of moved value: `inserter`
+    /// # Ok(())
+    /// # }
+    /// ```
     ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// - There's an incomplete row (`column_index` != 0)
-    /// - The COPY connection fails to start
-    /// - Sending data fails
-    pub fn execute(&mut self) -> Result<u64> {
+    /// - Returns [`Error::InvalidTableDefinition`] if a row is incomplete.
+    ///   Because `execute` consumes the inserter, this discards **all** rows
+    ///   added so far, including chunks already auto-flushed to the server
+    ///   (the open COPY is aborted when the inserter is dropped, so nothing
+    ///   is committed).
+    /// - Returns [`Error::FeatureNotSupported`] on a gRPC connection.
+    /// - Returns [`Error::Server`] if the server rejects the COPY or its data.
+    /// - Returns [`Error::Connection`] or [`Error::Closed`] on transport failure.
+    pub fn execute(mut self) -> Result<u64> {
         if self.chunk.column_index() != 0 {
             return Err(Error::invalid_table_definition(
                 "Incomplete row at execute time",
@@ -749,19 +749,37 @@ impl<'conn> Inserter<'conn> {
             "inserter-end"
         );
 
-        // Reset row counter so a stray second execute() call returns Ok(0)
-        // instead of attempting another COPY trailer on a finished writer.
-        self.row_count = 0;
-
         Ok(rows)
     }
 
     /// Cancels the insert and discards all buffered rows.
-    pub fn cancel(&mut self) {
-        // Drop the in-progress writer (if any). The Drop impl on CopyInWriter
-        // sends a CopyFail to the server.
-        self.writer = None;
-        self.row_count = 0;
+    ///
+    /// If a COPY session is open it is aborted with `CopyFail` so the
+    /// connection returns to `ReadyForQuery` and stays usable; nothing sent
+    /// so far is committed. Takes `self` by value so the cancelled inserter
+    /// cannot be reused.
+    ///
+    /// A failure while aborting the COPY is logged at WARN level (the
+    /// connection is then marked desynchronized by the client layer) rather
+    /// than returned, so that cancelling never masks the error that
+    /// prompted it.
+    pub fn cancel(mut self) {
+        self.cancel_in_place();
+    }
+
+    /// Aborts any open COPY without consuming
+    /// `self` (used by [`MappedInserter`], which owns an `Inserter` field).
+    pub(crate) fn cancel_in_place(&mut self) {
+        if let Some(writer) = self.writer.take()
+            && let Err(e) = writer.cancel("Inserter cancelled")
+        {
+            warn!(
+                target: "hyperdb_api",
+                error = %e,
+                table = %self.table_def.qualified_name(),
+                "inserter-cancel: aborting the COPY session failed",
+            );
+        }
     }
 }
 
@@ -774,7 +792,7 @@ impl<'conn> Inserter<'conn> {
 /// Column mappings allow you to:
 /// - Insert values directly from the inserter stream
 /// - Compute values using SQL expressions
-/// - Use server-side functions like `NOW()` or `DEFAULT`
+/// - Use server-side functions such as `NOW()`
 ///
 /// # Example
 ///
@@ -879,8 +897,9 @@ impl ColumnMapping {
 /// - `bool`
 /// - `&str`, `String`
 /// - `Option<T>` where `T: IntoValue` (for nullable columns)
-/// - Date/time types: `Date`, `Time`, `Timestamp`, `Interval`
-/// - `Numeric`, `Geography`, `Vec<u8>` (bytes)
+/// - Date/time types: `Date`, `Time`, `Timestamp`, `OffsetTimestamp`, `Interval`
+/// - `Numeric`, `Geography`, `[u8]` / `Vec<u8>` (bytes)
+/// - Shared references to the above, except `Option<T>` and `Vec<u8>`
 ///
 /// # Example
 ///
@@ -912,8 +931,8 @@ pub trait IntoValue {
     /// # Errors
     ///
     /// Implementations call the matching `Inserter::add_*` method and
-    /// forward its error — see [`Inserter::add_bool`] for the shared
-    /// failure modes (too many columns, NULL into non-nullable, etc).
+    /// forward its error: see [`Inserter::add_bool`] (too many columns) and
+    /// [`Inserter::add_null`] (NULL into a `NOT NULL` column).
     fn add_to_inserter(&self, inserter: &mut Inserter<'_>) -> Result<()>;
 }
 
@@ -1148,14 +1167,94 @@ impl IntoValue for &Geography {
 /// [`Inserter::with_column_mappings`].
 #[derive(Debug)]
 pub struct MappedInserter<'conn> {
+    // Field order matters: fields drop in declaration order, and the
+    // `inner` inserter's COPY writer must be gone (CopyFail sent, connection
+    // back at ReadyForQuery) before `staging` runs `DROP TABLE` on the same
+    // connection. Never run a statement while a `CopyInWriter` is alive.
     /// The underlying inserter for the staging table.
     inner: Inserter<'conn>,
     /// The target table name.
     target_table: crate::TableName,
     /// The column mappings.
     mappings: Vec<ColumnMapping>,
-    /// The staging table name.
-    staging_table: String,
+    /// Owns the staging table and drops it when no longer needed.
+    staging: StagingTable<'conn>,
+}
+
+/// Process-wide counter that keeps staging-table names unique across
+/// [`MappedInserter`]s sharing a process (and a connection).
+static STAGING_TABLE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// RAII owner of a `MappedInserter` staging table.
+///
+/// Drops the (temporary) table on [`Drop`] if it was not already dropped,
+/// logging a WARN on failure instead of panicking or masking the original
+/// error.
+#[derive(Debug)]
+struct StagingTable<'conn> {
+    connection: &'conn Connection,
+    name: String,
+    dropped: bool,
+}
+
+impl StagingTable<'_> {
+    fn drop_sql(&self) -> String {
+        use hyperdb_api_core::protocol::escape::SqlIdentifier;
+        format!("DROP TABLE IF EXISTS {}", SqlIdentifier(&self.name))
+    }
+
+    /// Drops the staging table. Idempotent.
+    fn drop_now(&mut self) -> Result<()> {
+        if self.dropped {
+            return Ok(());
+        }
+        // Set first: a failed DROP is not retried from `Drop`.
+        self.dropped = true;
+        self.connection
+            .execute_command(&self.drop_sql())
+            .map(|_| ())
+    }
+}
+
+impl Drop for StagingTable<'_> {
+    /// Best-effort cleanup that never blocks.
+    ///
+    /// A destructor must not wait on the connection lock: if this thread
+    /// still holds a live result stream or COPY writer, that lock is
+    /// non-reentrant and waiting would hang forever. So the drop is attempted
+    /// with a try-lock; when the connection is busy, or the thread is
+    /// panicking, the table is left in place. It is session-scoped
+    /// (`CREATE TEMPORARY TABLE`), so the server reclaims it when the
+    /// connection closes. The explicit `execute`/`cancel` paths call
+    /// [`drop_now`](Self::drop_now) and do block.
+    fn drop(&mut self) {
+        if self.dropped {
+            return;
+        }
+        self.dropped = true;
+        if std::thread::panicking() {
+            warn!(
+                target: "hyperdb_api",
+                table = %self.name,
+                "MappedInserter dropped while panicking; leaving session-scoped staging table",
+            );
+            return;
+        }
+        match self.connection.try_execute_command(&self.drop_sql()) {
+            Ok(Some(_)) => {}
+            Ok(None) => warn!(
+                target: "hyperdb_api",
+                table = %self.name,
+                "connection busy while dropping MappedInserter; leaving session-scoped staging table",
+            ),
+            Err(e) => warn!(
+                target: "hyperdb_api",
+                error = %e,
+                table = %self.name,
+                "failed to drop MappedInserter staging table",
+            ),
+        }
+    }
 }
 
 impl<'conn> MappedInserter<'conn> {
@@ -1172,17 +1271,32 @@ impl<'conn> MappedInserter<'conn> {
     {
         let target_table = target_table.try_into()?;
 
-        // Create a unique staging table name
-        let staging_table = format!("_hyper_staging_{}", std::process::id());
+        // Unique staging table name. The table is `TEMPORARY`, hence scoped to
+        // this session, so other processes never see it; what matters is the
+        // process-wide counter, which keeps two inserters on the same
+        // connection apart. The pid is only a debugging aid in the name.
+        let staging_table = format!(
+            "_hyper_staging_{}_{}",
+            std::process::id(),
+            STAGING_TABLE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
 
         // Create the staging table definition (temporary)
         let mut staging_def = inserter_def.clone();
         staging_def.name.clone_from(&staging_table);
+        staging_def.set_persistence(crate::Persistence::Temporary);
 
-        // Create the staging table
+        // Create the staging table (`CREATE TEMPORARY TABLE`)
         let create_sql = staging_def.to_create_sql(true)?;
-        let create_temp = create_sql.replace("CREATE TABLE", "CREATE TEMPORARY TABLE");
-        connection.execute_command(&create_temp)?;
+        connection.execute_command(&create_sql)?;
+
+        // From here on the guard owns cleanup, including if the inner
+        // inserter cannot be constructed.
+        let staging = StagingTable {
+            connection,
+            name: staging_table,
+            dropped: false,
+        };
 
         // Create the inner inserter for the staging table
         let inner = Inserter::new(connection, &staging_def)?;
@@ -1191,7 +1305,7 @@ impl<'conn> MappedInserter<'conn> {
             inner,
             target_table,
             mappings: mappings.to_vec(),
-            staging_table,
+            staging,
         })
     }
 
@@ -1314,44 +1428,46 @@ impl<'conn> MappedInserter<'conn> {
     ///   to the target table is rejected (e.g. a mapping expression fails
     ///   to evaluate).
     /// - Returns [`Error::Server`] if dropping the staging table fails.
-    pub fn execute(&mut self) -> Result<u64> {
-        let connection = self.inner.connection;
-        let staging_table = self.staging_table.clone();
+    pub fn execute(self) -> Result<u64> {
+        let MappedInserter {
+            inner,
+            target_table,
+            mappings,
+            mut staging,
+        } = self;
+        let connection = inner.connection;
 
-        // Insert data into staging table
-        let _staging_rows = self.inner.execute()?;
+        // Insert data into staging table. `inner` is consumed here, so its
+        // COPY writer is finished (or aborted on error) before any further
+        // statement runs on the connection. On error, `staging` is dropped
+        // by its guard.
+        inner.execute()?;
 
         // Build the INSERT...SELECT statement
         use hyperdb_api_core::protocol::escape::SqlIdentifier;
 
-        let target_columns: Vec<String> = self
-            .mappings
+        let target_columns: Vec<String> = mappings
             .iter()
             .map(|m| format!("{}", SqlIdentifier(&m.column_name)))
             .collect();
 
-        let select_items: Vec<String> = self
-            .mappings
-            .iter()
-            .map(ColumnMapping::to_select_item)
-            .collect();
+        let select_items: Vec<String> =
+            mappings.iter().map(ColumnMapping::to_select_item).collect();
 
         let sql = format!(
             "INSERT INTO {} ({}) SELECT {} FROM {}",
-            self.target_table,
+            target_table,
             target_columns.join(", "),
             select_items.join(", "),
-            SqlIdentifier(&staging_table),
+            SqlIdentifier(&staging.name),
         );
 
-        // Execute the INSERT...SELECT (returns row count directly)
+        // Execute the INSERT...SELECT (returns row count directly). On
+        // failure the guard still drops the staging table.
         let row_count = connection.execute_command(&sql)?;
 
         // Drop the staging table
-        connection.execute_command(&format!(
-            "DROP TABLE IF EXISTS {}",
-            SqlIdentifier(&staging_table)
-        ))?;
+        staging.drop_now()?;
 
         // Return the number of rows inserted
         Ok(row_count)
@@ -1359,27 +1475,26 @@ impl<'conn> MappedInserter<'conn> {
 
     /// Cancels the insert and drops the staging table.
     ///
-    /// This method handles cleanup failures gracefully by logging warnings
-    /// instead of returning errors. This prevents masking the original error
-    /// that caused the cancellation.
+    /// Any open COPY into the staging table is aborted first (the connection
+    /// is locked by the COPY writer until then), after which the staging
+    /// table is dropped. This method handles cleanup failures gracefully by
+    /// logging warnings instead of returning errors. This prevents masking
+    /// the original error that caused the cancellation.
     ///
     /// # Logging
     ///
     /// Cleanup failures are logged using the `tracing` crate at WARN level.
-    /// If `tracing` is not initialized, errors are written to stderr.
-    pub fn cancel(&mut self) {
-        let connection = self.inner.connection;
-        let staging_table = &self.staging_table;
-
-        // Drop the staging table, but don't fail if cleanup fails
-        // This avoids masking the original error that caused cancellation
-        if let Err(e) = connection.execute_command(&format!(
-            "DROP TABLE IF EXISTS \"{}\"",
-            staging_table.replace('"', "\"\"")
-        )) {
-            // Log the cleanup failure for debugging
-            // In production, consider using a logging framework like `tracing`
-            eprintln!("Warning: Failed to drop staging table '{staging_table}' during cancel: {e}");
+    pub fn cancel(mut self) {
+        // Abort the COPY first: statements cannot run on the connection
+        // while the inner inserter's writer holds it.
+        self.inner.cancel_in_place();
+        if let Err(e) = self.staging.drop_now() {
+            warn!(
+                target: "hyperdb_api",
+                error = %e,
+                table = %self.staging.name,
+                "failed to drop staging table during cancel",
+            );
         }
     }
 }
@@ -1672,7 +1787,8 @@ impl InsertChunk {
     ///
     /// # Errors
     ///
-    /// See [`add_bool`](Self::add_bool).
+    /// See [`add_bool`](Self::add_bool). Returns [`Error::Conversion`] if the value is longer
+    /// than `u32::MAX` bytes.
     pub fn add_str(&mut self, value: &str) -> Result<()> {
         self.add_bytes(value.as_bytes())
     }
@@ -1681,7 +1797,8 @@ impl InsertChunk {
     ///
     /// # Errors
     ///
-    /// See [`add_bool`](Self::add_bool).
+    /// See [`add_bool`](Self::add_bool). Returns [`Error::Conversion`] if the value is longer
+    /// than `u32::MAX` bytes.
     pub fn add_bytes(&mut self, value: &[u8]) -> Result<()> {
         if self.column_index >= self.column_count {
             return Err(Error::invalid_table_definition("Too many columns in row"));
@@ -1826,7 +1943,8 @@ impl InsertChunk {
     ///
     /// # Errors
     ///
-    /// See [`add_bool`](Self::add_bool).
+    /// See [`add_bool`](Self::add_bool). Returns [`Error::Conversion`] if the value is longer
+    /// than `u32::MAX` bytes.
     pub fn add_geography(&mut self, value: &Geography) -> Result<()> {
         // Geography uses the same varbinary path as add_bytes
         self.add_bytes(value.as_bytes())
@@ -2064,8 +2182,9 @@ impl<'conn> ChunkSender<'conn> {
     ///
     /// - Returns [`Error::Internal`] with message `"ChunkSender mutex poisoned"`
     ///   if a sender thread panicked while holding the writer lock.
-    /// - Returns [`Error::Server`] or [`Error::Io`] if sending the COPY
-    ///   trailer or finishing the COPY operation fails.
+    /// - Returns [`Error::Server`] if the server rejects the COPY trailer or data.
+    /// - Returns [`Error::Connection`] on a transport I/O failure, or
+    ///   [`Error::Closed`] if the server closed the connection.
     pub fn finish(self) -> Result<u64> {
         let mut writer_guard = self
             .writer
@@ -2097,6 +2216,66 @@ impl<'conn> ChunkSender<'conn> {
         );
 
         Ok(rows)
+    }
+}
+
+/// Resolves the column's `NUMERIC(precision, scale)` and rescales `value` to
+/// that scale, returning `(precision, unscaled value at the column's scale)`.
+///
+/// Hyper stores a NUMERIC column as an unscaled integer at the column's scale,
+/// so a value carrying a different scale must be converted or its magnitude is
+/// silently corrupted. Scaling up is exact (overflow is an error); scaling down
+/// is only allowed when no non-zero digit is dropped.
+pub(crate) fn numeric_for_column(
+    table_def: &TableDefinition,
+    column_index: usize,
+    value: Numeric,
+) -> Result<(u32, i128)> {
+    let column = table_def.columns.get(column_index);
+    let col_name = column.map_or("<unknown>", |c| c.name.as_str());
+    let (precision, col_scale) = column
+        .and_then(super::table_definition::ColumnDefinition::sql_type)
+        .and_then(|t| Some((t.precision()?, t.scale()?)))
+        .ok_or_else(|| {
+            Error::conversion(format!(
+                "Cannot determine numeric precision for column '{col_name}' at index {column_index}. \
+                 Ensure the column is defined with explicit SqlType including precision.\n\n\
+                 Example fix:\n  \
+                 table_def.add_column_with_type(\"{col_name}\", SqlType::Numeric {{ precision: 10, scale: 2 }}, true);"
+            ))
+        })?;
+    let unscaled = rescale_numeric(value, col_scale).map_err(|reason| {
+        Error::conversion(format!(
+            "Numeric value {value} cannot be stored in column '{col_name}' with scale {col_scale}: {reason}"
+        ))
+    })?;
+    Ok((precision, unscaled))
+}
+
+/// Converts `value` to an unscaled integer at `target_scale`.
+fn rescale_numeric(value: Numeric, target_scale: u32) -> std::result::Result<i128, &'static str> {
+    let value_scale = u32::from(value.scale());
+    let unscaled = value.unscaled_value();
+    match value_scale.cmp(&target_scale) {
+        std::cmp::Ordering::Equal => Ok(unscaled),
+        std::cmp::Ordering::Less => {
+            let factor = 10_i128
+                .checked_pow(target_scale - value_scale)
+                .ok_or("the scale difference overflows 128-bit storage")?;
+            unscaled
+                .checked_mul(factor)
+                .ok_or("the value overflows 128-bit storage at the column's scale")
+        }
+        std::cmp::Ordering::Greater => {
+            let factor = 10_i128
+                .checked_pow(value_scale - target_scale)
+                .ok_or("the value has more decimal digits than the column keeps")?;
+            if unscaled % factor == 0 {
+                Ok(unscaled / factor)
+            } else {
+                Err("the value has more decimal digits than the column keeps")
+            }
+        }
     }
 }
 

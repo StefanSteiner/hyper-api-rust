@@ -38,11 +38,11 @@ const POST_CANCEL_DRAIN_CAP: usize = 1024;
 /// via a `MutexGuard`. Dropping the stream before fully iterating triggers
 /// a server-side cancel (see [`Drop`] below) so the connection is returned
 /// to a usable state.
-pub struct PreparedQueryStream<'a> {
-    conn: Option<MutexGuard<'a, RawConnection<SyncStream>>>,
+pub struct PreparedQueryStream<'conn> {
+    conn: Option<MutexGuard<'conn, RawConnection<SyncStream>>>,
     /// Best-effort cancel handle — see
     /// [`QueryStream`](super::client::QueryStream) for the full rationale.
-    canceller: &'a dyn Cancellable,
+    canceller: &'conn dyn Cancellable,
     finished: bool,
     chunk_size: usize,
     /// Column metadata carried through from the statement's Describe pass.
@@ -61,13 +61,13 @@ impl std::fmt::Debug for PreparedQueryStream<'_> {
     }
 }
 
-impl<'a> PreparedQueryStream<'a> {
+impl<'conn> PreparedQueryStream<'conn> {
     /// Constructs a new streaming reader. The caller must have already
     /// issued the Bind/Execute/Sync via
     /// [`RawConnection::start_execute_prepared`].
     pub(crate) fn new(
-        conn: MutexGuard<'a, RawConnection<SyncStream>>,
-        canceller: &'a dyn Cancellable,
+        conn: MutexGuard<'conn, RawConnection<SyncStream>>,
+        canceller: &'conn dyn Cancellable,
         chunk_size: usize,
         columns: Arc<Vec<Column>>,
     ) -> Self {
@@ -144,6 +144,48 @@ impl<'a> PreparedQueryStream<'a> {
         }
         Ok(Some(rows))
     }
+
+    /// Reads and discards the rest of the response through `ReadyForQuery`
+    /// without building any rows, leaving the connection ready for the next
+    /// request. A no-op if the stream already finished.
+    ///
+    /// Unlike dropping the stream (whose `Drop` cancels the query and
+    /// discards the backlog), this reads the *entire* remainder of the result
+    /// with no cancel and no limit, and reports a server error that appears
+    /// in the unread part. Prefer a plain drop when the rest of the result is
+    /// not wanted; use this when the remainder must be consumed.
+    ///
+    /// # Errors
+    ///
+    /// - Returns `Error` (I/O) / `Error` (closed) if the transport fails
+    ///   while reading.
+    /// - Returns `Error` (server) if the server sends an `ErrorResponse`
+    ///   before `ReadyForQuery`; the error is still drained through
+    ///   `ReadyForQuery` first.
+    pub fn drain_to_ready(&mut self) -> Result<()> {
+        if self.finished {
+            return Ok(());
+        }
+        let Some(conn) = self.conn.as_mut() else {
+            return Ok(());
+        };
+        loop {
+            match conn.read_message()? {
+                Message::ReadyForQuery(_) => {
+                    self.finished = true;
+                    self.conn = None;
+                    return Ok(());
+                }
+                Message::ErrorResponse(body) => {
+                    self.finished = true;
+                    let err = conn.consume_error(&body);
+                    self.conn = None;
+                    return Err(err);
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 impl Drop for PreparedQueryStream<'_> {
@@ -158,7 +200,10 @@ impl Drop for PreparedQueryStream<'_> {
         self.canceller.cancel();
 
         if let Some(ref mut conn) = self.conn {
-            let _ok = conn.drain_until_ready_bounded(POST_CANCEL_DRAIN_CAP);
+            let _ok = conn.drain_abandoned_stream(
+                POST_CANCEL_DRAIN_CAP,
+                super::connection::ABANDONED_STREAM_MAX_DATA_ROWS,
+            );
         }
 
         // Belt-and-braces in case the drain exceeds its budget: the drain

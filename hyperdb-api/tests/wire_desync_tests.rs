@@ -137,18 +137,23 @@ fn query_after_failed_copy() -> Result<()> {
 
 /// Abandoning a large streaming result (many rows queued) and running a
 /// follow-up query must still work. This is the worst case for the Drop
-/// drain path: the server has a large backlog to flush, and the bounded
-/// drain must either catch up or yield the connection safely.
+/// path: the server has a large backlog already flushed into the socket.
+/// `Drop` cancels the query and then drains that backlog (`DataRow`s are
+/// free against the drain's non-row budget), so the connection is handed
+/// back clean.
+///
+/// This test is a plain correctness check; it does not prove the cancel
+/// fired (a 150,000-row backlog drains fine even without one). See
+/// `cancel_fires_when_streaming_result_is_abandoned` for the test that
+/// does.
 #[test]
 fn query_after_abandoning_large_stream() -> Result<()> {
     let tc = TestConnection::new()?;
     tc.execute_command("CREATE TABLE big (v INT)")?;
-    // Use a single INSERT ... VALUES expression so we don't hammer the
-    // server with 500 round-trips during test setup.
-    let values: Vec<String> = (0..500).map(|i| format!("({i})")).collect();
-    tc.execute_command(&format!("INSERT INTO big VALUES {}", values.join(",")))?;
+    // More than one 65,536-row chunk, so rows are genuinely still in flight
+    // after the first chunk is read.
+    tc.execute_command("INSERT INTO big SELECT * FROM generate_series(0, 149999)")?;
 
-    // Grab one chunk then drop, leaving hundreds of rows in flight.
     {
         let mut rs = tc
             .connection
@@ -156,85 +161,68 @@ fn query_after_abandoning_large_stream() -> Result<()> {
         let _ = rs.next_chunk()?;
     }
 
-    // Connection must still produce correct results, regardless of whether
-    // the Drop drain caught the full backlog or the 4096-message cap
-    // triggered (either way the next query should succeed).
     let count = tc.execute_scalar_i64("SELECT COUNT(*) FROM big")?;
-    assert_eq!(count, 500);
+    assert_eq!(count, 150_000);
     Ok(())
 }
 
 /// Exercises the cancel-on-`Drop` path for streaming result sets.
 ///
-/// Without cancel-on-drop, abandoning a stream whose remaining backlog
-/// exceeds the bounded drain budget (currently 1024 messages) would leave
-/// the connection desynchronized and the follow-up query would fail or
-/// return wrong data. With cancel-on-drop, the server observes the
-/// `CancelRequest` on a separate connection, stops emitting rows, and our
-/// drain reaches `ReadyForQuery` well within the budget.
-///
-/// We use `generate_series(1, 100000)` so the server has ~100k rows of
-/// `DataRows` ready to stream; that is comfortably larger than any
-/// reasonable drain cap, so a passing follow-up query is strong evidence
-/// that the cancel landed and short-circuited the stream.
+/// Hyper computes a result and queues it for the socket quickly, so a
+/// wall-clock bound cannot tell "cancelled" from "drained everything"
+/// (measured: ~20 ms either way for a few hundred thousand rows). The
+/// discriminating signal is the drain's hard ceiling on abandoned
+/// `DataRow`s: a result far above that ceiling can only be handed back
+/// clean if the server was told to stop producing. Without the
+/// `CancelRequest` the drain exhausts the ceiling, marks the connection
+/// desynchronized, and the follow-up query fails.
 #[test]
 fn cancel_fires_when_streaming_result_is_abandoned() -> Result<()> {
     let tc = TestConnection::new()?;
 
-    // Seed a table large enough that a full passive drain would far
-    // exceed the 1024-message post-cancel drain budget. We use a single
-    // `INSERT ... VALUES` expression so we don't care whether hyperd's
-    // `generate_series` caps out at 66k or any other implementation
-    // artifact: 3000 rows is deterministic and comfortably above 1024.
-    tc.execute_command("CREATE TABLE huge (v INT)")?;
-    let values: Vec<String> = (0..3000).map(|i| format!("({i})")).collect();
-    tc.execute_command(&format!("INSERT INTO huge VALUES {}", values.join(",")))?;
-    let seeded = tc.execute_scalar_i64("SELECT COUNT(*) FROM huge")?;
-    assert_eq!(seeded, 3000, "test setup: INSERT didn't seed all rows");
-
-    let start = std::time::Instant::now();
-
-    // Open a streaming query, read one chunk, then drop.
-    //
-    // Before cancel-on-drop: a 3000-row stream would almost certainly fit
-    // within the 4096-message bounded drain cap we had, so this test would
-    // still pass without the cancel — but the interesting property now is
-    // that the 1024-message *post-cancel* cap is reliably sufficient
-    // *because* cancel stops the server from producing more rows. If the
-    // cancel path regressed (e.g. someone removed the `CancelRequest` call
-    // in `QueryStream::Drop`), the bounded drain would blow its 1024
-    // budget on ~3000 waiting DataRows and the connection would end up
-    // poisoned — the follow-up query would fail or return wrong data.
+    // 10,000,000 rows is more than twice the drain's DataRow ceiling
+    // (about 4.2 million); the cancelled backlog is typically well under a
+    // million.
     {
         let mut rs = tc
             .connection
-            .execute_query("SELECT * FROM huge ORDER BY v")?;
-        let _first = rs.next_chunk()?;
+            .execute_query("SELECT v FROM generate_series(1, 10000000) v")?;
+        let first = rs.next_chunk()?.expect("first chunk");
+        assert_eq!(first.len(), 65_536);
     }
 
-    let drop_elapsed = start.elapsed();
+    // The connection must be healthy and in sync.
+    let count = tc.execute_scalar_i64("SELECT COUNT(*) FROM generate_series(1, 10)")?;
+    assert_eq!(count, 10);
+    Ok(())
+}
 
-    // Follow-up query MUST succeed with the correct count: proof that the
-    // post-cancel drain caught `ReadyForQuery` before its budget ran out
-    // and the connection is healthy.
-    let count = tc.execute_scalar_i64("SELECT COUNT(*) FROM huge")?;
-    assert_eq!(count, 3000);
-
-    // Timing assertion: Drop (cancel + bounded drain) should finish well
-    // under a second on loopback — locally we see ~1-10 ms. A 3-second
-    // threshold leaves ~100x headroom for noisy CI runners while still
-    // being tight enough to catch the regression class we actually care
-    // about: "cancel didn't fire and the drain is reading every row
-    // serially" would blow far past 3 seconds for 3000 rows.
-    //
-    // Using `<` (not `<=`) because equality at exactly the threshold is
-    // already the failure mode — something took suspiciously long.
-    const DROP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(3);
-    assert!(
-        drop_elapsed < DROP_DEADLINE,
-        "stream Drop took {drop_elapsed:?} (deadline {DROP_DEADLINE:?}), \
-         suggesting cancel did not fire",
-    );
+/// A `CancelRequest` travels on a separate connection and has no ordering
+/// against the main socket, so it could in principle land on the *next*
+/// query after the drain and fail it with `57014`. Hammer the
+/// drop-then-query pattern, including a result of exactly 65,537 rows (one
+/// full chunk plus a one-row tail, so the stream is unfinished when
+/// dropped), and require every follow-up to succeed.
+#[test]
+fn late_cancel_never_fails_the_next_query() -> Result<()> {
+    let tc = TestConnection::new()?;
+    for i in 0..50_i64 {
+        let rows: i64 = match i % 3 {
+            0 => 65_537,
+            1 => 200_000,
+            _ => 65_536,
+        };
+        {
+            let mut rs = tc
+                .connection
+                .execute_query(&format!("SELECT v FROM generate_series(1, {rows}) v"))?;
+            let _ = rs.next_chunk()?;
+        }
+        let n = tc
+            .execute_scalar_i64("SELECT COUNT(*) FROM generate_series(1, 1000)")
+            .unwrap_or_else(|e| panic!("iteration {i} ({rows} rows): follow-up failed: {e}"));
+        assert_eq!(n, 1000, "iteration {i} ({rows} rows)");
+    }
     Ok(())
 }
 
@@ -259,5 +247,39 @@ fn begin_transaction_after_error_is_not_poisoned() -> Result<()> {
 
     let v = tc.execute_scalar_i64("SELECT v FROM t")?;
     assert_eq!(v, 7);
+    Ok(())
+}
+
+/// Seeds `t(v INT)` with `rows` rows via a single `generate_series` insert.
+fn seed_series(tc: &TestConnection, rows: i64) -> Result<()> {
+    tc.execute_command("CREATE TABLE t (v INT)")?;
+    tc.execute_command(&format!(
+        "INSERT INTO t SELECT * FROM generate_series(1, {rows})"
+    ))?;
+    assert_eq!(tc.execute_scalar_i64("SELECT COUNT(*) FROM t")?, rows);
+    Ok(())
+}
+
+/// `fetch_one` / `fetch_optional` / `fetch_scalar` take the first row of a
+/// result larger than one 65,536-row chunk; the unread backlog must be
+/// drained so the next query is not answered with stale `DataRow`s.
+#[test]
+fn first_row_fetches_on_multi_chunk_results_keep_connection_in_sync() -> Result<()> {
+    for rows in [70_000_i64, 65_536] {
+        let tc = TestConnection::new()?;
+        seed_series(&tc, rows)?;
+
+        let row = tc.connection.fetch_one("SELECT v FROM t ORDER BY v")?;
+        assert_eq!(row.get::<i32>(0), Some(1));
+        assert_eq!(tc.execute_scalar_i64("SELECT COUNT(*) FROM t")?, rows);
+
+        let row = tc.connection.fetch_optional("SELECT v FROM t ORDER BY v")?;
+        assert!(row.is_some());
+        assert_eq!(tc.execute_scalar_i64("SELECT COUNT(*) FROM t")?, rows);
+
+        let v: i32 = tc.connection.fetch_scalar("SELECT v FROM t ORDER BY v")?;
+        assert_eq!(v, 1);
+        assert_eq!(tc.execute_scalar_i64("SELECT COUNT(*) FROM t")?, rows);
+    }
     Ok(())
 }

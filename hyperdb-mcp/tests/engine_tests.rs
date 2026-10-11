@@ -363,7 +363,7 @@ fn engine_status() {
 
     // Engine connection block. This is a `--no-daemon` engine (TestEngine uses
     // `Engine::new_no_daemon`), so mode is "local", there's a private hyperd
-    // endpoint, and no daemon health port.
+    // endpoint, and no daemon health endpoint.
     let engine_info = &status["engine"];
     assert_eq!(engine_info["mode"], "local");
     assert!(
@@ -372,8 +372,8 @@ fn engine_status() {
         engine_info["hyperd_endpoint"]
     );
     assert!(
-        engine_info["daemon_health_port"].is_null(),
-        "local engine has no daemon health port"
+        engine_info["daemon_health_endpoint"].is_null(),
+        "local engine has no daemon health endpoint"
     );
 
     // Decomposed connection forms (issue #124). The transport is whatever
@@ -581,6 +581,29 @@ fn engine_numeric_columns_and_aggregates_render_as_json_numbers() {
         .as_f64()
         .unwrap_or_else(|| panic!("AVG rendered as non-number: {:?}", avg_rows[0]["avg_id"]));
     assert!((avg - 2.0).abs() < 1e-9, "got {avg}");
+}
+
+/// Regression test: BYTES, TIME and INTERVAL cells used to fall through to the
+/// `get::<String>` fallback in `row_value_to_json`, which yields garbage (or
+/// null) for binary-encoded types. They now render as `\x`-prefixed hex,
+/// `HH:MM:SS`, and interval text respectively; NULLs stay JSON null.
+#[test]
+fn engine_bytes_time_interval_render_as_text() {
+    let te = TestEngine::new_ephemeral();
+    let rows = te
+        .engine
+        .execute_query_to_json(
+            "SELECT '\\xDEADBEEF00'::BYTES AS b, TIME '12:34:56' AS t, \
+             INTERVAL '1 day' AS i, NULL::BYTES AS nb, NULL::TIME AS nt, \
+             NULL::INTERVAL AS ni",
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(row["b"], serde_json::json!("\\xdeadbeef00"));
+    assert_eq!(row["t"], serde_json::json!("12:34:56"));
+    assert_eq!(row["i"], serde_json::json!("1 day"));
+    assert!(row["nb"].is_null() && row["nt"].is_null() && row["ni"].is_null());
 }
 
 /// Regression test: negative NUMERIC values with magnitude < 1 (the open

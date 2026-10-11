@@ -44,10 +44,11 @@ use crate::table_definition::TableDefinition;
 
 /// An async high-performance bulk data inserter.
 ///
-/// `AsyncInserter` is the async mirror of [`Inserter`](crate::Inserter). Both
-/// produce identical wire output (HyperBinary COPY) and have identical
-/// throughput characteristics; the difference is whether the network I/O is
-/// blocking (`Inserter`) or `async/await` (`AsyncInserter`).
+/// `AsyncInserter` is the async counterpart of [`Inserter`](crate::Inserter):
+/// the same HyperBinary COPY encoding, with `async/await` network I/O instead
+/// of blocking I/O. It offers the common typed `add_*` column methods;
+/// `add_row`, `add_optional`, `add_geography` and `add_data128` exist only on
+/// the sync `Inserter`.
 ///
 /// # Lifetime safety
 ///
@@ -58,9 +59,9 @@ use crate::table_definition::TableDefinition;
 /// # Single-use
 ///
 /// Like the sync `Inserter`, `AsyncInserter` is intended for one COPY session
-/// per instance. After [`execute`](Self::execute) returns, the row counter is
-/// zeroed so a stray second call returns `Ok(0)` rather than corrupting the
-/// stream. To insert a second batch, construct a new `AsyncInserter`.
+/// per instance. [`execute`](Self::execute) and [`cancel`](Self::cancel) take
+/// `self` by value, so reusing a finished inserter is a compile error. To
+/// insert a second batch, construct a new `AsyncInserter`.
 #[derive(Debug)]
 pub struct AsyncInserter<'conn> {
     connection: &'conn AsyncConnection,
@@ -174,35 +175,22 @@ impl<'conn> AsyncInserter<'conn> {
     pub fn add_interval(&mut self, value: Interval) -> Result<()> {
         self.chunk.add_interval(value)
     }
-    /// Adds a `Numeric` value (NUMERIC). The encoding (small vs big) is
-    /// chosen from the table definition's column precision at this position.
+    /// Adds a `Numeric` value (NUMERIC). The value is rescaled to the
+    /// column's declared scale, and the encoding (small vs big) is chosen from
+    /// the column's precision at this position.
     ///
     /// # Errors
     ///
-    /// Returns an error if the column's precision cannot be determined from
-    /// the table definition (NUMERIC columns must be declared with explicit
-    /// precision/scale).
+    /// - Returns an error if the column's precision and scale cannot be
+    ///   determined from the table definition (NUMERIC columns must be
+    ///   declared with explicit precision/scale).
+    /// - Returns [`Error::Conversion`] if the value cannot be represented at
+    ///   the column's scale without losing digits or overflowing.
     pub fn add_numeric(&mut self, value: Numeric) -> Result<()> {
         let column_index = self.chunk.column_index();
-        let precision = self
-            .table_def
-            .columns
-            .get(column_index)
-            .and_then(super::table_definition::ColumnDefinition::sql_type)
-            .and_then(|t| t.precision())
-            .ok_or_else(|| {
-                let col_name = self
-                    .table_def
-                    .columns
-                    .get(column_index)
-                    .map_or("<unknown>", |c| c.name.as_str());
-                Error::conversion(format!(
-                    "Cannot determine numeric precision for column '{col_name}' at index {column_index}. \
-                     Ensure the column is defined with explicit SqlType including precision."
-                ))
-            })?;
+        let (precision, unscaled) =
+            crate::inserter::numeric_for_column(&self.table_def, column_index, value)?;
         if precision <= Numeric::SMALL_NUMERIC_MAX_PRECISION {
-            let unscaled = value.unscaled_value();
             let narrowed = i64::try_from(unscaled).map_err(|_| {
                 Error::conversion(format!(
                     "Numeric value {unscaled} is out of range for i64 storage (precision {precision})"
@@ -210,7 +198,7 @@ impl<'conn> AsyncInserter<'conn> {
             })?;
             self.chunk.add_i64(narrowed)
         } else {
-            self.chunk.add_data128(&value.to_packed())
+            self.chunk.add_data128(&unscaled.to_le_bytes())
         }
     }
 
@@ -221,8 +209,9 @@ impl<'conn> AsyncInserter<'conn> {
     ///
     /// - Returns [`Error::InvalidTableDefinition`] if the column count for the row doesn't match
     ///   the table definition.
-    /// - Returns [`Error::Server`] / [`Error::Io`] on transport failures
-    ///   during the auto-flush.
+    /// - Returns [`Error::Server`] if the server rejects the COPY or its data.
+    /// - Returns [`Error::Connection`] on a transport I/O failure, or
+    ///   [`Error::Closed`] if the server closed the connection.
     pub async fn end_row(&mut self) -> Result<()> {
         self.chunk.end_row()?;
         self.row_count += 1;
@@ -255,7 +244,12 @@ impl<'conn> AsyncInserter<'conn> {
         if let Some(buffer) = self.chunk.take()
             && let Some(writer) = self.writer.as_mut()
         {
-            writer.send(&buffer).await?;
+            // Write straight to the socket and flush, as the sync `Inserter`
+            // does. `send` would only append to the connection's write buffer,
+            // which nothing drains until `finish`, so the whole COPY payload
+            // would pile up in client memory.
+            writer.send_direct(&buffer).await?;
+            writer.flush_stream().await?;
             self.chunk_count += 1;
         }
         Ok(())
@@ -266,15 +260,21 @@ impl<'conn> AsyncInserter<'conn> {
     /// Sends any remaining buffered data and finishes the COPY operation.
     /// Returns the number of rows inserted.
     ///
-    /// The inserter is single-use: calling `execute` a second time returns
-    /// `Ok(0)`. Construct a new `AsyncInserter` to insert another batch.
+    /// Takes `self` by value: the inserter is single-use, so reuse after
+    /// `execute` is a compile error rather than a silent resend of the
+    /// already-committed rows. Construct a new `AsyncInserter` to insert
+    /// another batch.
     ///
     /// # Errors
     ///
     /// - Returns [`Error::InvalidTableDefinition`] if there's an incomplete row (partial column).
-    /// - Returns [`Error::Server`] / [`Error::Io`] if the COPY session or
-    ///   transport fails.
-    pub async fn execute(&mut self) -> Result<u64> {
+    ///   Because `execute` consumes the inserter, this discards **all** rows
+    ///   added so far, including chunks already auto-flushed to the server
+    ///   (nothing is committed).
+    /// - Returns [`Error::Server`] if the server rejects the COPY or its data.
+    /// - Returns [`Error::Connection`] on a transport I/O failure, or
+    ///   [`Error::Closed`] if the server closed the connection.
+    pub async fn execute(mut self) -> Result<u64> {
         if self.chunk.column_index() != 0 {
             return Err(Error::invalid_table_definition(
                 "Incomplete row at execute time",
@@ -308,18 +308,17 @@ impl<'conn> AsyncInserter<'conn> {
             "async-inserter-end"
         );
 
-        // Reset so a stray second execute() returns Ok(0).
-        self.row_count = 0;
         Ok(rows)
     }
 
     /// Cancels the insert and discards all buffered rows.
     ///
-    /// The Drop impl on `AsyncCopyInWriter` queues a `CopyFail` on the
+    /// Takes `self` by value so a cancelled inserter cannot be reused. The
+    /// Drop impl on `AsyncCopyInWriter` queues a `CopyFail` on the
     /// connection so the server tears the COPY down cleanly on the next
     /// connection use.
-    pub fn cancel(&mut self) {
-        self.writer = None;
-        self.row_count = 0;
+    pub fn cancel(self) {
+        // Dropping `self` drops the writer, which tears the COPY down.
+        drop(self);
     }
 }

@@ -28,14 +28,14 @@ use super::statement::{Column, ColumnFormat};
 /// [`AsyncRawConnection`] locked via a `MutexGuard`. Dropping the stream
 /// before fully iterating triggers a server-side cancel (see [`Drop`] below)
 /// so the connection is returned to a usable state.
-pub struct AsyncQueryStream<'a> {
-    conn: Option<MutexGuard<'a, AsyncRawConnection<AsyncStream>>>,
+pub struct AsyncQueryStream<'conn> {
+    conn: Option<MutexGuard<'conn, AsyncRawConnection<AsyncStream>>>,
     /// Best-effort cancel handle. For [`AsyncClient`](super::async_client::AsyncClient)
     /// this is a thin wrapper that opens a synchronous TCP/UDS/Named-Pipe
     /// connection and sends a `CancelRequest` — the same pattern used by the
     /// sync [`Client`](super::client::Client). Using a sync cancel path
     /// lets `Drop` issue cancels without needing a tokio runtime handle.
-    canceller: &'a dyn Cancellable,
+    canceller: &'conn dyn Cancellable,
     finished: bool,
     chunk_size: usize,
     schema: Option<Vec<Column>>,
@@ -52,13 +52,13 @@ impl std::fmt::Debug for AsyncQueryStream<'_> {
     }
 }
 
-impl<'a> AsyncQueryStream<'a> {
+impl<'conn> AsyncQueryStream<'conn> {
     /// Constructs a new streaming result reader. The caller is responsible
     /// for having already issued the query bytes (see
     /// [`AsyncRawConnection::start_query_binary`]).
     pub(crate) fn new(
-        conn: MutexGuard<'a, AsyncRawConnection<AsyncStream>>,
-        canceller: &'a dyn Cancellable,
+        conn: MutexGuard<'conn, AsyncRawConnection<AsyncStream>>,
+        canceller: &'conn dyn Cancellable,
         chunk_size: usize,
     ) -> Self {
         Self {
@@ -143,6 +143,48 @@ impl<'a> AsyncQueryStream<'a> {
             }
         }
         Ok(Some(rows))
+    }
+
+    /// Reads and discards the rest of the response through `ReadyForQuery`
+    /// without building any rows, leaving the connection ready for the next
+    /// request. A no-op if the stream already finished.
+    ///
+    /// Use this after taking the rows you need from a stream that may hold
+    /// more data than one chunk: [`next_chunk`](Self::next_chunk) returns as
+    /// soon as it has `chunk_size` rows, *before* reading `CommandComplete`
+    /// and `ReadyForQuery`, so simply dropping the stream at that point
+    /// leaves the wire mid-response.
+    ///
+    /// # Errors
+    ///
+    /// - Returns `Error` (I/O) / `Error` (closed) if the transport fails
+    ///   while reading.
+    /// - Returns `Error` (server) if the server sends an `ErrorResponse`
+    ///   before `ReadyForQuery`; the error is still drained through
+    ///   `ReadyForQuery` first.
+    pub async fn drain_to_ready(&mut self) -> Result<()> {
+        if self.finished {
+            return Ok(());
+        }
+        let Some(conn) = self.conn.as_mut() else {
+            return Ok(());
+        };
+        loop {
+            match conn.read_message().await? {
+                Message::ReadyForQuery(_) => {
+                    self.finished = true;
+                    self.conn = None;
+                    return Ok(());
+                }
+                Message::ErrorResponse(body) => {
+                    self.finished = true;
+                    let err = conn.consume_error(&body).await;
+                    self.conn = None;
+                    return Err(err);
+                }
+                _ => {}
+            }
+        }
     }
 }
 

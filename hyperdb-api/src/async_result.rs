@@ -172,6 +172,19 @@ impl<'conn> AsyncRowset<'conn> {
         self.schema_cache.clone()
     }
 
+    /// Reads and discards everything left in the result stream, through
+    /// `ReadyForQuery` on TCP, so the connection is ready for the next
+    /// request. See `Rowset::drain_remaining` for why this is needed after
+    /// a partial read. No-op for gRPC results.
+    pub(crate) async fn drain_remaining(&mut self) -> Result<()> {
+        match &mut self.inner {
+            AsyncRowsetInner::Tcp(stream) => stream.drain_to_ready().await?,
+            AsyncRowsetInner::Prepared(stream) => stream.drain_to_ready().await?,
+            AsyncRowsetInner::Arrow(_) => {}
+        }
+        Ok(())
+    }
+
     /// Returns the next chunk of rows, or `None` when the stream is
     /// exhausted.
     ///
@@ -179,7 +192,7 @@ impl<'conn> AsyncRowset<'conn> {
     ///
     /// - Returns [`crate::Error::Server`] if the server sends an `ErrorResponse`
     ///   while streaming the result set.
-    /// - Returns [`crate::Error::Io`] on transport-level I/O failures.
+    /// - Returns [`crate::Error::Connection`] on transport-level I/O failures.
     /// - Returns [`crate::Error::Conversion`] if an Arrow IPC chunk cannot be decoded.
     pub async fn next_chunk(&mut self) -> Result<Option<Vec<Row>>> {
         enum TransportChunk {
@@ -262,16 +275,26 @@ impl<'conn> AsyncRowset<'conn> {
     /// Returns the first row of the result set, or `None` if the
     /// result is empty. Consumes the rowset.
     ///
+    /// # Reads the whole result
+    ///
+    /// After taking the first row this reads (and discards) the rest of the
+    /// response through `ReadyForQuery`, so the connection is always left
+    /// ready for the next request. On a very large result that means the
+    /// whole stream is transferred; add `LIMIT 1` to the query when you only
+    /// want one row.
+    ///
     /// # Errors
     ///
-    /// Returns the error from [`next_chunk`](Self::next_chunk). An empty
+    /// Returns the error from [`next_chunk`](Self::next_chunk), or a server
+    /// or transport error hit while discarding the remainder. An empty
     /// result yields `Ok(None)`.
     pub async fn first_row(mut self) -> Result<Option<Row>> {
-        if let Some(chunk) = self.next_chunk().await? {
-            Ok(chunk.into_iter().next())
-        } else {
-            Ok(None)
-        }
+        let first = self
+            .next_chunk()
+            .await?
+            .and_then(|chunk| chunk.into_iter().next());
+        self.drain_remaining().await?;
+        Ok(first)
     }
 
     /// Returns the first row, or an error if the result set is empty.

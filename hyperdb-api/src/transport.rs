@@ -12,7 +12,7 @@
 
 use crate::error::{Error, Result};
 
-/// Transport type indicator (public for introspection).
+/// Transport type indicator (crate-internal).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TransportType {
     /// TCP connection using `PostgreSQL` wire protocol.
@@ -85,12 +85,12 @@ pub(crate) enum Transport {
     Grpc(Box<GrpcTransport>),
 }
 
-/// TCP transport using hyper-client.
+/// TCP transport using `hyperdb_api_core::client`.
 pub(crate) struct TcpTransport {
     pub(crate) client: hyperdb_api_core::client::Client,
 }
 
-/// gRPC transport using hyper-client's gRPC module.
+/// gRPC transport using the `hyperdb_api_core::client::grpc` module.
 pub(crate) struct GrpcTransport {
     pub(crate) client: hyperdb_api_core::client::grpc::GrpcClientSync,
     pub(crate) config: hyperdb_api_core::client::grpc::GrpcConfig,
@@ -121,7 +121,7 @@ impl Transport {
     pub(crate) fn supports_writes(&self) -> bool {
         match self {
             Transport::Tcp(_) => true,
-            Transport::Grpc(_) => false, // TODO: Server capability check in future
+            Transport::Grpc(_) => false,
         }
     }
 
@@ -131,22 +131,6 @@ impl Transport {
         let config = hyperdb_api_core::client::Config::new()
             .with_host(host)
             .with_port(port);
-        let client = hyperdb_api_core::client::Client::connect(&config)?;
-        Ok(Transport::Tcp(Box::new(TcpTransport { client })))
-    }
-
-    /// Connect using TCP transport with authentication.
-    pub(crate) fn connect_tcp_with_auth(
-        endpoint: &str,
-        user: &str,
-        password: &str,
-    ) -> Result<Self> {
-        let (host, port) = parse_endpoint(endpoint);
-        let config = hyperdb_api_core::client::Config::new()
-            .with_host(host)
-            .with_port(port)
-            .with_user(user)
-            .with_password(password);
         let client = hyperdb_api_core::client::Client::connect(&config)?;
         Ok(Transport::Tcp(Box::new(TcpTransport { client })))
     }
@@ -164,6 +148,17 @@ impl Transport {
             Transport::Grpc(_) => Err(Error::feature_not_supported(
                 "gRPC transport is read-only. Write operations (INSERT, UPDATE, DELETE, DDL) \
                  are not yet supported over gRPC. Use a TCP connection for write operations.",
+            )),
+        }
+    }
+
+    /// Like [`execute_command`](Self::execute_command) but returns `Ok(None)`
+    /// instead of blocking when the connection is busy. For destructors.
+    pub(crate) fn try_execute_command(&self, sql: &str) -> Result<Option<u64>> {
+        match self {
+            Transport::Tcp(tcp) => Ok(tcp.client.try_exec(sql)?),
+            Transport::Grpc(_) => Err(Error::feature_not_supported(
+                "gRPC transport is read-only. Write operations are not supported over gRPC.",
             )),
         }
     }

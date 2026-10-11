@@ -26,9 +26,8 @@ use tempfile::TempDir;
 fn qualified_table_unqualified_when_target_db_none() {
     let opts = IngestOptions {
         table: "widgets".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     assert_eq!(qualified_table(&opts), "\"widgets\"");
@@ -40,9 +39,8 @@ fn qualified_table_unqualified_when_target_db_none() {
 fn qualified_table_qualifies_when_target_db_set() {
     let opts = IngestOptions {
         table: "widgets".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: Some("persistent".into()),
     };
     assert_eq!(
@@ -57,9 +55,8 @@ fn qualified_table_qualifies_when_target_db_set() {
 fn qualified_table_escapes_embedded_quotes() {
     let opts = IngestOptions {
         table: "weird\"name".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: Some("db\"alias".into()),
     };
     assert_eq!(
@@ -70,10 +67,10 @@ fn qualified_table_escapes_embedded_quotes() {
 
 // --- Engine::resolve_target_db ---------------------------------------------
 
-/// Empty / None / "local" all resolve to the primary db name. (LOCAL_ALIAS
-/// filtering happens in the server-level `resolve_db` helper, which the
-/// engine method doesn't see — so engine-level resolution returns "local"
-/// verbatim. The server filter is exercised via end-to-end ingest below.)
+/// `None`, `""`, and whitespace resolve to the primary db name at the engine
+/// level. The `"local"` alias is filtered by `HyperMcpServer::resolve_db`,
+/// covered in `end_to_end_mcp_tests.rs` by
+/// `persist_true_plus_database_local_lets_database_win`.
 #[test]
 fn resolve_target_db_none_means_primary() {
     let te = TestEngine::new_ephemeral();
@@ -120,9 +117,8 @@ fn ingest_json_with_persistent_target_lands_in_persistent() {
     let mut te = TestEngine::new_ephemeral();
     let opts = IngestOptions {
         table: "persisted_data".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: Some("persistent".into()),
     };
     let data = r#"[{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]"#;
@@ -156,9 +152,8 @@ fn ingest_csv_with_persistent_target_lands_in_persistent() {
     let mut te = TestEngine::new_ephemeral();
     let opts = IngestOptions {
         table: "csv_target".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: Some("persistent".into()),
     };
     let data = "id,name\n1,Alice\n2,Bob\n";
@@ -184,9 +179,8 @@ fn ingest_to_persistent_survives_engine_recreate() {
         let mut engine = Engine::new_no_daemon(Some(path_str.clone())).unwrap();
         let opts = IngestOptions {
             table: "library".into(),
-            mode: "replace".into(),
+            mode: hyperdb_mcp::ingest::IngestMode::Replace,
             schema_override: None,
-            merge_key: None,
             target_db: Some("persistent".into()),
         };
         let data = r#"[{"id": 1, "title": "Dune"}]"#;
@@ -209,9 +203,8 @@ fn ingest_with_no_target_db_lands_in_primary() {
     let mut te = TestEngine::new_ephemeral();
     let opts = IngestOptions {
         table: "scratch".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     let data = r#"[{"x": 1}]"#;
@@ -228,7 +221,7 @@ fn ingest_with_no_target_db_lands_in_primary() {
 // --- describe_tables_in / sample_table_in ----------------------------------
 
 /// `describe_tables_in(Some("persistent"))` lists tables in the
-/// persistent attachment, hiding internal `_hyperdb_*` tables.
+/// persistent attachment.
 #[test]
 fn describe_tables_in_persistent_lists_only_persistent_tables() {
     let te = TestEngine::new_ephemeral();
@@ -298,9 +291,8 @@ fn sample_table_in_persistent_returns_rows() {
     let mut te = TestEngine::new_ephemeral();
     let opts = IngestOptions {
         table: "samples".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: Some("persistent".into()),
     };
     ingest_json(
@@ -514,9 +506,10 @@ fn merge_into_persistent_creates_table_when_missing() {
     let mut te = TestEngine::new_ephemeral();
     let opts = IngestOptions {
         table: "merged_persist".into(),
-        mode: "merge".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Merge {
+            keys: vec!["id".into()],
+        },
         schema_override: None,
-        merge_key: Some(vec!["id".into()]),
         target_db: Some("persistent".into()),
     };
     let data = r#"[{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]"#;
@@ -545,9 +538,8 @@ fn merge_into_persistent_replaces_matching_and_appends_new() {
     // Seed target with two rows.
     let seed_opts = IngestOptions {
         table: "merge_target".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: Some("persistent".into()),
     };
     ingest_json(
@@ -560,9 +552,10 @@ fn merge_into_persistent_replaces_matching_and_appends_new() {
     // Merge: id=1 replaces, id=3 appends, id=2 stays.
     let merge_opts = IngestOptions {
         table: "merge_target".into(),
-        mode: "merge".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Merge {
+            keys: vec!["id".into()],
+        },
         schema_override: None,
-        merge_key: Some(vec!["id".into()]),
         target_db: Some("persistent".into()),
     };
     let result = ingest_json(
@@ -593,9 +586,8 @@ fn merge_into_persistent_alters_when_incoming_has_new_column() {
     let mut te = TestEngine::new_ephemeral();
     let seed_opts = IngestOptions {
         table: "widens".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: Some("persistent".into()),
     };
     ingest_json(
@@ -607,9 +599,10 @@ fn merge_into_persistent_alters_when_incoming_has_new_column() {
 
     let merge_opts = IngestOptions {
         table: "widens".into(),
-        mode: "merge".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Merge {
+            keys: vec!["id".into()],
+        },
         schema_override: None,
-        merge_key: Some(vec!["id".into()]),
         target_db: Some("persistent".into()),
     };
     let result = ingest_json(
@@ -665,8 +658,7 @@ fn ensure_exists_in_seeds_catalog_inside_user_attached_db() {
 
     // Catalog doesn't exist yet in user_db (attach-only doesn't seed
     // for an existing file; this attached file was just created so
-    // attach-with-on_missing=create *does* seed — verify and then
-    // make a separate user-attach test below for the no-seed case).
+    // attach-with-on_missing=create *does* seed).
     // Here we just confirm explicit ensure_exists_in is idempotent.
     hyperdb_mcp::table_catalog::ensure_exists_in(&engine, Some("user_db")).unwrap();
     hyperdb_mcp::table_catalog::ensure_exists_in(&engine, Some("user_db")).unwrap();
@@ -820,7 +812,7 @@ fn reconcile_in_per_db_does_not_touch_persistent_catalog() {
     )
     .unwrap();
 
-    // Two tables in persistent (existing behavior).
+    // One table in persistent.
     engine
         .execute_command("CREATE TABLE \"persistent\".\"public\".\"persist_t\" (n INT)")
         .unwrap();

@@ -13,6 +13,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+* **The npm platform packages now ship `THIRD-PARTY-LICENSES.txt`,** listing
+  the licenses of the Rust crates linked into the native addon. It is
+  generated at publish time with `cargo-about` (`about.toml`, `about.hbs`), and
+  a CI job fails if a dependency uses a license outside the accepted list.
+* **TLS for TCP connections:** `ConnectionBuilder.tls({ mode, rootCert,
+  clientCert, clientKey, serverName })`, with libpq `sslmode` semantics
+  (`"disable"`, `"prefer"`, `"require"`, `"verify-ca"`, `"verify-full"`), and
+  a `Connection.isTls` getter. An invalid mode, or `clientCert` without
+  `clientKey`, fails `build()`. `Connection.connect` and the other static
+  factories stay plaintext.
+* **`ConnectionPool` takes a `tls` option** and opens every connection through
+  `ConnectionBuilder` with it. TLS failures surface from `acquire()`.
+* **`new HyperProcess(hyperPath, options)`** takes an optional
+  `{ transport: 'tcp' | 'ipc', parameters }` (TCP stays the default);
+  `parameters` are passed to `hyperd` unchanged, for example `ssl_key` and
+  `ssl_certificate` to serve TLS. An unknown transport throws. With `'ipc'`,
+  `hyper.endpoint` is the Unix socket path or named pipe, which every
+  `Connection` factory and `ConnectionBuilder` accept.
+
 ## [1.0.0-rc.3] - 2026-09-07
 
 ### Changed
@@ -43,6 +64,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+* Inserting a JS number into an integer column (`addRow` with a float, or `addColumnar`) now throws when the value is `NaN`, infinite, or outside the column's range. It used to saturate or become `0` silently.
+* `ConnectionPool.acquire()` no longer exceeds `max` under concurrent calls:
+  in-flight connection attempts now reserve a slot (released on failure), where
+  before only established connections were counted.
+* Corrected the `ArrowInserter.hasData()` doc comment, which said "true until
+  any data has been sent"; it returns true once data has been sent. The README
+  write-type table now matches `RowInserter` behavior (only `Buffer` is sent as
+  bytes; `Date` and plain objects are string-coerced, not ISO/JSON-converted).
 * `NUMERIC` columns are now decoded correctly. Previously the bindings read
   numerics with `getF64`, which reinterpreted the raw unscaled-integer bytes as
   an IEEE-754 double and returned garbage values or `NaN`. Numerics are now

@@ -7,8 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **The npm platform packages now ship `THIRD-PARTY-LICENSES.txt`,** listing
+  the licenses of the Rust crates linked into the `hyperdb-mcp` binary. It is
+  generated at publish time with `cargo-about` (`about.toml`, `about.hbs`), and
+  a CI job fails if a dependency uses a license outside the accepted list.
+
 ### Changed
 
+- **BREAKING (Rust API): `schema::map_hyper_type` now returns `Result`** instead
+  of panicking on an out-of-range `NUMERIC`; callers must handle the error.
+- **`get_readme` is now written in a compact schema notation.** Tool
+  signatures read `tool(required, optional?=default) → result`, with a legend
+  at the top. The document is about 10% smaller yet carries more: per-tool
+  parameter defaults and limits, `chart` size clamps, export `format_options`,
+  `attach_database` `on_missing`, `copy_query` `temp_attach`, the
+  `watch_directory` `.ready` sentinel protocol, and `kv_get` / `kv_pop`
+  response shapes.
 - **Upgraded the `rmcp` SDK dependency from 1.x to 3.4.** Resolves the
   outstanding `rmcp` security advisories. Purely an internal dependency bump —
   the MCP wire protocol and tool surface exposed by this server are unchanged.
@@ -21,18 +37,170 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Trimmed the always-in-context tool descriptions (~26% smaller)** — moved
   the format-selection and edge-case detail into `get_readme` while keeping the
   actionable rules inline, cutting the tokens the tool catalog costs per load.
+- **BREAKING: `export` and `chart` no longer overwrite by default.** An
+  existing destination is refused with `PERMISSION_DENIED` unless the call
+  passes `overwrite: true`. `export` used to replace an existing file or
+  directory silently; `chart` defaulted `overwrite` to true.
+- **BREAKING: the daemon health channel is a per-user Unix domain socket
+  (`<state dir>/daemon.sock`, mode `0600`) or Windows named pipe, not a
+  loopback TCP port.** `daemon.json` replaces the `health_port` field with
+  `health_endpoint` (a string), `daemon status` prints `Health endpoint:`, the
+  engine status key `daemon_health_port` becomes `daemon_health_endpoint`, and
+  `doctor` reports `health_endpoint` and a new `lock` state in place of the
+  health port. A single-instance lock (`daemon.lock`) replaces the port bind as
+  the "is a daemon running" decision. An older client talking to a daemon of
+  this release cannot find it (the record no longer has `health_port`) and falls
+  back to local mode. A client also checks who serves the endpoint (Unix:
+  peer uid via `SO_PEERCRED` / `getpeereid`; Windows: the pipe server process's
+  user) and refuses one that is not the current user.
+- **The state directory must now be owned by the current user and not writable
+  by group or others.** A daemon refuses to start in one, and a client treats it
+  as untrusted and uses local mode rather than connecting to an endpoint it
+  names.
+- **A running pre-1.0 (rc.5 and earlier) TCP daemon is stopped and replaced
+  on first contact.** Before spawning, a new client checks `daemon.json` for the
+  old `health_port` shape. It sends `STOP` only to a daemon that answers an
+  identified `PING` and reports the pid the record names, then waits up to 15 s
+  for the port to go quiet. A record whose port is dead or answered by anything
+  else is removed with nothing further sent. Only a refused connection counts
+  as a dead port: if the port is open but unresponsive, or the daemon will not
+  stop, the record is kept and the client runs in local mode without spawning
+  (a daemon that ignores `STOP` costs up to 15 s and another `STOP` on every
+  client start until it exits). An old client meeting a new
+  daemon cannot parse its record, so it waits out its spawn timeout and runs in
+  local mode; nothing is destroyed. Running pre-rc.4 clients and new ones
+  against one state directory at the same time is not supported: an old client
+  may overwrite `daemon.json` (not verified against the old code), in which
+  case a new client no longer finds the daemon through the record.
+- **BREAKING: `ingest::IngestOptions.mode` and `lakehouse::IcebergIngestOptions.mode`
+  are enums, and `IngestOptions.merge_key` is gone.** Use `IngestMode::{Replace,
+  Append, Merge { keys }}` and `IcebergMode::{Replace, Append}`; the merge keys
+  now live in the `Merge` variant. `IngestMode::parse` and `IcebergMode::parse`
+  accept only the exact lowercase names. Ingest paths that cannot merge return
+  `INVALID_ARGUMENT` for `Merge` instead of silently ignoring it.
+
+### Removed
+
+- **`hyperdb-mcp daemon --port`, `daemon stop --port`, `daemon status --port`
+  and the `HYPERDB_DAEMON_PORT` environment variable.** There is no port to
+  choose. Use `HYPERDB_STATE_DIR` to run an isolated daemon. A
+  `HYPERDB_DAEMON_PORT` left in the environment is now ignored.
+- **The daemon port scan** (the 16 ports above 7485) and doctor's
+  scan-discovered daemon state. Discovery reads `daemon.json` from the state
+  directory only.
 
 ### Fixed
 
+- On Windows a stale pre-1.0 daemon record whose port nobody serves is now removed. The probe gave up on the connect before Windows reported the refusal (about two seconds), treated the port as unknown, and kept the record, so the client stayed in local mode.
+- `query` results now render `BYTES` as a `\x`-prefixed lowercase hex string and `TIME`/`INTERVAL` as their text form instead of null/garbage from the string fallback.
+- The stdio server now answers Claude Code's opening `server/discover` probe with `-32601 Method not found`, so the client falls back to `initialize` instead of failing with "Server's protocol version is not supported: 2026-07-28". Previously rmcp either served the probe, locking the session into the stateless `2026-07-28` lifecycle, or rejected it with `-32022`.
+- **Version takeover starts the new daemon reliably.** A newer client used to
+  spawn the replacement as soon as the old daemon's health channel went quiet,
+  while the old `hyperd` still held its socket; the new daemon then died
+  silently and clients ran in local mode with no daemon at all. The old daemon
+  now shuts down immediately on `STOP` instead of at its next 5 s poll, the
+  takeover waits until the old daemon has released the daemon lock, and
+  `SPAWN_TIMEOUT` rises from 10 s to 20 s. Behaviour change: a takeover that
+  times out (15 s) waiting for the old daemon to exit now falls back to local
+  mode instead of reusing the dying daemon.
+- **`hyperdb-mcp daemon stop` waits for the daemon to exit**, and reports an
+  error if it is still running 15 s after acknowledging `STOP`, instead of
+  returning as soon as the daemon replied.
+- **A daemon that fails to start now says why.** The reason is logged to
+  `hyperdb-daemon.log` (a spawned daemon's stderr is discarded), and a client
+  falling back to local mode logs it at `warn` instead of `debug`.
+- **`query_data`, `query_file` and `export` now accept only read-only SQL**,
+  with or without `--read-only`. They used to run any statement, so
+  `query_data(sql: "DROP TABLE persistent.public.t")` dropped a persistent
+  table even on a read-only server. Writes are refused with `SQL_ERROR`, as
+  `query` already did.
+- **The read-only SQL check now sees statements the way Hyper does.**
+  `WITH x AS (...) DELETE ...` and `EXPLAIN (ANALYZE) DELETE ...`, both of
+  which Hyper runs, passed as read-only through `query`, `chart`,
+  `save_query` and `copy_query`. Block comments are no longer treated as
+  nesting (Hyper's do not), string literals, quoted identifiers and dollar
+  quotes are skipped the way Hyper's lexer skips them, `SELECT ... INTO`
+  counts as a write, and input that is not exactly one statement (or nests
+  parentheses more than 256 deep) is refused. The `execute` batch validator uses the
+  same classifier, so it now counts those wrapped writes as DML.
+- **`export` with `sql` can no longer break out of its `COPY (...) TO`
+  wrapper.** SQL that closed the parenthesis itself could name its own
+  target path and options; it is now refused, and a query that ends in a
+  `--` comment exports instead of failing with a syntax error.
+- **`export` and `chart` no longer destroy the databases the session has
+  open.** Pointing either at the persistent database, the local database, an
+  attached `.hyper` file (by any path, including a symlink) or a directory
+  holding one is refused with `INVALID_ARGUMENT`. `export` with `format: "hyper"` used to delete and
+  recreate an attached file.
+- **`export` with `overwrite: true` replaces only what it could have written.**
+  `iceberg` used to `remove_dir_all` whatever directory `path` named; it now
+  replaces only an empty directory or an Iceberg table, and `hyper` only a
+  Hyper database file. Both build the new export before discarding the old one, so a
+  failed export leaves the previous table or file in place.
+- **`query_data` / `query_file` no longer interpolate `table_name` unescaped
+  into the scratch-table `DROP`.** A `table_name` containing a double quote
+  could end the quoted identifier and append further SQL to the cleanup
+  statement.
+- **`inspect_file` and JSON schema inference no longer panic on non-ASCII
+  text.** Sample-value previews were truncated at a byte offset and ISO 8601
+  date/timestamp detection sliced strings by byte index, so a multi-byte
+  character at the cut point aborted the request. Previews now truncate by
+  character, and date/timestamp detection only considers ASCII strings.
 - **`query_data` / `query_file` no longer leak their scratch table on a failed
   query** — the temp table is now dropped whether the query succeeds or fails,
   so a bad query no longer leaves a `_tmp_*` table behind in `describe`.
-- **Table listings (`describe`) now hide transient scratch tables** (`_tmp_*`
-  and `__hyperdb_merge_*`), not just `_hyperdb_*` internals.
+- **Table listings (`describe`) now hide transient scratch tables** (`_tmp_*`,
+  `__hyperdb_merge_*` and `__hyperdb_copy_*`), not just `_hyperdb_*` internals.
 - **`query_data` / `query_file` table-name substitution is whole-word** — an
   alias like `data` no longer corrupts a column named `metadata` or `data_url`.
 - **Unknown-table SQL errors now suggest running `describe`** and name the
   default `data` alias, instead of the generic "check SQL syntax" hint.
+- **An unrecognised `mode` no longer silently replaces data.** `load_data`,
+  `load_file`, `load_files`, `load_iceberg` and `copy_query` used to treat any
+  value other than the exact lowercase names (`Append`, `appendd`, `""`) as
+  `replace`. Each tool now parses `mode` once at the boundary and returns
+  `INVALID_ARGUMENT` (with a did-you-mean hint for case and whitespace slips such as `Append` or ` append `); `load_files` rejects a bad entry
+  before ingesting anything.
+- **A failed `load_file` merge no longer loses the matched rows.** The
+  DELETE and INSERT now run in one transaction, so an INSERT failure (for
+  example a NULL into a NOT NULL column) restores the deleted rows. A NOT NULL
+  target column missing from the incoming data is rejected up front, columns
+  added for the merge are dropped again on failure, and the staging table
+  (`__hyperdb_merge_*`, hidden from listings) is cleaned up.
+- **`copy_query` `mode=replace` no longer drops the target before the SELECT
+  succeeds.** The result is built in a hidden staging table
+  (`__hyperdb_copy_*`) and swapped in with two renames, so a failing SELECT
+  leaves the existing table untouched and the SELECT may read the target. A
+  `create`/`replace` into a missing target that fails at run time no longer
+  leaves an empty table behind. Hyper cannot roll back renames, so the swap
+  itself is not one atomic step.
+- **An out-of-range `NUMERIC` no longer panics inside the engine lock.** A
+  `schema` override such as `NUMERIC(40,2)`, or an Arrow `Decimal256(50,2)`
+  column, now returns `INVALID_ARGUMENT` (precision must be 1..=38, scale
+  0..=precision). Type strings are parsed strictly (`NUMERICX` and
+  `NUMERIC, x INT` are rejected) and stored in canonical form, so user text is
+  never spliced into DDL. A panic in a tool body that runs under the engine lock
+  is now caught and reported as an internal error instead of poisoning the
+  engine mutex; the engine is discarded and the next call reconnects (in local
+  mode this drops the whole ephemeral workspace, so tables loaded earlier in
+  the session are lost). `status` contains only a panic in its catalog
+  bootstrap (it then reports the degraded response), and panics in
+  `load_files` worker tasks are not covered by this guard.
+- **The MCP server no longer advertises protocol revision `2026-07-28`.**
+  Claude Code rejected the server with "Server's protocol version is not
+  supported: 2026-07-28". The server now supports revisions up to `2025-11-25`
+  (rmcp's `LATEST_WITH_INITIALIZE`) and negotiates a client asking for newer
+  down to that.
+- **The catalog-bootstrap flag can no longer be poisoned.** A panic could
+  previously leave `_table_catalog` bootstrap silently disabled.
+- **`IngestMode::parse` no longer panics** on an unexpected mode name; it
+  returns an `INTERNAL_ERROR`.
+- **The daemon's `hyperd` endpoint is no longer trusted from `daemon.json`
+  alone.** The client confirms it with the authenticated daemon's `STATUS` reply
+  and accepts only a daemon-owned IPC channel (`<state dir>/sockets/<name>`, or a
+  local named pipe on Windows), so a forged record cannot point sessions at a
+  TCP listener of an attacker's choosing; otherwise the session runs in local
+  mode.
 
 ## [1.0.0-rc.4] - 2026-09-08
 

@@ -5,7 +5,7 @@
 //! - #7: Batch statement execution (`execute_batch`)
 //! - #12: Catalog metadata helpers (`get_row_count`, `get_column_names`, `get_database_names`)
 //! - #15: Server version struct (`ServerVersion`)
-//! - #14: Database copy (`copy_database`)
+//! - #14: Database copy (`copy_database`) — see `copy_database_tests.rs`
 //! - #13: EXPLAIN (explain, `explain_analyze`)
 //! - #11: Connection timeouts (`query_timeout`, `application_name` on `ConnectionBuilder`)
 //! - #17: `FromRow` trait (`fetch_one_as`, `fetch_all_as`)
@@ -15,7 +15,6 @@ mod common;
 use common::TestConnection;
 
 use hyperdb_api::{Catalog, FromRow, ServerVersion};
-// The derive macro is no longer re-exported from hyperdb_api; import directly.
 use hyperdb_api_derive::FromRow;
 
 // =============================================================================
@@ -169,42 +168,6 @@ fn test_server_version_from_connection() {
 }
 
 // =============================================================================
-// #14: Database Copy
-// =============================================================================
-
-#[test]
-fn test_copy_database() {
-    let test = TestConnection::new().expect("Failed to create test connection");
-
-    // Create some data in the source database
-    test.execute_command("CREATE TABLE copy_src (id INT NOT NULL)")
-        .expect("create");
-    test.execute_command("INSERT INTO copy_src VALUES (1), (2), (3)")
-        .expect("insert");
-
-    // Get the source database path and construct a destination path
-    let src_path = test.database_path.to_string_lossy().to_string();
-    let dst_path = src_path.replace(".hyper", "_backup.hyper");
-
-    // Remove destination if it exists from a previous run
-    let _ = std::fs::remove_file(&dst_path);
-
-    // Copy the database
-    let result = test.connection.copy_database(&src_path, &dst_path);
-    // COPY DATABASE may not be supported in all Hyper versions
-    if let Ok(()) = result {
-        // Verify the backup exists
-        assert!(
-            std::path::Path::new(&dst_path).exists(),
-            "Backup file should exist"
-        );
-        // Clean up
-        let _ = std::fs::remove_file(&dst_path);
-    }
-    // If it fails, that's OK — COPY DATABASE may not be available
-}
-
-// =============================================================================
 // #13: EXPLAIN
 // =============================================================================
 
@@ -307,12 +270,6 @@ fn test_fetch_all_as() {
     assert_eq!(users[2].id, 3);
     assert_eq!(users[2].name, "Carol");
 }
-
-// `test_from_row_tuple` was removed in v0.3.0 along with the blanket
-// `(Option<A>,)` … `(Option<A>, Option<B>, Option<C>, Option<D>)`
-// `FromRow` impls. For ad-hoc tuple-shaped destructuring, callers
-// should now use `Row::get(idx)` directly on each row, or define a
-// struct with `#[derive(FromRow)]`.
 
 // =============================================================================
 // #17 cont: #[derive(FromRow)] parity with hand-written impl
@@ -466,7 +423,7 @@ fn test_derive_from_row_missing_column_errors() {
         .expect_err("expected missing-column error");
 
     match err {
-        Error::Column { name, kind } => {
+        Error::Column { name, kind, .. } => {
             assert_eq!(name, "not_in_query");
             assert!(
                 matches!(kind, ColumnErrorKind::Missing),
@@ -541,8 +498,9 @@ fn test_stream_as_multi_chunk() {
         .collect::<hyperdb_api::Result<Vec<_>>>()
         .expect("collect");
 
-    let last = usize::try_from(ROWS).expect("row count fits usize") - 1;
-    assert_eq!(users.len(), ROWS as usize);
+    let rows = usize::try_from(ROWS).expect("row count fits usize");
+    let last = rows - 1;
+    assert_eq!(users.len(), rows);
     assert_eq!(users[0].id, 1);
     assert_eq!(users[0].name, "name1");
     assert!((users[0].score - 1.0).abs() < 0.001);

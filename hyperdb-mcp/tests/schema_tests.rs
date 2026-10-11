@@ -137,14 +137,14 @@ fn infer_csv_no_header() {
 /// including parameterized types like NUMERIC(12,2).
 #[test]
 fn map_hyper_type_names() {
-    assert!(map_hyper_type("INT").is_some());
-    assert!(map_hyper_type("BIGINT").is_some());
-    assert!(map_hyper_type("TEXT").is_some());
-    assert!(map_hyper_type("DOUBLE PRECISION").is_some());
-    assert!(map_hyper_type("BOOL").is_some());
-    assert!(map_hyper_type("DATE").is_some());
-    assert!(map_hyper_type("TIMESTAMP").is_some());
-    assert!(map_hyper_type("NUMERIC(12,2)").is_some());
+    assert!(map_hyper_type("INT").is_ok());
+    assert!(map_hyper_type("BIGINT").is_ok());
+    assert!(map_hyper_type("TEXT").is_ok());
+    assert!(map_hyper_type("DOUBLE PRECISION").is_ok());
+    assert!(map_hyper_type("BOOL").is_ok());
+    assert!(map_hyper_type("DATE").is_ok());
+    assert!(map_hyper_type("TIMESTAMP").is_ok());
+    assert!(map_hyper_type("NUMERIC(12,2)").is_ok());
 }
 
 /// Verify that a column where every row is null collapses to TEXT (the safe
@@ -223,6 +223,61 @@ fn apply_override_empty_is_noop() {
     assert_eq!(result.len(), 2);
     assert_eq!(result[0].hyper_type, "INT");
     assert_eq!(result[1].hyper_type, "TEXT");
+}
+
+/// Run `apply_schema_override` for a single column and return its result,
+/// converting a panic into a test failure message (the old code asserted).
+fn override_one(ty: &str) -> Result<Vec<ColumnSchema>, hyperdb_mcp::error::McpError> {
+    let inferred = cols(&[("v", "INT")]);
+    let override_map = json!({ "v": ty }).as_object().cloned().unwrap();
+    apply_schema_override(inferred, &override_map)
+}
+
+/// Out-of-range NUMERIC overrides must be a clean `InvalidArgument`, not a
+/// panic inside `SqlType::numeric` (which would poison the engine mutex).
+#[test]
+fn override_rejects_out_of_range_numeric() {
+    for ty in [
+        "NUMERIC(40,2)",
+        "NUMERIC(0)",
+        "NUMERIC(5,10)",
+        "DECIMAL(39)",
+    ] {
+        let err = override_one(ty).expect_err(ty);
+        assert_eq!(err.code, ErrorCode::InvalidArgument, "{ty}");
+        assert!(
+            err.message
+                .contains("NUMERIC precision must be 1..=38 and scale 0..=precision"),
+            "{ty}: {}",
+            err.message
+        );
+    }
+}
+
+/// Trailing junk after a type keyword must not be accepted (it used to match
+/// `starts_with("NUMERIC")` and then be spliced raw into DDL).
+#[test]
+fn override_rejects_numeric_with_trailing_garbage() {
+    for ty in [
+        "NUMERICX",
+        "NUMERIC, x INT",
+        "NUMERIC(10,2) NOT NULL",
+        "NUMERIC(10,2",
+    ] {
+        assert!(override_one(ty).is_err(), "{ty} must be rejected");
+    }
+}
+
+/// Accepted overrides are stored in canonical form so the DDL splice never
+/// sees user-controlled text.
+#[test]
+fn override_stores_canonical_type_text() {
+    let r = override_one(" numeric( 12 , 2 ) ").unwrap();
+    assert_eq!(r[0].hyper_type, "NUMERIC(12, 2)");
+    let r = override_one("numeric").unwrap();
+    assert_eq!(r[0].hyper_type, "NUMERIC(38, 0)");
+    let r = override_one("varchar").unwrap();
+    assert_eq!(r[0].hyper_type, "TEXT");
 }
 
 // --- Full-file numeric widening (B) -------------------------------------

@@ -11,20 +11,14 @@
 //! |------|--------|----------|
 //! | **Exact** | Arrow IPC, Parquet | Types read from file metadata — zero guessing. |
 //! | **Structural** | JSON | Full scan of all objects. Per-column type widening (see below). |
-//! | **Heuristic** | CSV | Header row for names, first 1 000 rows sampled for types. Ambiguous → TEXT. |
+//! | **Heuristic** | CSV | Header row for names, first 1 000 rows sampled for types. Ambiguous → TEXT. A second full-file pass promotes INT → BIGINT → NUMERIC(38,0) on out-of-range values and INT/BIGINT → DOUBLE PRECISION on decimals. |
 //!
 //! All tiers can be bypassed with an explicit `schema` override from the caller.
 //!
 //! # Type Widening Rules (Structural / Heuristic Tiers)
 //!
-//! When a JSON or CSV column contains mixed types across rows, the widening
-//! chain determines the final type:
-//!
-//! ```text
-//! Null < Bool < Int < BigInt < Double < Date < Timestamp < Text
-//! ```
-//!
-//! Specific rules (implemented in `resolve_type`):
+//! When a JSON or CSV column contains mixed types across rows, these rules
+//! determine the final type. Specific rules (implemented in `resolve_type`):
 //! - **All null** → TEXT (safe catch-all).
 //! - **Uniform non-null** → that type, unchanged.
 //! - **Mixed numeric** (Int / `BigInt` / Double) → widest numeric type seen.
@@ -82,12 +76,7 @@ pub fn build_table_def(
     }
     let mut def = TableDefinition::new(table_name);
     for col in columns {
-        let sql_type = map_hyper_type(&col.hyper_type).ok_or_else(|| {
-            McpError::new(
-                ErrorCode::SchemaMismatch,
-                format!("Unknown type: {}", col.hyper_type),
-            )
-        })?;
+        let sql_type = map_hyper_type(&col.hyper_type)?;
         if col.nullable {
             def = def.add_nullable_column(&col.name, sql_type);
         } else {
@@ -100,51 +89,91 @@ pub fn build_table_def(
 /// Map a user-facing type name string (e.g. `"INT"`, `"NUMERIC(12,2)"`) to a
 /// [`hyperdb_api::SqlType`]. Accepts `PostgreSQL` aliases (`INT4`, `FLOAT8`, `VARCHAR`)
 /// so schema overrides from diverse sources work without normalization.
-#[must_use]
-pub fn map_hyper_type(type_name: &str) -> Option<SqlType> {
+///
+/// Parsing is strict: the whole string must be one known type name, optionally
+/// `NUMERIC`/`DECIMAL` followed by `(precision[, scale])`. Anything trailing
+/// (`NUMERIC, x INT`, `NUMERICX`) is rejected, because the resulting type is
+/// rendered into DDL by [`canonical_type_sql`].
+///
+/// # Errors
+///
+/// - [`ErrorCode::InvalidArgument`] when a `NUMERIC` precision/scale is out of
+///   range (precision `1..=38`, scale `0..=precision`). This is checked with the
+///   non-panicking [`SqlType::try_numeric`] so untrusted input can never
+///   panic while the engine mutex is held.
+/// - [`ErrorCode::SchemaMismatch`] for any other unrecognised type string.
+pub fn map_hyper_type(type_name: &str) -> Result<SqlType, McpError> {
     let upper = type_name.trim().to_uppercase();
     match upper.as_str() {
-        "SMALLINT" | "INT2" => Some(SqlType::small_int()),
-        "INT" | "INTEGER" | "INT4" => Some(SqlType::int()),
-        "BIGINT" | "INT8" => Some(SqlType::big_int()),
-        "FLOAT" | "FLOAT4" | "REAL" => Some(SqlType::double()),
-        "DOUBLE" | "DOUBLE PRECISION" | "FLOAT8" => Some(SqlType::double()),
-        "TEXT" | "VARCHAR" | "STRING" => Some(SqlType::text()),
-        "BOOL" | "BOOLEAN" => Some(SqlType::bool()),
-        "DATE" => Some(SqlType::date()),
-        "TIME" => Some(SqlType::time()),
-        "TIMESTAMP" => Some(SqlType::timestamp()),
-        "TIMESTAMPTZ" | "TIMESTAMP WITH TIME ZONE" => Some(SqlType::timestamp_tz()),
-        "BYTEA" | "BYTES" => Some(SqlType::bytes()),
-        _ if upper.starts_with("NUMERIC") => {
-            // Parse NUMERIC(p,s) or default to NUMERIC(38,0)
-            if let Some(inner) = upper
-                .strip_prefix("NUMERIC(")
-                .and_then(|s| s.strip_suffix(')'))
-            {
-                let parts: Vec<&str> = inner.split(',').collect();
-                let precision = parts
-                    .first()
-                    .and_then(|p| p.trim().parse().ok())
-                    .unwrap_or(38);
-                let scale = parts
-                    .get(1)
-                    .and_then(|s| s.trim().parse().ok())
-                    .unwrap_or(0);
-                Some(SqlType::numeric(precision, scale))
-            } else {
-                Some(SqlType::numeric(38, 0))
-            }
-        }
-        _ => None,
+        "SMALLINT" | "INT2" => Ok(SqlType::small_int()),
+        "INT" | "INTEGER" | "INT4" => Ok(SqlType::int()),
+        "BIGINT" | "INT8" => Ok(SqlType::big_int()),
+        "FLOAT" | "FLOAT4" | "REAL" => Ok(SqlType::double()),
+        "DOUBLE" | "DOUBLE PRECISION" | "FLOAT8" => Ok(SqlType::double()),
+        "TEXT" | "VARCHAR" | "STRING" => Ok(SqlType::text()),
+        "BOOL" | "BOOLEAN" => Ok(SqlType::bool()),
+        "DATE" => Ok(SqlType::date()),
+        "TIME" => Ok(SqlType::time()),
+        "TIMESTAMP" => Ok(SqlType::timestamp()),
+        "TIMESTAMPTZ" | "TIMESTAMP WITH TIME ZONE" => Ok(SqlType::timestamp_tz()),
+        "BYTEA" | "BYTES" => Ok(SqlType::bytes()),
+        _ => parse_numeric(&upper).unwrap_or_else(|| {
+            Err(McpError::new(
+                ErrorCode::SchemaMismatch,
+                format!("Unknown type '{}'", type_name.trim()),
+            ))
+        }),
     }
+}
+
+/// Strictly parse `NUMERIC`/`DECIMAL` with an optional `(p[,s])` suffix from an
+/// already upper-cased, trimmed string. `None` means "not a numeric type
+/// string at all" (so the caller reports an unknown type); `Some(Err)` is a
+/// numeric spelling with bad or out-of-range arguments.
+fn parse_numeric(upper: &str) -> Option<Result<SqlType, McpError>> {
+    let rest = upper
+        .strip_prefix("NUMERIC")
+        .or_else(|| upper.strip_prefix("DECIMAL"))?
+        .trim_start();
+    if rest.is_empty() {
+        return Some(Ok(SqlType::numeric(38, 0)));
+    }
+    let inner = rest.strip_prefix('(')?.strip_suffix(')')?;
+    let mut parts = inner.split(',');
+    let precision: u32 = parts.next()?.trim().parse().ok()?;
+    let scale: u32 = match parts.next() {
+        Some(s) => s.trim().parse().ok()?,
+        None => 0,
+    };
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(SqlType::try_numeric(precision, scale).ok_or_else(|| {
+        McpError::new(
+            ErrorCode::InvalidArgument,
+            format!(
+                "NUMERIC precision must be 1..=38 and scale 0..=precision; got ({precision},{scale})"
+            ),
+        )
+    }))
+}
+
+/// Canonical SQL text for a user- or file-derived type name: parses it with
+/// [`map_hyper_type`] and renders the resulting [`SqlType`]. This is the only
+/// form that may be spliced into DDL, so no caller-controlled text ever
+/// reaches a `CREATE`/`ALTER TABLE` statement.
+///
+/// # Errors
+///
+/// Same as [`map_hyper_type`].
+pub fn canonical_type_sql(type_name: &str) -> Result<String, McpError> {
+    map_hyper_type(type_name).map(|t| t.to_string())
 }
 
 // --- Tier 2: JSON Schema Inference ---
 
-/// Intermediate type tag used during schema inference. The widening order is:
-/// Null < Bool < Int < `BigInt` < Double < Date < Timestamp < Text.
-/// When a column has mixed non-numeric types, it collapses to Text.
+/// Intermediate type tag used during schema inference. Mixed Int/`BigInt`/Double
+/// widen to the widest seen; any other mix resolves to Text.
 #[derive(Debug, Clone, PartialEq)]
 enum InferredType {
     Null,
@@ -271,14 +300,14 @@ fn infer_json_value_type(val: &Value) -> InferredType {
 ///
 /// # Safety of the string slices
 ///
-/// Each indexing like `s[0..4]` requires `s.len()` to be at least the
-/// upper bound (otherwise it panics). The `s.len() == 10` / `s.len() >=
-/// 19` guards are the leftmost clauses in each `if` so Rust's
-/// short-circuit `&&` evaluation proves the length invariant before the
-/// slice operations run.
+/// Both patterns are pure ASCII, so the leftmost clause of each `if` is
+/// `s.is_ascii()`. That makes every byte index a char boundary, so the
+/// `s[a..b]` slices below cannot panic on multi-byte input; the length
+/// checks that follow it guarantee the upper bounds are in range.
 fn infer_string_type(s: &str) -> InferredType {
     // Try ISO 8601 date: YYYY-MM-DD
-    if s.len() == 10
+    if s.is_ascii()
+        && s.len() == 10
         && s.chars().nth(4) == Some('-')
         && s.chars().nth(7) == Some('-')
         && s[0..4].parse::<u16>().is_ok()
@@ -288,7 +317,8 @@ fn infer_string_type(s: &str) -> InferredType {
         return InferredType::Date;
     }
     // Try ISO 8601 timestamp: YYYY-MM-DDThh:mm:ss
-    if s.len() >= 19
+    if s.is_ascii()
+        && s.len() >= 19
         && s.chars().nth(10) == Some('T')
         && s[0..10].contains('-')
         && s[11..].contains(':')
@@ -608,6 +638,23 @@ fn infer_csv_field_type(field: &str) -> InferredType {
     infer_string_type(trimmed)
 }
 
+/// Canonicalise `type_name` ([`canonical_type_sql`]) for column `column`, adding the column name to an
+/// error so an LLM can self-correct.
+///
+/// # Errors
+///
+/// Same as [`map_hyper_type`].
+pub fn column_type_sql(type_name: &str, column: &str) -> Result<String, McpError> {
+    canonical_type_sql(type_name).map_err(|mut e| {
+        if e.code == ErrorCode::SchemaMismatch {
+            e.message = format!("Unknown type '{type_name}' for column '{column}'");
+        } else {
+            e.message = format!("column '{column}': {}", e.message);
+        }
+        e
+    })
+}
+
 /// Parse a user-provided schema override (`{"column_name": "TYPE", ...}`) into
 /// a `Vec<ColumnSchema>`. Validates each type name against [`map_hyper_type`] and
 /// rejects unknown types early. All override columns are marked nullable.
@@ -623,7 +670,8 @@ fn infer_csv_field_type(field: &str) -> InferredType {
 /// - Returns [`ErrorCode::SchemaMismatch`] if any value in `schema` is
 ///   not a string.
 /// - Returns [`ErrorCode::SchemaMismatch`] if any type name does not
-///   resolve via [`map_hyper_type`].
+///   resolve via [`map_hyper_type`], or [`ErrorCode::InvalidArgument`] for an
+///   out-of-range `NUMERIC(p,s)`.
 pub fn parse_schema_override(
     schema: &serde_json::Map<String, Value>,
 ) -> Result<Vec<ColumnSchema>, McpError> {
@@ -635,15 +683,10 @@ pub fn parse_schema_override(
                 format!("Schema type for '{name}' must be a string"),
             )
         })?;
-        if map_hyper_type(type_name).is_none() {
-            return Err(McpError::new(
-                ErrorCode::SchemaMismatch,
-                format!("Unknown type '{type_name}' for column '{name}'"),
-            ));
-        }
+        let hyper_type = column_type_sql(type_name, name)?;
         columns.push(ColumnSchema {
             name: name.clone(),
-            hyper_type: type_name.to_uppercase(),
+            hyper_type,
             nullable: true,
         });
     }
@@ -658,10 +701,8 @@ pub fn parse_schema_override(
 /// practice some MCP clients forward this field as a **JSON-encoded string**
 /// rather than a raw JSON object — e.g. Windsurf/Cascade serializes
 /// `{"postal_code": "TEXT"}` as `"\"{\\\"postal_code\\\": \\\"TEXT\\\"}\""`.
-/// If we only accepted `Value::Object` (the old `v.as_object().cloned()`
-/// pattern) the override was silently dropped and ingest would fail with a
-/// confusing `22P02 invalid input syntax` error from hyperd when a column that
-/// the user explicitly wanted TEXT stayed INT.
+/// Both a JSON object and a JSON-encoded string containing an object are
+/// accepted, so the override is honored whichever shape the client forwards.
 ///
 /// Accepted shapes:
 ///
@@ -767,6 +808,7 @@ pub fn apply_schema_override(
     // Validate: every override key must match a real inferred column and every
     // override value must be a known type string.
     let known: std::collections::HashSet<&str> = inferred.iter().map(|c| c.name.as_str()).collect();
+    let mut canonical: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
     for (name, type_val) in override_map {
         if !known.contains(name.as_str()) {
             let real: Vec<&str> = inferred.iter().map(|c| c.name.as_str()).collect();
@@ -781,19 +823,46 @@ pub fn apply_schema_override(
                 format!("Schema type for '{name}' must be a string"),
             )
         })?;
-        if map_hyper_type(type_name).is_none() {
-            return Err(McpError::new(
-                ErrorCode::SchemaMismatch,
-                format!("Unknown type '{type_name}' for column '{name}'"),
-            ));
-        }
+        canonical.insert(name.as_str(), column_type_sql(type_name, name)?);
     }
 
     // Apply: overlay types by column name. Column order is the inferred order.
+    // The canonical rendering (not the raw user string) is what gets stored,
+    // because `hyper_type` is later spliced into DDL.
     for col in &mut inferred {
-        if let Some(v) = override_map.get(&col.name).and_then(|v| v.as_str()) {
-            col.hyper_type = v.trim().to_uppercase();
+        if let Some(ty) = canonical.remove(col.name.as_str()) {
+            col.hyper_type = ty;
         }
     }
     Ok(inferred)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn infer_string_type_recognizes_iso_dates_and_timestamps() {
+        assert_eq!(infer_string_type("2024-01-15"), InferredType::Date);
+        assert_eq!(
+            infer_string_type("2024-01-15T13:45:30"),
+            InferredType::Timestamp
+        );
+        assert_eq!(infer_string_type("hello"), InferredType::Text);
+    }
+
+    #[test]
+    fn infer_string_type_does_not_panic_on_non_ascii() {
+        // 10 bytes, '-' at char 4 and 7, but `s[0..4]` lands inside 'é'.
+        assert_eq!(infer_string_type("abcé-xy-z"), InferredType::Text);
+        // `s[0..10]` lands inside the 'é' that precedes the 'T' (char 10).
+        assert_eq!(infer_string_type("abcdefghiéT12345678"), InferredType::Text);
+        // Multibyte chars before the date/timestamp separators are not ISO 8601.
+        assert_eq!(infer_string_type("é024-01-15T13:45:30"), InferredType::Text);
+        assert_eq!(infer_string_type("2024-01-15T13:45:3é"), InferredType::Text);
+        assert_eq!(
+            infer_string_type("日本語日本語日本語日本語"),
+            InferredType::Text
+        );
+    }
 }

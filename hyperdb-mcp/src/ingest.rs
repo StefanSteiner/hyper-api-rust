@@ -18,11 +18,14 @@
 //! the same call are rolled back, so a failed ingest leaves zero additional
 //! rows behind — and the guard's `Drop` covers the panic path too.
 //!
-//! Note that Hyper auto-commits DDL (`DROP TABLE`, `CREATE TABLE`) regardless
-//! of the surrounding transaction. In `replace` mode, this means the original
-//! table is already gone by the time inserts start — a mid-ingest failure
-//! leaves the new table empty, not the original intact. In `append` mode, no
-//! DDL runs (assuming the table already exists), so rollback is fully atomic.
+//! Note that Hyper auto-commits DDL (`DROP TABLE`, `CREATE TABLE`) once a
+//! transaction contains it, and refuses DDL after DML. In `replace` mode, this
+//! means the original table is already gone by the time inserts start — a
+//! mid-ingest failure leaves the new table empty, not the original intact. In
+//! `append` mode, no DDL runs (assuming the table already exists), so rollback
+//! is fully atomic. `merge` mode is atomic for rows and columns: its
+//! `DELETE` + `INSERT` run in one transaction, and a failed merge drops any
+//! column it added (see [`merge_via_temp_table`]).
 
 use crate::engine::Engine;
 use crate::error::{ErrorCode, McpError};
@@ -30,6 +33,7 @@ use crate::schema::{
     ColumnSchema, apply_schema_override, infer_csv_schema, infer_json_schema, json_type_name,
     widen_csv_numeric_columns,
 };
+use crate::scratch::ScratchTableGuard;
 use crate::stats::{IngestStats, StatsTimer};
 use hyperdb_api::AsyncConnection;
 use std::path::{Path, PathBuf};
@@ -58,7 +62,13 @@ use std::path::{Path, PathBuf};
 /// Any canonicalize failure falls back to the original path — the
 /// common case (absolute, existing file on any platform) still works.
 fn canonicalize_for_copy(path: &Path) -> PathBuf {
-    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    path_for_hyperd(path.canonicalize().unwrap_or_else(|_| path.to_path_buf()))
+}
+
+/// Steps 1 and 2 of [`canonicalize_for_copy`] for a path that is already
+/// canonical: on Windows, strip the extended-length prefix and use forward
+/// slashes. Any other path is returned unchanged.
+pub(crate) fn path_for_hyperd(canonical: PathBuf) -> PathBuf {
     #[cfg(windows)]
     {
         if let Some(s) = canonical.to_str() {
@@ -118,19 +128,179 @@ fn read_text_sample(path: impl AsRef<Path>, max_bytes: u64) -> std::io::Result<S
     }
 }
 
+/// Parse a tool's `mode` parameter against its allowed set.
+///
+/// Only the exact lowercase names in `allowed` are accepted. `None` (the
+/// parameter was omitted) yields `default`; an empty string, a different
+/// casing, surrounding whitespace, or a typo is rejected rather than
+/// silently falling back to a destructive default. When the value matches an
+/// allowed name ignoring case/whitespace the error adds a "did you mean"
+/// hint.
+///
+/// # Errors
+///
+/// [`ErrorCode::InvalidArgument`] naming `tool` and the allowed values.
+pub(crate) fn parse_mode_name(
+    value: Option<&str>,
+    default: Option<&'static str>,
+    allowed: &[&'static str],
+    tool: &str,
+) -> Result<&'static str, McpError> {
+    let Some(raw) = value else {
+        return default.ok_or_else(|| {
+            McpError::new(
+                ErrorCode::InvalidArgument,
+                format!(
+                    "{tool}: `mode` is required (one of: {})",
+                    allowed.join(", ")
+                ),
+            )
+        });
+    };
+    if let Some(hit) = allowed.iter().find(|a| **a == raw) {
+        return Ok(hit);
+    }
+    let hint = allowed
+        .iter()
+        .find(|a| a.eq_ignore_ascii_case(raw.trim()))
+        .map(|a| format!(" (did you mean '{a}'? mode values are exact lowercase)"))
+        .unwrap_or_default();
+    Err(McpError::new(
+        ErrorCode::InvalidArgument,
+        format!(
+            "{tool}: invalid mode '{raw}'; allowed values: {}{hint}",
+            allowed.join(", ")
+        ),
+    ))
+}
+
+/// How an ingest populates its target table. Parsed once at the tool
+/// boundary by [`IngestMode::parse`]; every ingest path matches on it
+/// exhaustively so an unrecognised value can never fall through to a
+/// destructive replace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IngestMode {
+    /// Drop any existing table and recreate it from the incoming data.
+    Replace,
+    /// Add rows to the existing table (creating it when absent).
+    Append,
+    /// Upsert rows keyed on `keys`.
+    Merge {
+        /// Column(s) matching incoming rows to existing rows. Non-empty.
+        keys: Vec<String>,
+    },
+}
+
+impl IngestMode {
+    /// Parse a tool's `mode` / `merge_key` parameters.
+    ///
+    /// `allowed` lists the mode names the tool supports (a subset of
+    /// `replace`, `append`, `merge`); an omitted `mode` means `replace`.
+    /// `merge_key` is required (and non-empty) for `merge` and rejected for
+    /// every other mode.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorCode::InvalidArgument`] for an unknown, mis-cased or
+    /// unsupported mode, or an invalid `merge_key` combination.
+    pub fn parse(
+        mode: Option<&str>,
+        merge_key: Option<Vec<String>>,
+        allowed: &[&'static str],
+        tool: &str,
+    ) -> Result<Self, McpError> {
+        match parse_mode_name(mode, Some("replace"), allowed, tool)? {
+            "merge" => match merge_key {
+                None => Err(McpError::new(
+                    ErrorCode::InvalidArgument,
+                    format!(
+                        "{tool}: mode=merge requires merge_key (a column name or list of \
+                         column names)"
+                    ),
+                )),
+                Some(keys) if keys.is_empty() || keys.iter().any(String::is_empty) => {
+                    Err(McpError::new(
+                        ErrorCode::InvalidArgument,
+                        format!(
+                            "{tool}: merge_key must be a non-empty list of non-empty column names"
+                        ),
+                    ))
+                }
+                Some(keys) => Ok(Self::Merge { keys }),
+            },
+            other @ ("append" | "replace") => {
+                if merge_key.is_some() {
+                    return Err(McpError::new(
+                        ErrorCode::InvalidArgument,
+                        format!("{tool}: merge_key is only valid with mode=merge"),
+                    ));
+                }
+                Ok(if other == "append" {
+                    Self::Append
+                } else {
+                    Self::Replace
+                })
+            }
+            other => Err(McpError::new(
+                ErrorCode::InternalError,
+                format!("{tool}: internal error: unexpected mode '{other}' from mode parser"),
+            )),
+        }
+    }
+
+    /// The canonical lowercase name (`replace` / `append` / `merge`).
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Replace => "replace",
+            Self::Append => "append",
+            Self::Merge { .. } => "merge",
+        }
+    }
+
+    /// Whether this is a merge.
+    #[must_use]
+    pub const fn is_merge(&self) -> bool {
+        matches!(self, Self::Merge { .. })
+    }
+
+    /// The merge keys, when this is a merge.
+    #[must_use]
+    pub fn merge_keys(&self) -> Option<&[String]> {
+        match self {
+            Self::Merge { keys } => Some(keys),
+            _ => None,
+        }
+    }
+
+    /// Whether the load recreates the table (`true`) or appends to it
+    /// (`false`). Used by the per-format loaders after they have already
+    /// diverted merges to [`merge_via_temp_table`].
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorCode::InvalidArgument`] for [`IngestMode::Merge`], which the
+    /// calling path does not support (e.g. the async batch loaders).
+    pub fn replaces(&self) -> Result<bool, McpError> {
+        match self {
+            Self::Replace => Ok(true),
+            Self::Append => Ok(false),
+            Self::Merge { .. } => Err(McpError::new(
+                ErrorCode::InvalidArgument,
+                "mode=merge is not supported by this ingest path; use load_file for merge",
+            )),
+        }
+    }
+}
+
 /// Controls how data is loaded into a target table.
 #[derive(Debug)]
 pub struct IngestOptions {
     pub table: String,
-    /// `"replace"` drops the existing table first; `"append"` adds rows to
-    /// it; `"merge"` upserts rows by [`Self::merge_key`].
-    pub mode: String,
+    /// Replace, append, or merge (with its keys).
+    pub mode: IngestMode,
     /// When set, bypasses schema inference and uses these exact column types.
     pub schema_override: Option<serde_json::Map<String, Value>>,
-    /// When `mode == "merge"`, the column(s) to match on for upsert. Required
-    /// in merge mode; rejected in any other mode (the per-call site validates
-    /// up-front so the lower ingest paths can stay format-agnostic).
-    pub merge_key: Option<Vec<String>>,
     /// Resolved database alias for fully-qualified SQL. `None` means the
     /// primary (ephemeral); `Some("persistent")` or `Some("user_alias")`
     /// qualifies table references as `"<db>"."public"."<table>"`.
@@ -160,140 +330,62 @@ pub struct IngestResult {
     pub stats: IngestStats,
 }
 
-/// RAII guard that ensures a temp table is dropped on **every** scope
-/// exit — `Ok`, `Err`, *and* panic-unwind. Used by
-/// [`merge_via_temp_table`] so an orphan `__hyperdb_merge_*` table
-/// can't leak into the workspace, even if a per-format ingest path
-/// panics mid-load.
-///
-/// Disarm by calling [`TempTableGuard::disarm`] when the temp has
-/// been renamed away (so the guard isn't dropping a real
-/// user-facing table by name).
-struct TempTableGuard<'a> {
-    engine: &'a Engine,
-    name: String,
-    /// Target database the temp lives in. `None` → primary (unqualified
-    /// drop). `Some(alias)` → emit `"alias"."public"."<name>"` so the
-    /// drop lands in the same DB the temp was created in.
-    target_db: Option<String>,
-    armed: bool,
-}
-
-impl<'a> TempTableGuard<'a> {
-    fn new(engine: &'a Engine, name: String, target_db: Option<String>) -> Self {
-        Self {
-            engine,
-            name,
-            target_db,
-            armed: true,
-        }
-    }
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for TempTableGuard<'_> {
-    fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        // Detect whether the guard is being dropped during normal
-        // unwinding vs. as part of a panic. Including this in the log
-        // lets ops distinguish "expected cleanup" from "we wouldn't
-        // have learned about the temp leak otherwise" — the latter is
-        // the load-bearing case for this guard's existence.
-        let panicking = std::thread::panicking();
-        let quoted = match &self.target_db {
-            Some(db) => format!(
-                "\"{}\".\"public\".\"{}\"",
-                db.replace('"', "\"\""),
-                self.name.replace('"', "\"\""),
-            ),
-            None => format!("\"{}\"", self.name.replace('"', "\"\"")),
-        };
-        let drop_sql = format!("DROP TABLE IF EXISTS {quoted}");
-        match self.engine.execute_command(&drop_sql) {
-            Ok(_) => {
-                if panicking {
-                    // Successful cleanup during a panic-unwind is
-                    // exactly what the guard exists for. Note it at
-                    // info so it shows up in normal log review without
-                    // requiring debug-level capture.
-                    tracing::info!(
-                        tmp = %self.name,
-                        "merge_via_temp_table: dropped temp table during panic unwind"
-                    );
-                }
-            }
-            Err(e) => {
-                // Don't mask the original outcome's error with a
-                // cleanup error — log and continue. The temp table is
-                // benign; the user can drop it manually if it ever
-                // surfaces. `panicking` is included so ops can tell
-                // whether this was a normal-path cleanup failure or
-                // happened while another error was already
-                // propagating.
-                tracing::warn!(
-                    tmp = %self.name,
-                    panicking,
-                    error = %e,
-                    "merge_via_temp_table: failed to drop temp table on guard exit"
-                );
-            }
-        }
-    }
-}
-
 /// Implement `mode = "merge"` for any format by reusing that format's
-/// `replace`-mode load to populate a temp table, then upserting the
-/// target by `merge_key` columns.
+/// `replace`-mode load to populate a staging table, then upserting the
+/// target by the merge key columns.
 ///
 /// `replace_load` is the format-specific entry point (e.g. `ingest_json`,
 /// `ingest_parquet_file`) called with a `replace`-mode [`IngestOptions`]
-/// pointing at a temp table. It must return the [`IngestResult`] for
-/// the temp-table load — caller stitches that into the final result.
+/// pointing at a staging table. It must return the [`IngestResult`] for
+/// the staging load — caller stitches that into the final result.
 ///
 /// Algorithm:
 ///
-/// 1. Validate `merge_key` is set and non-empty.
-/// 2. Load incoming data into a unique temp table via `replace_load`.
-///    A `TempTableGuard` arms here and unwind-safely drops the temp
-///    on every exit (`Ok` / `Err` / panic). Verify the temp actually
-///    materialized — a no-op load would otherwise produce confusing
-///    downstream errors.
-/// 3. If target table doesn't exist, rename the temp table → target,
-///    disarm the guard (the temp is now the target, do **not** drop
-///    it), and return (degenerates to "create").
-/// 4. Read target + temp column metadata. Validate every merge key
-///    exists in both with `types_compatible` type. Reject any
-///    non-key shared column whose type differs.
-/// 5. Auto-`ALTER TABLE ADD COLUMN` for any column present in temp but
-///    not target (added as nullable). When this fires, set
-///    [`IngestStats::schema_changed`] so the caller can issue a
+/// 1. Take the merge keys from [`IngestMode::Merge`] (non-empty).
+/// 2. Load incoming data into a unique staging table via `replace_load`.
+///    A `ScratchTableGuard` arms here and unwind-safely drops the staging
+///    table on every exit (`Ok` / `Err` / panic). Verify the staging table
+///    actually materialized — a no-op load would otherwise produce
+///    confusing downstream errors.
+/// 3. If target table doesn't exist, rename the staging table → target,
+///    disarm the guard (the staging table is now the target, do **not**
+///    drop it), and return (degenerates to "create").
+/// 4. Read target + staging column metadata. Validate every merge key
+///    exists in both with `types_compatible` type. Reject any non-key
+///    shared column whose type differs. Reject up front (before any DDL)
+///    a `NOT NULL` target column that the incoming data does not supply:
+///    the `INSERT` would be refused by Hyper after the matched rows were
+///    already deleted.
+/// 5. `ALTER TABLE ADD COLUMN` (nullable) for any column present in
+///    staging but not target, recording what was added. When this fires,
+///    set [`IngestStats::schema_changed`] so the caller can issue a
 ///    resource-list-changed notification.
-/// 6. `DELETE FROM target USING temp WHERE <key match>` then
-///    `INSERT INTO target (<temp cols>) SELECT <temp cols> FROM temp`.
-///    Columns the target has but temp doesn't are deliberately omitted
-///    from the projection so they fall through to NULL — standard
-///    PostgreSQL semantics for partial inserts.
-/// 7. The `TempTableGuard` drops the temp on scope exit.
+/// 6. In **one transaction**: `DELETE FROM target USING staging WHERE
+///    <key match>` then `INSERT INTO target (<staging cols>) SELECT
+///    <staging cols> FROM staging`. Columns the target has but staging
+///    doesn't are omitted from the projection so they fall through to NULL
+///    (they are guaranteed nullable by the step-4 pre-flight).
+/// 7. The guard drops the staging table on scope exit.
 ///
-/// Atomicity: the DELETE+INSERT pair is **not** wrapped in a transaction.
-/// Hyper auto-commits DDL inside transactions (see module-level note),
-/// and the existing `replace` mode already accepts the same race window,
-/// so this matches precedent rather than introducing a new exposure.
+/// Atomicity: the DELETE+INSERT pair is a real transaction (Hyper rejects
+/// DDL inside a transaction only once it contains DML, and no DDL runs in
+/// step 6), so a failing `INSERT` restores the deleted rows. The step-5
+/// `ADD COLUMN` auto-commits and is outside that transaction; if step 6
+/// fails the columns added in step 5 are dropped again on a best-effort
+/// basis (a failure to do so is logged), so a failed merge leaves the
+/// target's rows and columns unchanged.
 ///
 /// # Errors
 ///
-/// - [`ErrorCode::InvalidArgument`] when `merge_key` is missing/empty,
-///   or when a key column is missing from target or temp, or when a
-///   column type differs between target and temp on a shared column.
+/// - [`ErrorCode::InvalidArgument`] when the merge keys are empty, a key
+///   column is missing from target or staging, a column type differs
+///   between target and staging on a shared column, or a `NOT NULL`
+///   target column is missing from the incoming data.
 /// - [`ErrorCode::InternalError`] if `replace_load` returns `Ok` but
-///   doesn't actually create the temp table (a contract violation).
-/// - Propagates errors from `replace_load`, [`Engine::column_metadata`],
-///   [`Engine::alter_table_add_columns`], or the underlying DELETE /
-///   INSERT statements. The temp table is dropped before the error
+///   doesn't actually create the staging table (a contract violation).
+/// - Propagates errors from `replace_load`, [`Engine::column_metadata_in`],
+///   [`Engine::alter_table_add_columns_in`], or the underlying DELETE /
+///   INSERT statements. The staging table is dropped before the error
 ///   propagates.
 pub fn merge_via_temp_table<F>(
     engine: &mut Engine,
@@ -303,25 +395,16 @@ pub fn merge_via_temp_table<F>(
 where
     F: FnOnce(&mut Engine, &IngestOptions) -> Result<IngestResult, McpError>,
 {
-    // Belt-and-suspenders contract check. Every per-format ingest only
-    // calls this helper when `opts.mode == "merge"`; if a future
-    // refactor adds a third mode that also recurses, this debug-only
-    // assertion catches the mistake before it manifests as silent
-    // misbehavior. The closure also passes `mode = "replace"` to the
-    // recursed call, breaking infinite recursion.
-    debug_assert_eq!(
-        opts.mode, "merge",
-        "merge_via_temp_table called with non-merge mode `{}`",
-        opts.mode
-    );
-
-    // Step 1 — validate merge_key.
-    let keys = opts.merge_key.as_ref().ok_or_else(|| {
-        McpError::new(
-            ErrorCode::InvalidArgument,
-            "merge mode requires merge_key (a column name or list of column names)",
-        )
-    })?;
+    // Step 1 — the merge keys travel inside the mode, already validated
+    // non-empty by `IngestMode::parse`. Every per-format ingest only calls
+    // this helper for a merge; the staging load below passes
+    // `IngestMode::Replace`, which breaks the recursion.
+    let IngestMode::Merge { keys } = &opts.mode else {
+        return Err(McpError::new(
+            ErrorCode::InternalError,
+            "merge_via_temp_table called with a non-merge mode",
+        ));
+    };
     if keys.is_empty() || keys.iter().any(String::is_empty) {
         return Err(McpError::new(
             ErrorCode::InvalidArgument,
@@ -329,65 +412,49 @@ where
         ));
     }
 
-    // Step 2 — load incoming data into a per-call temp table. The name
-    // mixes PID + nanosecond timestamp + a process-local atomic counter.
-    // The counter is what makes this race-free: two parallel merges of
-    // the same target inside one process can land in the same nanosecond
-    // (sub-µs OS timer, or platform-error fallback to `0`), but the
-    // counter is monotonically unique per call. That's enough to keep
-    // each merge's temp table distinct so the `TempTableGuard`s don't
-    // cross-drop one another.
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static MERGE_COUNTER: AtomicU64 = AtomicU64::new(0);
-    let counter = MERGE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    // Squash anything that isn't [A-Za-z0-9_] in the target name to `_`
-    // so the auto-generated identifier is always SQL-safe. The temp
-    // name is never user-visible after a successful merge.
-    let safe_target: String = opts
-        .table
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let tmp = format!(
-        "__hyperdb_merge_{safe_target}_{}_{nanos}_{counter}",
-        std::process::id(),
-    );
-
-    // The temp table lives in the same database as the target. That
-    // way every DML statement below (CREATE TABLE AS, DELETE-USING,
-    // INSERT-SELECT) stays within a single DB — no cross-DB DML — and
-    // the merge works the same regardless of whether the target is
-    // primary, persistent, or any user-attached writable database.
+    // Step 2 — load incoming data into a per-call staging table that lives
+    // in the same database as the target. That way every DML statement
+    // below (DELETE-USING, INSERT-SELECT) stays within a single DB — no
+    // cross-DB DML — and the merge works the same regardless of whether
+    // the target is primary, persistent, or any user-attached writable
+    // database.
+    let tmp = crate::scratch::scratch_name(crate::scratch::MERGE_PREFIX, &opts.table);
     let tmp_opts = IngestOptions {
         table: tmp.clone(),
-        mode: "replace".into(),
+        mode: IngestMode::Replace,
         schema_override: opts.schema_override.clone(),
-        merge_key: None,
         target_db: opts.target_db.clone(),
     };
-    let tmp_result = replace_load(engine, &tmp_opts)?;
+    // Arm the cleanup guard BEFORE the load: Hyper commits DDL immediately,
+    // so a staging load that creates the table and then fails (bad value,
+    // panic) would otherwise leak it. The guard's drop is `DROP TABLE IF
+    // EXISTS`, so it is harmless when the load never got as far as creating it.
+    let mut guard = ScratchTableGuard::new(engine, qualified_table(&tmp_opts), tmp.clone());
+    let tmp_result = replace_load(guard.engine(), &tmp_opts)?;
+    let (result, renamed_into_target) =
+        merge_from_staging(guard.engine(), opts, keys, &tmp, tmp_result)?;
+    if renamed_into_target {
+        // The staging table is now the target; the guard must NOT drop it.
+        guard.disarm();
+    }
+    Ok(result)
+}
 
-    // Arm the cleanup guard immediately after the load so any later
-    // failure (or panic) drops the temp table on unwind. The guard
-    // tracks `target_db` so the DROP lands in the same DB the temp
-    // was created in.
-    let mut guard = TempTableGuard::new(engine, tmp.clone(), opts.target_db.clone());
-
+/// Steps 3–6 of [`merge_via_temp_table`]. Returns the result and whether
+/// the staging table was renamed into the (previously absent) target.
+fn merge_from_staging(
+    engine: &mut Engine,
+    opts: &IngestOptions,
+    keys: &[String],
+    tmp: &str,
+    tmp_result: IngestResult,
+) -> Result<(IngestResult, bool), McpError> {
     // Belt-and-suspenders check: a per-format `replace_load` that returns
     // `Ok` without actually creating the table would surface as opaque
     // "table not found" errors from the catalog read in step 4. Catch
     // it here with a clear message so the contract violation is named
     // outright.
-    if !engine.table_exists_in(opts.target_db.as_deref(), &tmp)? {
+    if !engine.table_exists_in(opts.target_db.as_deref(), tmp)? {
         return Err(McpError::new(
             ErrorCode::InternalError,
             format!(
@@ -397,43 +464,44 @@ where
         ));
     }
 
-    // Step 3 — if target doesn't exist, rename temp → target.
+    let staging_opts = IngestOptions {
+        table: tmp.to_string(),
+        mode: IngestMode::Replace,
+        schema_override: None,
+        target_db: opts.target_db.clone(),
+    };
+    let quoted_tmp = qualified_table(&staging_opts);
+
+    // Step 3 — if target doesn't exist, rename staging → target.
     if !engine.table_exists_in(opts.target_db.as_deref(), &opts.table)? {
-        let qualified_tmp_opts = IngestOptions {
-            table: tmp.clone(),
-            mode: "replace".into(),
-            schema_override: None,
-            merge_key: None,
-            target_db: opts.target_db.clone(),
-        };
-        let quoted_tmp = qualified_table(&qualified_tmp_opts);
         // RENAME TO accepts an unqualified new name (Hyper / PostgreSQL
         // semantics — the schema/database stays the same as the source).
         let escaped_new = opts.table.replace('"', "\"\"");
         engine.execute_command(&format!(
             "ALTER TABLE {quoted_tmp} RENAME TO \"{escaped_new}\""
         ))?;
-        // The temp is now the target; the guard must NOT try to drop it.
-        guard.disarm();
-        return Ok(IngestResult {
-            rows: tmp_result.rows,
-            schema: tmp_result.schema,
-            stats: IngestStats {
-                operation: tmp_result.stats.operation,
-                rows: tmp_result.stats.rows,
-                elapsed_ms: tmp_result.stats.elapsed_ms,
-                bytes_read: tmp_result.stats.bytes_read,
-                bytes_stored: tmp_result.stats.bytes_stored,
-                schema_inference_ms: tmp_result.stats.schema_inference_ms,
-                table: opts.table.clone(),
-                file_format: tmp_result.stats.file_format,
-                warning: tmp_result.stats.warning,
-                // Target was just created from scratch — by definition
-                // the resource list "changed" relative to its prior
-                // absence, so signal a notify.
-                schema_changed: true,
+        return Ok((
+            IngestResult {
+                rows: tmp_result.rows,
+                schema: tmp_result.schema,
+                stats: IngestStats {
+                    operation: tmp_result.stats.operation,
+                    rows: tmp_result.stats.rows,
+                    elapsed_ms: tmp_result.stats.elapsed_ms,
+                    bytes_read: tmp_result.stats.bytes_read,
+                    bytes_stored: tmp_result.stats.bytes_stored,
+                    schema_inference_ms: tmp_result.stats.schema_inference_ms,
+                    table: opts.table.clone(),
+                    file_format: tmp_result.stats.file_format,
+                    warning: tmp_result.stats.warning,
+                    // Target was just created from scratch — by definition
+                    // the resource list "changed" relative to its prior
+                    // absence, so signal a notify.
+                    schema_changed: true,
+                },
             },
-        });
+            true,
+        ));
     }
 
     // Step 4 — schema reconciliation. Read both schemas from the
@@ -442,7 +510,7 @@ where
     // `column_metadata_in` which falls back to the qualified
     // `pg_catalog.pg_attribute` probe.
     let target_cols = engine.column_metadata_in(opts.target_db.as_deref(), &opts.table)?;
-    let tmp_cols = engine.column_metadata_in(opts.target_db.as_deref(), &tmp)?;
+    let tmp_cols = engine.column_metadata_in(opts.target_db.as_deref(), tmp)?;
     // Every key must exist in both, with matching type.
     for k in keys {
         let in_target = target_cols.iter().find(|c| c.name == *k);
@@ -494,9 +562,29 @@ where
             ));
         }
     }
+    // Pre-flight: a NOT NULL target column the incoming data does not
+    // supply cannot be satisfied by the partial-column INSERT (Hyper
+    // refuses it), and by then the matched rows would be deleted.
+    // Refuse before any DDL or DML.
+    let missing_required: Vec<&str> = target_cols
+        .iter()
+        .filter(|t| !t.nullable && !tmp_cols.iter().any(|c| c.name == t.name))
+        .map(|t| t.name.as_str())
+        .collect();
+    if !missing_required.is_empty() {
+        return Err(McpError::new(
+            ErrorCode::InvalidArgument,
+            format!(
+                "merge: NOT NULL column(s) of '{}' missing from the incoming data: {}. \
+                 Include them, or use mode=replace.",
+                opts.table,
+                missing_required.join(", ")
+            ),
+        ));
+    }
 
-    // Step 5 — auto-ALTER for new columns (in temp, not in target).
-    // `alter_table_add_columns` handles the empty-input case by
+    // Step 5 — auto-ALTER for new columns (in staging, not in target).
+    // `alter_table_add_columns_in` handles the empty-input case by
     // returning early without issuing SQL.
     let new_cols: Vec<ColumnSchema> = tmp_cols
         .iter()
@@ -511,18 +599,10 @@ where
     let schema_changed = !new_cols.is_empty();
     engine.alter_table_add_columns_in(opts.target_db.as_deref(), &opts.table, &new_cols)?;
 
-    // Step 6 — DELETE matching rows by key, then INSERT all temp rows.
-    // Both target and temp share `opts.target_db`, so qualifying via
-    // `qualified_table` keeps the DML scoped to one DB.
+    // Step 6 — DELETE matching rows by key, then INSERT all staging rows,
+    // in one transaction. Both tables share `opts.target_db`, so
+    // qualifying via `qualified_table` keeps the DML scoped to one DB.
     let quoted_tgt = qualified_table(opts);
-    let qualified_tmp_opts = IngestOptions {
-        table: tmp.clone(),
-        mode: "replace".into(),
-        schema_override: None,
-        merge_key: None,
-        target_db: opts.target_db.clone(),
-    };
-    let quoted_tmp = qualified_table(&qualified_tmp_opts);
     let key_eq = keys
         .iter()
         .map(|k| {
@@ -532,13 +612,9 @@ where
         .collect::<Vec<_>>()
         .join(" AND ");
     let delete_sql = format!("DELETE FROM {quoted_tgt} t USING {quoted_tmp} s WHERE {key_eq}");
-    engine.execute_command(&delete_sql)?;
-
-    // The INSERT projection is `tmp_cols` (not `target_cols`). Columns
-    // the target has but the incoming temp lacks are deliberately
-    // omitted — PostgreSQL fills them with NULL, which is the right
-    // widening semantic for an upsert that adds new rows for
-    // unmatched keys.
+    // The INSERT projection is the staging columns (not the target's).
+    // Target-only columns are omitted — PostgreSQL fills them with NULL,
+    // which the pre-flight above guarantees they accept.
     let cols_csv = tmp_cols
         .iter()
         .map(|c| format!("\"{}\"", c.name.replace('"', "\"\"")))
@@ -546,28 +622,56 @@ where
         .join(", ");
     let insert_sql =
         format!("INSERT INTO {quoted_tgt} ({cols_csv}) SELECT {cols_csv} FROM {quoted_tmp}");
-    let inserted = engine.execute_command(&insert_sql)?;
+    let merged = engine.execute_in_transaction(|txn| {
+        txn.execute_command(&delete_sql)?;
+        txn.execute_command(&insert_sql)
+    });
+    let inserted = match merged {
+        Ok(n) => n,
+        Err(e) => {
+            // The transaction rolled the rows back; undo the auto-committed
+            // ADD COLUMNs so the failed merge leaves the target's shape
+            // unchanged too.
+            for col in &new_cols {
+                let drop_sql = format!(
+                    "ALTER TABLE {quoted_tgt} DROP COLUMN \"{}\"",
+                    col.name.replace('"', "\"\"")
+                );
+                if let Err(drop_err) = engine.execute_command(&drop_sql) {
+                    tracing::warn!(
+                        table = %opts.table,
+                        column = %col.name,
+                        error = %drop_err,
+                        "merge: failed to drop column added by a merge that then failed"
+                    );
+                }
+            }
+            return Err(e);
+        }
+    };
 
     // Re-read target schema for the result so callers see the post-merge shape.
     let final_schema = engine.column_metadata_in(opts.target_db.as_deref(), &opts.table)?;
 
-    // The guard drops the temp table when it falls out of scope here.
-    Ok(IngestResult {
-        rows: inserted,
-        schema: final_schema,
-        stats: IngestStats {
-            operation: tmp_result.stats.operation,
+    Ok((
+        IngestResult {
             rows: inserted,
-            elapsed_ms: tmp_result.stats.elapsed_ms,
-            bytes_read: tmp_result.stats.bytes_read,
-            bytes_stored: tmp_result.stats.bytes_stored,
-            schema_inference_ms: tmp_result.stats.schema_inference_ms,
-            table: opts.table.clone(),
-            file_format: tmp_result.stats.file_format,
-            warning: tmp_result.stats.warning,
-            schema_changed,
+            schema: final_schema,
+            stats: IngestStats {
+                operation: tmp_result.stats.operation,
+                rows: inserted,
+                elapsed_ms: tmp_result.stats.elapsed_ms,
+                bytes_read: tmp_result.stats.bytes_read,
+                bytes_stored: tmp_result.stats.bytes_stored,
+                schema_inference_ms: tmp_result.stats.schema_inference_ms,
+                table: opts.table.clone(),
+                file_format: tmp_result.stats.file_format,
+                warning: tmp_result.stats.warning,
+                schema_changed,
+            },
         },
-    })
+        false,
+    ))
 }
 
 /// Compare two Hyper type strings for merge compatibility.
@@ -578,9 +682,9 @@ where
 /// whatever the Rust inferrer emitted (`"INT"`, `"DOUBLE
 /// PRECISION"`, `"NUMERIC(15, 2)"`). Comparing through
 /// [`crate::schema::map_hyper_type`] collapses all known aliases
-/// into a single [`SqlType`].
+/// into a single [`hyperdb_api::SqlType`].
 ///
-/// If *either* side fails to parse (returns `None`), we err on the
+/// If *either* side fails to parse (returns `Err`), we err on the
 /// side of permissive: treat the pair as compatible and let Hyper
 /// itself enforce at INSERT time. This avoids false-rejecting
 /// types the Rust mapper doesn't know about (future Hyper types,
@@ -595,7 +699,7 @@ fn types_compatible(a: &str, b: &str) -> bool {
         crate::schema::map_hyper_type(a),
         crate::schema::map_hyper_type(b),
     ) {
-        (Some(sa), Some(sb)) => sa == sb,
+        (Ok(sa), Ok(sb)) => sa == sb,
         _ => true,
     }
 }
@@ -621,7 +725,7 @@ pub fn ingest_json(
     json_str: &str,
     opts: &IngestOptions,
 ) -> Result<IngestResult, McpError> {
-    if opts.mode == "merge" {
+    if opts.mode.is_merge() {
         return merge_via_temp_table(engine, opts, |engine, tmp_opts| {
             ingest_json(engine, json_str, tmp_opts)
         });
@@ -648,7 +752,7 @@ pub fn ingest_json(
 
     // All mutations run inside a transaction so a partial failure leaves
     // zero side effects.
-    let is_replace = opts.mode != "append";
+    let is_replace = opts.mode.replaces()?;
     let qualified = qualified_table(opts);
     let row_count = engine.execute_in_transaction(|txn| {
         txn.create_table_in(&opts.table, &columns, is_replace, opts.target_db.as_deref())?;
@@ -723,7 +827,7 @@ pub fn ingest_csv(
     csv_text: &str,
     opts: &IngestOptions,
 ) -> Result<IngestResult, McpError> {
-    if opts.mode == "merge" {
+    if opts.mode.is_merge() {
         return merge_via_temp_table(engine, opts, |engine, tmp_opts| {
             ingest_csv(engine, csv_text, tmp_opts)
         });
@@ -784,9 +888,9 @@ pub fn ingest_csv(
         hyperdb_api::escape_string_literal(canonical_temp.to_str().unwrap_or(""))
     );
 
-    // Create table + COPY inside one transaction so that a COPY failure also
-    // unwinds the table creation.
-    let is_replace = opts.mode != "append";
+    // Create table + COPY inside one transaction. Hyper commits DDL
+    // immediately, so a COPY failure rolls back the rows but not the CREATE.
+    let is_replace = opts.mode.replaces()?;
     let row_count = engine.execute_in_transaction(|txn| {
         txn.create_table_in(&opts.table, &columns, is_replace, opts.target_db.as_deref())?;
         txn.execute_command(&copy_sql)
@@ -840,7 +944,7 @@ pub fn ingest_csv_file(
     path: &str,
     opts: &IngestOptions,
 ) -> Result<IngestResult, McpError> {
-    if opts.mode == "merge" {
+    if opts.mode.is_merge() {
         return merge_via_temp_table(engine, opts, |engine, tmp_opts| {
             ingest_csv_file(engine, path, tmp_opts)
         });
@@ -880,7 +984,7 @@ pub fn ingest_csv_file(
         hyperdb_api::escape_string_literal(canonical.to_str().unwrap_or(""))
     );
 
-    let is_replace = opts.mode != "append";
+    let is_replace = opts.mode.replaces()?;
     let row_count = engine.execute_in_transaction(|txn| {
         txn.create_table_in(&opts.table, &columns, is_replace, opts.target_db.as_deref())?;
         txn.execute_command(&copy_sql)
@@ -968,7 +1072,7 @@ pub async fn ingest_csv_file_async(
         hyperdb_api::escape_string_literal(canonical.to_str().unwrap_or(""))
     );
 
-    let is_replace = opts.mode != "append";
+    let is_replace = opts.mode.replaces()?;
 
     let txn = conn.transaction().await.map_err(McpError::from)?;
     let inner: Result<u64, McpError> = async {
@@ -1115,7 +1219,7 @@ pub async fn ingest_json_async(
         return Err(McpError::new(ErrorCode::EmptyData, "JSON array is empty"));
     }
 
-    let is_replace = opts.mode != "append";
+    let is_replace = opts.mode.replaces()?;
     let qualified = qualified_table(opts);
 
     let txn = conn.transaction().await.map_err(McpError::from)?;
@@ -1254,17 +1358,10 @@ pub(crate) async fn create_table_async(
             "No columns to create table from",
         ));
     }
-    for col in columns {
-        if crate::schema::map_hyper_type(&col.hyper_type).is_none() {
-            return Err(McpError::new(
-                ErrorCode::SchemaMismatch,
-                format!(
-                    "Unknown type '{}' for column '{}'",
-                    col.hyper_type, col.name
-                ),
-            ));
-        }
-    }
+    let type_sqls: Vec<String> = columns
+        .iter()
+        .map(|col| crate::schema::column_type_sql(&col.hyper_type, &col.name))
+        .collect::<Result<_, _>>()?;
 
     let quoted_table = match target_db {
         Some(db) => {
@@ -1282,14 +1379,10 @@ pub(crate) async fn create_table_async(
 
     let col_defs: Vec<String> = columns
         .iter()
-        .map(|c| {
+        .zip(&type_sqls)
+        .map(|(c, ty)| {
             let nullable = if c.nullable { "" } else { " NOT NULL" };
-            format!(
-                "\"{}\" {}{}",
-                c.name.replace('"', "\"\""),
-                c.hyper_type,
-                nullable
-            )
+            format!("\"{}\" {ty}{nullable}", c.name.replace('"', "\"\""))
         })
         .collect();
     let create_sql = format!(

@@ -23,9 +23,8 @@ fn full_pipeline_json_to_query() {
     ]"#;
     let opts = IngestOptions {
         table: "orders".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     ingest_json(&mut te.engine, orders, &opts).unwrap();
@@ -36,9 +35,8 @@ fn full_pipeline_json_to_query() {
     ]"#;
     let opts = IngestOptions {
         table: "customers".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     ingest_json(&mut te.engine, customers, &opts).unwrap();
@@ -60,9 +58,8 @@ fn full_pipeline_csv_ingest_and_export() {
     let csv_data = "product,quantity,price\nWidget,100,9.99\nGadget,50,19.99\n";
     let opts = IngestOptions {
         table: "products".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     ingest_csv(&mut te.engine, csv_data, &opts).unwrap();
@@ -79,6 +76,7 @@ fn full_pipeline_csv_ingest_and_export() {
         path: export_path_str.into(),
         format: "csv".into(),
         overwrite: true,
+        protected_paths: Vec::new(),
         format_options: None,
         source_db: None,
     };
@@ -142,16 +140,14 @@ fn append_mode_accumulates_data() {
 
     let opts_replace = IngestOptions {
         table: "acc".into(),
-        mode: "replace".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Replace,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
     let opts_append = IngestOptions {
         table: "acc".into(),
-        mode: "append".into(),
+        mode: hyperdb_mcp::ingest::IngestMode::Append,
         schema_override: None,
-        merge_key: None,
         target_db: None,
     };
 

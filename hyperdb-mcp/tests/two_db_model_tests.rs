@@ -8,13 +8,13 @@ use hyperdb_mcp::engine::Engine;
 use hyperdb_mcp::error::ErrorCode;
 use tempfile::TempDir;
 
-/// `Engine::new(Some(path))` attaches the file at `path` as `"persistent"`
+/// `Engine::new_no_daemon(Some(path))` attaches the file at `path` as `"persistent"`
 /// and reports `has_persistent() = true`.
 #[test]
 fn engine_with_persistent_path_attaches_under_persistent_alias() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("ws.hyper");
-    let engine = Engine::new(Some(path.to_str().unwrap().into())).unwrap();
+    let engine = Engine::new_no_daemon(Some(path.to_str().unwrap().into())).unwrap();
     assert!(engine.has_persistent());
     // The persistent attachment is reachable via fully-qualified SQL —
     // a CREATE TABLE there should succeed and the table visible via
@@ -31,11 +31,11 @@ fn engine_with_persistent_path_attaches_under_persistent_alias() {
     assert_eq!(rows.len(), 1);
 }
 
-/// `Engine::new(None)` creates an ephemeral-only engine — no persistent
+/// `Engine::new_no_daemon(None)` creates an ephemeral-only engine — no persistent
 /// attachment, no `"persistent"` alias.
 #[test]
 fn engine_without_persistent_path_is_ephemeral_only() {
-    let engine = Engine::new(None).unwrap();
+    let engine = Engine::new_no_daemon(None).unwrap();
     assert!(!engine.has_persistent());
     // Querying the persistent alias must fail because nothing is attached
     // under that name.
@@ -51,8 +51,8 @@ fn engine_without_persistent_path_is_ephemeral_only() {
 /// collide on the same temp file.
 #[test]
 fn ephemeral_paths_are_unique_per_engine() {
-    let e1 = Engine::new(None).unwrap();
-    let e2 = Engine::new(None).unwrap();
+    let e1 = Engine::new_no_daemon(None).unwrap();
+    let e2 = Engine::new_no_daemon(None).unwrap();
     assert_ne!(
         e1.ephemeral_path(),
         e2.ephemeral_path(),
@@ -70,7 +70,7 @@ fn persistent_writes_survive_engine_recreate() {
     let path_str = path.to_str().unwrap().to_string();
 
     {
-        let engine = Engine::new(Some(path_str.clone())).unwrap();
+        let engine = Engine::new_no_daemon(Some(path_str.clone())).unwrap();
         engine
             .execute_command("CREATE TABLE \"persistent\".\"public\".\"keepers\" (n INT)")
             .unwrap();
@@ -81,7 +81,7 @@ fn persistent_writes_survive_engine_recreate() {
             .unwrap();
     }
 
-    let engine = Engine::new(Some(path_str)).unwrap();
+    let engine = Engine::new_no_daemon(Some(path_str)).unwrap();
     let rows = engine
         .execute_query_to_json("SELECT n FROM \"persistent\".\"public\".\"keepers\" ORDER BY n")
         .unwrap();
@@ -99,7 +99,7 @@ fn ephemeral_writes_are_discarded_on_drop() {
     let path_str = path.to_str().unwrap().to_string();
 
     {
-        let engine = Engine::new(Some(path_str.clone())).unwrap();
+        let engine = Engine::new_no_daemon(Some(path_str.clone())).unwrap();
         // Default-target: writes go to ephemeral.
         engine
             .execute_command("CREATE TABLE scratch (id INT)")
@@ -111,7 +111,7 @@ fn ephemeral_writes_are_discarded_on_drop() {
 
     // New engine, same persistent file. The persistent attachment exists
     // but `scratch` was in the previous engine's ephemeral primary.
-    let engine = Engine::new(Some(path_str)).unwrap();
+    let engine = Engine::new_no_daemon(Some(path_str)).unwrap();
     // Probe: scratch should not be visible. We query through the engine's
     // own connection (ephemeral) and through persistent — neither should
     // see it.
@@ -132,7 +132,7 @@ fn ephemeral_writes_are_discarded_on_drop() {
 fn resolve_target_db_handles_persistent_presence() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("ws.hyper");
-    let with_persistent = Engine::new(Some(path.to_str().unwrap().into())).unwrap();
+    let with_persistent = Engine::new_no_daemon(Some(path.to_str().unwrap().into())).unwrap();
     assert_eq!(
         with_persistent
             .resolve_target_db(Some("persistent"))
@@ -144,7 +144,7 @@ fn resolve_target_db_handles_persistent_presence() {
         with_persistent.primary_db_name()
     );
 
-    let ephemeral_only = Engine::new(None).unwrap();
+    let ephemeral_only = Engine::new_no_daemon(None).unwrap();
     assert_eq!(
         ephemeral_only.resolve_target_db(None).unwrap(),
         ephemeral_only.primary_db_name()
@@ -161,7 +161,7 @@ fn resolve_target_db_handles_persistent_presence() {
 fn engine_status_reports_both_paths() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("ws.hyper");
-    let engine = Engine::new(Some(path.to_str().unwrap().into())).unwrap();
+    let engine = Engine::new_no_daemon(Some(path.to_str().unwrap().into())).unwrap();
     let status = engine.status().unwrap();
     assert!(status["has_persistent"].as_bool().unwrap());
     assert!(status["ephemeral_path"].is_string());
@@ -171,7 +171,7 @@ fn engine_status_reports_both_paths() {
 /// In ephemeral-only mode, status reflects no persistent attachment.
 #[test]
 fn engine_status_ephemeral_only_reports_no_persistent() {
-    let engine = Engine::new(None).unwrap();
+    let engine = Engine::new_no_daemon(None).unwrap();
     let status = engine.status().unwrap();
     assert!(!status["has_persistent"].as_bool().unwrap());
     assert!(status["ephemeral_path"].is_string());
@@ -184,7 +184,7 @@ fn engine_status_ephemeral_only_reports_no_persistent() {
 fn catalog_presence_probe_is_cached_per_db() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("ws.hyper");
-    let engine = Engine::new(Some(path.to_str().unwrap().into())).unwrap();
+    let engine = Engine::new_no_daemon(Some(path.to_str().unwrap().into())).unwrap();
 
     let probe_count = std::sync::atomic::AtomicUsize::new(0);
     let probe = |_e: &Engine| -> Result<bool, hyperdb_mcp::error::McpError> {
@@ -219,7 +219,7 @@ fn catalog_presence_probe_is_cached_per_db() {
 fn clear_catalog_cache_for_invalidates_alias_entry() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("ws.hyper");
-    let engine = Engine::new(Some(path.to_str().unwrap().into())).unwrap();
+    let engine = Engine::new_no_daemon(Some(path.to_str().unwrap().into())).unwrap();
 
     let probe_count = std::sync::atomic::AtomicUsize::new(0);
     let probe = |_e: &Engine| -> Result<bool, hyperdb_mcp::error::McpError> {

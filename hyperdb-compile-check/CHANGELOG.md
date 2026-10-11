@@ -12,6 +12,18 @@ surface, and consumers should depend on `hyperdb-api-derive` instead.
 
 ## [Unreleased]
 
+### Fixed
+
+- **SQL containing `$N` placeholders is now validated.** The dry-run executed
+  the statement with nothing bound, so Hyper rejected every parameterized
+  query with "expected to have 0 parameter(s)". Such queries are now
+  prepared with one unspecified-type parameter per placeholder.
+- **No more false "not registered" errors in rust-analyzer.** Its shared
+  proc-macro server can hold a non-empty registry that lacks the struct under
+  the cursor, so the empty-registry skip was not enough. Validation now also
+  skips unregistered-struct/table diagnostics when expanding inside
+  `rust-analyzer-proc-macro-srv`; `cargo` builds are unchanged.
+
 ## [1.0.0-rc.3] - 2026-09-07
 
 ### Fixed
@@ -32,8 +44,6 @@ surface, and consumers should depend on `hyperdb-api-derive` instead.
 
 ### Changed
 
-- **BREAKING:** the minimum supported Rust version is now **1.88**, up from
+- The minimum supported Rust version is now **1.88**, up from
   1.81, and the crate is compiled with **edition 2024**. 1.88 is the version
   Red Hat Enterprise Linux 9.7 ships as `rust-toolset`.
-- The `arrow` dependency moved from **58** to **59**, in lockstep with
-  `hyperdb-api`.

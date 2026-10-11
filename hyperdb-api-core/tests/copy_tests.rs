@@ -413,3 +413,142 @@ fn test_copy_in_text_with_special_chars() {
 
     client.close().expect("Failed to close");
 }
+
+/// Dropping a `CopyInWriter` without `finish()`/`cancel()` must not leave the
+/// server in COPY IN: it sends `CopyFail` and drains to `ReadyForQuery`.
+#[test]
+fn test_copy_in_dropped_writer_leaves_connection_usable() {
+    let server = TestServer::new().expect("Failed to create test server");
+    let client = server.connect().expect("Failed to connect");
+
+    client
+        .exec("CREATE TABLE test_copy_drop (id INT NOT NULL, name TEXT NOT NULL)")
+        .expect("Failed to create table");
+
+    let mut buf = BytesMut::new();
+    copy::write_header(&mut buf);
+    for i in 0..10 {
+        copy::write_i32_not_null(&mut buf, i);
+        copy::write_varbinary_not_null(&mut buf, b"x");
+    }
+
+    {
+        let mut writer = client
+            .copy_in("test_copy_drop", &["id", "name"])
+            .expect("Failed to start COPY");
+        writer.send(&buf).expect("Failed to send data");
+        writer.flush().expect("Failed to flush");
+        // Push a large flushed volume (~6 MB of valid rows) through too, so the
+        // teardown has real in-flight COPY data to cope with.
+        let mut big = BytesMut::new();
+        for i in 0..400_000 {
+            copy::write_i32_not_null(&mut big, i);
+            copy::write_varbinary_not_null(&mut big, b"x");
+        }
+        writer.send(&big).expect("Failed to send large volume");
+        writer.flush().expect("Failed to flush large volume");
+        // writer dropped here without finish()/cancel()
+    }
+
+    // Simple-protocol statement must work (previously: "unexpected protocol package: 'Q'").
+    let rows = client
+        .query("SELECT COUNT(*) FROM test_copy_drop")
+        .expect("query after dropped COPY writer must succeed");
+    assert_eq!(
+        rows[0].get_i64(0),
+        Some(0),
+        "aborted COPY must insert nothing"
+    );
+
+    // A second request must not be desynchronized by a stray ReadyForQuery.
+    let rows = client
+        .query("SELECT 41 + 1")
+        .expect("follow-up query must succeed");
+    assert_eq!(rows[0].get_i32(0), Some(42));
+    client
+        .exec("INSERT INTO test_copy_drop VALUES (1, 'a')")
+        .expect("follow-up command must succeed");
+
+    client.close().expect("Failed to close");
+}
+
+// =============================================================================
+// Server rejects data mid-COPY, then the writer is dropped / cancelled
+// =============================================================================
+
+/// Builds a HyperBinary payload for `(id INT NOT NULL, name TEXT NOT NULL)`
+/// whose row `bad_row` carries invalid UTF-8, followed by
+/// `total_rows - bad_row` valid rows. The server rejects the COPY once it
+/// parses the bad row, while the client is still writing.
+fn copy_payload_with_bad_row(total_rows: i32, bad_row: i32) -> BytesMut {
+    let mut buf = BytesMut::new();
+    copy::write_header(&mut buf);
+    for i in 0..total_rows {
+        if i == bad_row {
+            // Invalid UTF-8 in a TEXT column: the server rejects it while
+            // parsing, long before the end of the stream.
+            copy::write_i32_not_null(&mut buf, i);
+            copy::write_varbinary_not_null(&mut buf, &[0xFF, 0xFE, 0xFD]);
+        } else {
+            copy::write_i32_not_null(&mut buf, i);
+            copy::write_varbinary_not_null(&mut buf, b"x");
+        }
+    }
+    buf
+}
+
+/// Runs a follow-up that detects a stray `ReadyForQuery` / `ErrorResponse`:
+/// several sequential requests must each return their own answer.
+fn assert_connection_in_sync(client: &hyperdb_api_core::client::Client, table: &str) {
+    for expected in [42, 43, 44] {
+        let rows = client
+            .query(&format!("SELECT {expected}"))
+            .expect("follow-up query must succeed");
+        assert_eq!(rows[0].get_i32(0), Some(expected));
+    }
+    let rows = client
+        .query(&format!("SELECT COUNT(*) FROM {table}"))
+        .expect("count query must succeed");
+    assert_eq!(
+        rows[0].get_i64(0),
+        Some(0),
+        "rejected COPY must insert nothing"
+    );
+}
+
+fn copy_rejected_mid_stream(finish_with_cancel: bool) {
+    let server = TestServer::new().expect("Failed to create test server");
+    let client = server.connect().expect("Failed to connect");
+    client
+        .exec("CREATE TABLE test_copy_reject (id INT NOT NULL, name TEXT NOT NULL)")
+        .expect("Failed to create table");
+
+    // 64,001 rows with the corruption at row 10.
+    let payload = copy_payload_with_bad_row(64_001, 10);
+
+    let mut writer = client
+        .copy_in("test_copy_reject", &["id", "name"])
+        .expect("Failed to start COPY");
+    // The server may reject mid-write; a send error here is acceptable, the
+    // point is the state afterwards.
+    let _ = writer.send(&payload);
+    let _ = writer.flush();
+    if finish_with_cancel {
+        let _ = writer.cancel("test cancel");
+    } else {
+        drop(writer);
+    }
+
+    assert_connection_in_sync(&client, "test_copy_reject");
+    client.close().expect("Failed to close");
+}
+
+#[test]
+fn test_copy_in_rejected_mid_stream_then_drop_leaves_connection_in_sync() {
+    copy_rejected_mid_stream(false);
+}
+
+#[test]
+fn test_copy_in_rejected_mid_stream_then_cancel_leaves_connection_in_sync() {
+    copy_rejected_mid_stream(true);
+}
