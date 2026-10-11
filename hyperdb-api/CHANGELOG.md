@@ -124,6 +124,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- `Connection::copy_database` and `AsyncConnection::copy_database` now emit `CREATE DATABASE <dst> FROM <src>`; the `COPY DATABASE ... TO ...` they sent before is not Hyper grammar and always failed. The source must not be attached read-write. `close()` on a gRPC connection that has a database no longer tries `DETACH DATABASE` (rejected as read-only), so it no longer returns a spurious error.
 - Cancelling or dropping an `Inserter` after an auto-flush no longer leaves the connection mid-COPY: `cancel` now sends `CopyFail` and returns the connection to `ReadyForQuery`. `import_text` also cancels the COPY when reading the source fails.
 - `MappedInserter` no longer deadlocks on `cancel` after an auto-flush, and its staging table is dropped on every path (execute, cancel, error, drop). Staging tables are named `_hyper_staging_{pid}_{n}`, so two mapped inserters on one connection no longer collide.
 - On the sync path, `fetch_one`, `fetch_optional`, `fetch_scalar`, `fetch_optional_scalar`, `query_count`, `first_row` and the `QueryAs`/`QueryScalar` single-row fetchers used to leave the unread remainder of a multi-chunk (more than 65,536 rows) result on the wire, so the next request failed with "connection is desynchronized". They now read only the first chunk and drop the stream, whose `Drop` cancels the query and discards the backlog.

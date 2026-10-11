@@ -861,18 +861,22 @@ impl AsyncConnection {
         Ok(())
     }
 
-    /// Copies a database file to a new path (async).
+    /// Copies a database file to a new path (async) using
+    /// `CREATE DATABASE <destination> FROM <source>`.
+    ///
+    /// The source must not be attached read-write (see
+    /// [`Connection::copy_database`](crate::Connection::copy_database)).
     ///
     /// # Errors
     ///
     /// Returns [`Error::Server`] if the server rejects the
-    /// `COPY DATABASE` statement — e.g. the source is not attached or the
-    /// destination path is not writable.
+    /// `CREATE DATABASE ... FROM ...` statement — e.g. the source is still
+    /// attached read-write or the destination path is not writable.
     pub async fn copy_database(&self, source: &str, destination: &str) -> Result<()> {
         let sql = format!(
-            "COPY DATABASE {} TO {}",
-            escape_sql_path(source),
-            escape_sql_path(destination)
+            "CREATE DATABASE {} FROM {}",
+            escape_sql_path(destination),
+            escape_sql_path(source)
         );
         self.execute_command(&sql).await?;
         Ok(())
@@ -1106,7 +1110,11 @@ impl AsyncConnection {
     ///   attached database could not be detached but the transport close
     ///   itself succeeded.
     pub async fn close(self) -> Result<()> {
-        let detach_err = if let Some(ref db_path) = self.database {
+        // gRPC is read-only and stateless: nothing was attached by this
+        // connection, and `DETACH DATABASE` would be rejected, so skip it.
+        let detach_err = if let (Some(db_path), true) =
+            (self.database.as_ref(), self.transport.supports_writes())
+        {
             let db_alias = std::path::Path::new(db_path)
                 .file_stem()
                 .and_then(|s| s.to_str())

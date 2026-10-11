@@ -1672,9 +1672,13 @@ impl Connection {
         crate::ServerVersion::parse(&version_str)
     }
 
-    /// Copies a database file to a new path.
+    /// Copies a database file to a new path using
+    /// `CREATE DATABASE <destination> FROM <source>`.
     ///
-    /// The source database must be attached to this connection.
+    /// The source database file must **not** be attached read-write: `hyperd`
+    /// rejects the copy while the source is loaded in `readwrite` mode, so
+    /// detach it (or copy it from a connection that never attached it) first.
+    /// The destination is created but not attached.
     ///
     /// # Example
     ///
@@ -1683,7 +1687,8 @@ impl Connection {
     ///
     /// fn main() -> Result<()> {
     ///     let hyper = HyperProcess::new(None, None)?;
-    ///     let conn = Connection::new(&hyper, "source.hyper", CreateMode::DoNotCreate)?;
+    ///     // A connection to a scratch database; `source.hyper` is not attached.
+    ///     let conn = Connection::new(&hyper, "scratch.hyper", CreateMode::CreateIfNotExists)?;
     ///     conn.copy_database("source.hyper", "backup.hyper")?;
     ///     Ok(())
     /// }
@@ -1692,13 +1697,14 @@ impl Connection {
     /// # Errors
     ///
     /// Returns [`Error::Server`] if the server rejects the
-    /// `COPY DATABASE` statement — e.g. the source is not attached, the
-    /// destination path is not writable, or it already exists.
+    /// `CREATE DATABASE ... FROM ...` statement — e.g. the source is still
+    /// attached read-write, the destination path is not writable, or it
+    /// already exists.
     pub fn copy_database(&self, source: &str, destination: &str) -> Result<()> {
         let sql = format!(
-            "COPY DATABASE {} TO {}",
-            escape_sql_path(source),
-            escape_sql_path(destination)
+            "CREATE DATABASE {} FROM {}",
+            escape_sql_path(destination),
+            escape_sql_path(source)
         );
         self.execute_command(&sql)?;
         Ok(())
@@ -2011,7 +2017,12 @@ impl Connection {
     pub fn close(self) -> Result<()> {
         // Detach the attached database to ensure files are flushed and released.
         // Always attempt close, even if detach fails.
-        let detach_err = if let Some(ref db_path) = self.database {
+        // gRPC is read-only and stateless: nothing was attached by this
+        // connection, and `DETACH DATABASE` would be rejected, so skip it.
+        let detach_err = if let (Some(db_path), false) = (
+            self.database.as_ref(),
+            matches!(self.transport, Transport::Grpc(_)),
+        ) {
             let db_alias = std::path::Path::new(db_path)
                 .file_stem()
                 .and_then(|s| s.to_str())
