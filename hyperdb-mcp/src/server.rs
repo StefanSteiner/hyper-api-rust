@@ -6450,3 +6450,66 @@ mod engine_mutex_poison_tests {
         assert_eq!(rows[0]["one"].as_i64(), Some(1));
     }
 }
+
+/// `create_table_as` must drop a target it created when the CTAS fails at run
+/// time, but must leave a pre-existing target alone when the failure is
+/// `42P07` (duplicate table): that table is not ours to drop.
+#[cfg(test)]
+mod create_table_as_tests {
+    use super::*;
+
+    fn table_count(engine: &Engine, name: &str) -> usize {
+        engine
+            .execute_query_to_json(&format!(
+                "SELECT tablename FROM pg_catalog.pg_tables WHERE tablename = '{name}'"
+            ))
+            .expect("catalog probe")
+            .len()
+    }
+
+    #[test]
+    fn duplicate_target_error_does_not_drop_the_existing_table() {
+        let engine = Engine::new_no_daemon(None).expect("engine");
+        engine
+            .execute_command("CREATE TABLE ctas_existing AS SELECT 7 AS v")
+            .expect("seed existing target");
+
+        let err = create_table_as(&engine, "ctas_existing", "SELECT 1 AS v")
+            .expect_err("CTAS onto an existing table must fail");
+        assert!(
+            err.message.starts_with("server error (42P07)"),
+            "expected a 42P07 duplicate_table error, got: {}",
+            err.message
+        );
+
+        // The 42P07 skip: the pre-existing table and its data survive.
+        assert_eq!(table_count(&engine, "ctas_existing"), 1);
+        let rows = engine
+            .execute_query_to_json("SELECT v FROM ctas_existing")
+            .expect("existing table still readable");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["v"].as_i64(), Some(7));
+    }
+
+    #[test]
+    fn runtime_failure_drops_the_partially_created_target() {
+        let engine = Engine::new_no_daemon(None).expect("engine");
+
+        let err = create_table_as(
+            &engine,
+            "ctas_partial",
+            "SELECT 1 / (g - g) AS v FROM generate_series(1, 3) AS t(g)",
+        )
+        .expect_err("division by zero must fail the CTAS");
+        assert!(
+            !err.message.starts_with("server error (42P07)"),
+            "unexpected duplicate_table error: {}",
+            err.message
+        );
+        assert_eq!(
+            table_count(&engine, "ctas_partial"),
+            0,
+            "a failed CTAS must not leave its target behind"
+        );
+    }
+}
