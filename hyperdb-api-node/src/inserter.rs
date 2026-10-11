@@ -159,11 +159,11 @@ impl RowInserter {
                         // JS Number → Int32 column: caller explicitly chose
                         // the `int32Columns` bucket, so narrowing the f64
                         // element is the documented behavior of this path.
-                        #[expect(
-                            clippy::cast_possible_truncation,
-                            reason = "caller placed value in `int32Columns` → value is asserted to fit in i32; narrowing f64 is the documented coercion for this columnar path"
-                        )]
-                        let narrowed = arr[row_idx] as i32;
+                        let narrowed = narrow_i32(
+                            f64_to_i64(arr[row_idx])
+                                .map_err(|e| Error::from_reason(e.to_string()))?,
+                        )
+                        .map_err(|e| Error::from_reason(e.to_string()))?;
                         row.push(InsertValue::I32(narrowed));
                     } else {
                         row.push(InsertValue::Null);
@@ -180,11 +180,8 @@ impl RowInserter {
                         // integer precision, so the caller is responsible for
                         // providing in-range values; this is the documented
                         // behavior of the `int64Columns` path.
-                        #[expect(
-                            clippy::cast_possible_truncation,
-                            reason = "caller placed value in `int64Columns` → value is asserted to fit in i64; narrowing f64 is the documented coercion for this columnar path"
-                        )]
-                        let narrowed = arr[row_idx] as i64;
+                        let narrowed = f64_to_i64(arr[row_idx])
+                            .map_err(|e| Error::from_reason(e.to_string()))?;
                         row.push(InsertValue::I64(narrowed));
                     } else {
                         row.push(InsertValue::Null);
@@ -304,6 +301,31 @@ fn narrow_i32(v: i64) -> std::result::Result<i32, hyperdb_api::Error> {
     })
 }
 
+/// Converts a JS number to `i64` for an integer destination column, or fails.
+///
+/// A bare `f64 as i64` saturates out-of-range values and maps `NaN` to `0`,
+/// both of which are valid encodings of the wrong number. Fractional parts are
+/// truncated toward zero, as before.
+fn f64_to_i64(n: f64) -> std::result::Result<i64, hyperdb_api::Error> {
+    // `i64::MIN as f64` is exact; `i64::MAX as f64` rounds up to 2^63, so the
+    // upper bound is exclusive.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "bounds of the i64 range compared against an f64; 2^63 is exactly representable"
+    )]
+    let in_range = n >= i64::MIN as f64 && n < i64::MAX as f64;
+    if !in_range {
+        return Err(hyperdb_api::Error::invalid_operation(format!(
+            "value {n} is not a finite number that fits an integer column"
+        )));
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "guarded above: `n` is finite and within the i64 range; truncating the fraction is the documented coercion"
+    )]
+    Ok(n as i64)
+}
+
 /// Encodes an `InsertValue` according to the destination column's SQL type.
 ///
 /// The JS value was classified by `js_value_to_insert_value` (which bins based
@@ -353,9 +375,9 @@ fn add_value_typed(
             _ => chunk.add_i64(*n),
         },
         InsertValue::F64(n) => match col_type {
-            Some(hyperdb_api::SqlType::Int) => chunk.add_i32(*n as i32),
-            Some(hyperdb_api::SqlType::SmallInt) => chunk.add_i16(*n as i16),
-            Some(hyperdb_api::SqlType::BigInt) => chunk.add_i64(*n as i64),
+            Some(hyperdb_api::SqlType::Int) => chunk.add_i32(narrow_i32(f64_to_i64(*n)?)?),
+            Some(hyperdb_api::SqlType::SmallInt) => chunk.add_i16(narrow_i16(f64_to_i64(*n)?)?),
+            Some(hyperdb_api::SqlType::BigInt) => chunk.add_i64(f64_to_i64(*n)?),
             Some(hyperdb_api::SqlType::Float) => chunk.add_f32(*n as f32),
             _ => chunk.add_f64(*n),
         },
@@ -469,6 +491,25 @@ fn js_value_to_insert_value(val: Unknown) -> Result<InsertValue> {
         _ => {
             let s = val.coerce_to_string()?.into_utf8()?.as_str()?.to_string();
             Ok(InsertValue::String(s))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::f64_to_i64;
+
+    #[test]
+    fn f64_to_i64_truncates_in_range_values() {
+        assert_eq!(f64_to_i64(3.9).unwrap(), 3);
+        assert_eq!(f64_to_i64(-3.9).unwrap(), -3);
+        assert_eq!(f64_to_i64(-9_223_372_036_854_775_808.0).unwrap(), i64::MIN);
+    }
+
+    #[test]
+    fn f64_to_i64_rejects_nan_infinity_and_out_of_range() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 9.3e18, -9.3e18] {
+            assert!(f64_to_i64(bad).is_err(), "{bad} must be rejected");
         }
     }
 }

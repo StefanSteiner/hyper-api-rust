@@ -64,6 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+* Inserting a JS number into an integer column (`addRow` with a float, or `addColumnar`) now throws when the value is `NaN`, infinite, or outside the column's range. It used to saturate or become `0` silently.
 * `ConnectionPool.acquire()` no longer exceeds `max` under concurrent calls:
   in-flight connection attempts now reserve a slot (released on failure), where
   before only established connections were counted.
