@@ -47,6 +47,15 @@ use super::health::PONG_TOKEN;
 /// Budget for one probe (connect, or the whole request/reply exchange).
 const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// Budget for the connect step of a probe. Windows reports a refused loopback
+/// connection only after its SYN retries, about two seconds, so a shorter
+/// budget turns "nothing listens" into a timeout, which reads as "unknown" and
+/// keeps a stale record (and local mode) forever.
+#[cfg(windows)]
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+#[cfg(not(windows))]
+const CONNECT_TIMEOUT: Duration = PROBE_TIMEOUT;
+
 /// Polling interval while waiting for the port to go quiet.
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -256,7 +265,7 @@ fn status_pid(port: u16) -> StatusPid {
 /// [`PROBE_TIMEOUT`], so one probe costs about a second at worst.
 fn exchange(port: u16, command: &str) -> Probe {
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    let mut stream = match TcpStream::connect_timeout(&address, PROBE_TIMEOUT) {
+    let mut stream = match TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) {
         Ok(stream) => stream,
         Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => return Probe::Refused,
         Err(_) => return Probe::Unknown,

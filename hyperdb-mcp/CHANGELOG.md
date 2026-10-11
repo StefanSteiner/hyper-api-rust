@@ -91,6 +91,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- On Windows a stale pre-1.0 daemon record whose port nobody serves is now removed. The probe gave up on the connect before Windows reported the refusal (about two seconds), treated the port as unknown, and kept the record, so the client stayed in local mode.
 - `query` results now render `BYTES` as a `\x`-prefixed lowercase hex string and `TIME`/`INTERVAL` as their text form instead of null/garbage from the string fallback.
 - The stdio server now answers Claude Code's opening `server/discover` probe with `-32601 Method not found`, so the client falls back to `initialize` instead of failing with "Server's protocol version is not supported: 2026-07-28". Previously rmcp either served the probe, locking the session into the stateless `2026-07-28` lifecycle, or rejected it with `-32022`.
 - **Version takeover starts the new daemon reliably.** A newer client used to
